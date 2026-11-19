@@ -4,8 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(() => {
-  const base = process.env.VITE_BASE_PATH || '/';
+export default defineConfig(({command}) => {
+  const base = process.env.VITE_BASE_PATH || (command === 'build' ? './' : '/');
   return {
     base,
     plugins: [

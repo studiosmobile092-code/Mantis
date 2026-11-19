@@ -31,9 +31,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build static Mantis site for /mantis-ai/
+      - name: Build static Mantis site for GitHub Pages
         env:
-          VITE_BASE_PATH: /mantis-ai/
+          VITE_BASE_PATH: ./
         run: npm run build
 
       - name: Upload Pages artifact

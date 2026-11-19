@@ -9,18 +9,18 @@ Hosting: **GitHub Pages (`mantis-ai`)** • Persistence: **Supabase (Publishable
 ## Phase 1 — Foundation (Web + Memory)
 
 ### Step 1.1 — Project Setup, Secret Hygiene & GitHub Pages Config
-- **Status**: Completed
+- **Status**: Completed (Updated for any repo name including `/Mantis/`)
 - **Summary**:
   - Updated `metadata.json`, `index.html`, and `src/index.css` with Mantis branding, `Plus Jakarta Sans` + `JetBrains Mono` typography, and high-contrast dark slate theme.
   - Verified `.gitignore` blocks `.env*` and kept `.env.example` free of any secret keys or Hugging Face tokens.
-  - Added `VITE_BASE_PATH` support in `vite.config.ts` and created `.github/workflows/deploy.yml` for automated GitHub Pages deployment to `/mantis-ai/`.
+  - Configured `vite.config.ts` (`base: './'` on build) and `.github/workflows/deploy.yml` so GitHub Pages deploys cleanly under any repository name (`/Mantis/`, `/mantis-ai/`, etc.) when GitHub Pages Source is set to **GitHub Actions**.
 - **Verification**: `npm run build` and `npm run lint` pass cleanly.
 
-### Step 1.2 — Supabase Database Schema & Row Level Security
-- **Status**: Ready for User Execution
+### Step 1.2 — Supabase Database Schema, Grants & Row Level Security
+- **Status**: Updated (`GRANT` fix added — Re-run SQL in Supabase)
 - **Summary**:
-  - Created `supabase/schema.sql` defining `knowledge_folders`, `knowledge_entries`, and `chat_messages` with strict Postgres RLS (`auth.uid() = user_id`).
-- **Verification**: Paste `supabase/schema.sql` into your Supabase SQL Editor and run it once, then verify in the Mantis **Settings** tab using **Test Connection**.
+  - Updated `supabase/schema.sql` with explicit `GRANT USAGE ON SCHEMA public` and `GRANT SELECT, INSERT, UPDATE, DELETE` for the `authenticated` role on `knowledge_folders`, `knowledge_entries`, and `chat_messages` (fixing `permission denied for table knowledge_folders`).
+- **Verification**: Run the updated SQL in Supabase SQL Editor and tap **Verify Tables** in Mantis.
 
 ### Step 1.3 — Dark UI Shell & Single-User Supabase Auth Gate
 - **Status**: Completed

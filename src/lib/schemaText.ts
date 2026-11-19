@@ -89,4 +89,13 @@ create policy "Users manage own chat messages"
   for all
   to authenticated
   using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);`;
+  with check (auth.uid() = user_id);
+
+-- 4. Explicit Postgres privileges (required before RLS is evaluated)
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on table
+  public.knowledge_folders,
+  public.knowledge_entries,
+  public.chat_messages
+  to authenticated;
+grant usage, select on all sequences in schema public to authenticated;`;

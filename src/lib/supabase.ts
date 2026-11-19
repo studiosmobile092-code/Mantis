@@ -24,7 +24,9 @@ export function isMissingTableError(error: {code?: string; message?: string} | n
   return (
     code === '42P01' ||
     code === 'PGRST205' ||
+    code === '42501' ||
     msg.includes('could not find the table') ||
-    msg.includes('does not exist')
+    msg.includes('does not exist') ||
+    msg.includes('permission denied for table')
   );
 }

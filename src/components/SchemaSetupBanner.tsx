@@ -26,15 +26,17 @@ export function SchemaSetupBanner({onRetry, isChecking}: SchemaSetupBannerProps)
         <div className="space-y-1.5">
           <div className="flex items-center gap-2 text-sm font-semibold text-amber-300">
             <Database className="h-4 w-4 shrink-0" />
-            <span>One-Time Supabase Table Setup Needed</span>
+            <span>Supabase Table Setup or Permission Grant Needed</span>
           </div>
           <p className="max-w-2xl text-sm leading-relaxed text-slate-300">
             Your Supabase account connected, but the Phase 1 tables (
             <code className="font-mono text-xs text-slate-100">knowledge_folders</code>,{' '}
             <code className="font-mono text-xs text-slate-100">knowledge_entries</code>,{' '}
-            <code className="font-mono text-xs text-slate-100">chat_messages</code>) do not exist
-            yet. Copy the SQL script below, paste it into your Supabase SQL Editor, run it once, and
-            tap <strong>Verify Tables</strong>.
+            <code className="font-mono text-xs text-slate-100">chat_messages</code>) either do not
+            exist yet or are missing <code className="font-mono text-xs text-slate-100">GRANT</code>{' '}
+            privileges for the <code className="font-mono text-xs text-slate-100">authenticated</code>{' '}
+            role. Copy and run the updated SQL below once in Supabase SQL Editor, then tap{' '}
+            <strong>Verify Tables</strong>.
           </p>
         </div>
 
