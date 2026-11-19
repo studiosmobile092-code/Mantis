@@ -1,32 +1,30 @@
-import {ArrowUpRight, BookmarkPlus, Send, Trash2} from 'lucide-react';
+import {ArrowUpRight, BookmarkPlus, FileCode2, Send, Trash2} from 'lucide-react';
 import {type FormEvent, useEffect, useMemo, useRef, useState} from 'react';
-import type {ChatMessage, KnowledgeEntry} from '../types/mantis';
+import type {ChatMessage, GitHubConnection, KnowledgeEntry} from '../types/mantis';
 
 interface ChatWorkspaceProps {
   messages: ChatMessage[];
   entries: KnowledgeEntry[];
+  connection: GitHubConnection | null;
   isLoading: boolean;
   isSending: boolean;
   onSendMessage: (prompt: string) => Promise<void>;
   onClearChat: () => Promise<void>;
   onInspectEntry: (entryId: string) => void;
+  onInspectRepoFile: (filePath: string) => void;
   onSaveTextToTeach: (suggestedTitle: string, content: string) => void;
 }
-
-const QUICK_PROMPTS = [
-  'What have I taught you so far?',
-  '/teach Coding Rule :: Keep secret keys out of frontend code',
-  '/search supabase',
-];
 
 export function ChatWorkspace({
   messages,
   entries,
+  connection,
   isLoading,
   isSending,
   onSendMessage,
   onClearChat,
   onInspectEntry,
+  onInspectRepoFile,
   onSaveTextToTeach,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState('');
@@ -38,6 +36,18 @@ export function ChatWorkspace({
     () => new Map<string, KnowledgeEntry>(entries.map((e) => [e.id, e])),
     [entries],
   );
+
+  const quickPrompts = useMemo(() => {
+    const base = [
+      'What have I taught you so far?',
+      '/teach Coding Rule :: Keep secret keys out of frontend code',
+      '/search supabase',
+    ];
+    if (connection) {
+      base.push('/repo App.tsx');
+    }
+    return base;
+  }, [connection]);
 
   useEffect(() => {
     scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
@@ -76,8 +86,9 @@ export function ChatWorkspace({
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-slate-100">Chat / Work</h1>
           <p className="text-sm text-slate-400">
-            Memory-retrieval workspace. Ask about saved patterns, run{' '}
-            <code className="font-mono text-xs text-slate-200">/search</code>, or save notes with{' '}
+            Searches your Knowledge folders{connection ? ` and ${connection.owner}/${connection.repo}` : ''}.
+            Use <code className="font-mono text-xs text-slate-200">/search</code>,{' '}
+            <code className="font-mono text-xs text-slate-200">/repo</code>, or{' '}
             <code className="font-mono text-xs text-slate-200">/teach Title :: Note</code>.
           </p>
         </div>
@@ -131,15 +142,15 @@ export function ChatWorkspace({
           <div className="flex min-h-[280px] flex-col items-center justify-center space-y-4 text-center">
             <div className="space-y-1.5">
               <h2 className="text-sm font-semibold text-slate-200">
-                Mantis Memory Chat Ready
+                Mantis Memory &amp; Repo Chat Ready
               </h2>
               <p className="max-w-md text-xs leading-relaxed text-slate-400">
-                Messages are persisted in Supabase so nothing is lost when you switch tabs or
-                devices. Try a prompt below or ask about anything stored in your Knowledge folders.
+                Ask about your saved knowledge notes or any indexed file in your connected GitHub
+                repository. Conversations persist in Supabase across devices.
               </p>
             </div>
             <div className="flex flex-wrap justify-center gap-2">
-              {QUICK_PROMPTS.map((prompt) => (
+              {quickPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
@@ -158,6 +169,7 @@ export function ChatWorkspace({
               const citedEntries = (msg.cited_entry_ids || [])
                 .map((id) => entryMap.get(id))
                 .filter((e): e is KnowledgeEntry => Boolean(e));
+              const citedRepoPaths = msg.cited_repo_paths || [];
 
               return (
                 <div
@@ -170,7 +182,11 @@ export function ChatWorkspace({
                 >
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
-                      <span className={isUser ? 'font-semibold text-slate-200' : 'font-semibold text-emerald-400'}>
+                      <span
+                        className={
+                          isUser ? 'font-semibold text-slate-200' : 'font-semibold text-emerald-400'
+                        }
+                      >
                         {isUser ? 'You' : 'Mantis'}
                       </span>
                       <span aria-hidden="true">·</span>
@@ -185,9 +201,7 @@ export function ChatWorkspace({
                     {isUser && !msg.content.startsWith('/teach') && (
                       <button
                         type="button"
-                        onClick={() =>
-                          onSaveTextToTeach(msg.content.slice(0, 60), msg.content)
-                        }
+                        onClick={() => onSaveTextToTeach(msg.content.slice(0, 60), msg.content)}
                         className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-700/60 hover:text-slate-100"
                       >
                         <BookmarkPlus className="h-3.5 w-3.5" />
@@ -200,7 +214,7 @@ export function ChatWorkspace({
                     {msg.content}
                   </div>
 
-                  {citedEntries.length > 0 && (
+                  {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
                     <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
                       <span className="font-mono text-xs text-slate-400">Sources:</span>
                       {citedEntries.map((cited) => (
@@ -212,6 +226,17 @@ export function ChatWorkspace({
                         >
                           <span>{cited.title}</span>
                           <ArrowUpRight className="h-3.5 w-3.5" />
+                        </button>
+                      ))}
+                      {citedRepoPaths.map((repoPath) => (
+                        <button
+                          key={repoPath}
+                          type="button"
+                          onClick={() => onInspectRepoFile(repoPath)}
+                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-xs text-sky-300 transition-colors hover:border-sky-500/50 hover:bg-slate-800"
+                        >
+                          <FileCode2 className="h-3.5 w-3.5" />
+                          <span>{repoPath}</span>
                         </button>
                       ))}
                     </div>
@@ -239,7 +264,7 @@ export function ChatWorkspace({
               void handleSubmit(e);
             }
           }}
-          placeholder="Ask Mantis from memory, or type /teach Title :: Details..."
+          placeholder="Ask about your Knowledge notes or connected GitHub repo..."
           className="min-h-[48px] flex-1 resize-y rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
         />
         <button

@@ -26,12 +26,43 @@ export interface ChatMessage {
   role: 'user' | 'mantis';
   content: string;
   cited_entry_ids: string[];
+  cited_repo_paths?: string[];
   created_at: string;
+}
+
+export interface GitHubConnection {
+  id: string;
+  user_id: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  description: string;
+  is_private: boolean;
+  last_synced_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RepoFile {
+  id: string;
+  user_id: string;
+  connection_id: string;
+  path: string;
+  size_bytes: number;
+  sha: string;
+  content: string;
+  updated_at: string;
 }
 
 export interface RetrievalMatch {
   entry: KnowledgeEntry;
   folderName: string;
+  score: number;
+  reasons: string[];
+}
+
+export interface RepoMatch {
+  file: RepoFile;
   score: number;
   reasons: string[];
 }
@@ -42,5 +73,6 @@ export interface MemoryReadinessMetrics {
   substantiveCount: number;
   taggedCount: number;
   conversationTurns: number;
+  repoFileCount: number;
   readinessScore: number;
 }

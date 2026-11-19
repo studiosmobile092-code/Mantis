@@ -2,42 +2,50 @@
 
 Specification: **Mantis Web-First Personal Coding AI Agent**
 Primary Device: **Galaxy Tab A9 / A9+ (8 GB RAM, Android 16)** • Secondary: **Chromebook (Browser-Only)**
-Hosting: **GitHub Pages (`mantis-ai`)** • Persistence: **Supabase (Publishable Key + Auth + RLS)**
+Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + RLS)**
 
 ---
 
-## Phase 1 — Foundation (Web + Memory)
+## Phase 1 — Foundation (Web + Memory) — Verified in Preview
 
-### Step 1.1 — Project Setup, Secret Hygiene & GitHub Pages Config
-- **Status**: Completed (Updated for any repo name including `/Mantis/`)
-- **Summary**:
-  - Updated `metadata.json`, `index.html`, and `src/index.css` with Mantis branding, `Plus Jakarta Sans` + `JetBrains Mono` typography, and high-contrast dark slate theme.
-  - Verified `.gitignore` blocks `.env*` and kept `.env.example` free of any secret keys or Hugging Face tokens.
-  - Configured `vite.config.ts` (`base: './'` on build) and `.github/workflows/deploy.yml` so GitHub Pages deploys cleanly under any repository name (`/Mantis/`, `/mantis-ai/`, etc.) when GitHub Pages Source is set to **GitHub Actions**.
-- **Verification**: `npm run build` and `npm run lint` pass cleanly.
+- **Step 1.1**: Dark tablet-ready UI shell, secret hygiene (`.gitignore` + `.env.example`), and relative Vite build paths (`base: './'`).
+- **Step 1.2**: Phase 1 Supabase schema (`knowledge_folders`, `knowledge_entries`, `chat_messages`) with explicit `GRANT` privileges and Postgres RLS (`auth.uid() = user_id`).
+- **Step 1.3**: Single-user Supabase Auth gate (Sign In / Create Account).
+- **Step 1.4**: Starter folder seeding, `TeachPanel`, and `KnowledgeBrowser` verified in preview.
+- **Step 1.5**: Memory-retrieval Chat (`ChatWorkspace`) verified in preview.
 
-### Step 1.2 — Supabase Database Schema, Grants & Row Level Security
-- **Status**: Updated (`GRANT` fix added — Re-run SQL in Supabase)
-- **Summary**:
-  - Updated `supabase/schema.sql` with explicit `GRANT USAGE ON SCHEMA public` and `GRANT SELECT, INSERT, UPDATE, DELETE` for the `authenticated` role on `knowledge_folders`, `knowledge_entries`, and `chat_messages` (fixing `permission denied for table knowledge_folders`).
-- **Verification**: Run the updated SQL in Supabase SQL Editor and tap **Verify Tables** in Mantis.
+---
 
-### Step 1.3 — Dark UI Shell & Single-User Supabase Auth Gate
+## Phase 2 — Teaching & GitHub Awareness
+
+### Step 2.1 — Fix GitHub Pages Build Failure
 - **Status**: Completed
 - **Summary**:
-  - Built the clean dark Mantis Top Bar, responsive tablet-friendly navigation (`Chat / Work`, `Knowledge`, `Teach`, `GitHub`, `Settings`), and `AuthGate` supporting email/password sign-in and first-time account creation using only `sb_publishable_...`.
-- **Verification**: Open the web app on your Galaxy Tab A9/A9+ browser, create your account or sign in, and confirm the Top Bar displays `Connected`.
+  - Removed `cache: npm` and replaced `npm ci` with conditional `npm ci` / `npm install` in `.github/workflows/deploy.yml` (fixing the GitHub Actions failure caused by the absence of `package-lock.json`).
+  - Retained relative `./` build paths (`VITE_BASE_PATH: ./`) so `studiosmobile092-code.github.io/Mantis/` resolves assets cleanly when GitHub Pages **Source** is set to **GitHub Actions**.
+- **Verification**: `npm run build` and `npm run lint` pass cleanly; GitHub Actions workflow builds without requiring `package-lock.json`.
 
-### Step 1.4 — Persistent Knowledge Storage, Starter Folders & Teach Flow
+### Step 2.2 — Phase 2 Supabase Migration (`github_connections` & `repo_files`)
+- **Status**: Ready for User Execution
+- **Summary**:
+  - Created `supabase/schema_phase2.sql` adding `github_connections`, `repo_files`, `chat_messages.cited_repo_paths`, RLS policies, and `authenticated` table `GRANT` privileges.
+- **Verification**: Run `supabase/schema_phase2.sql` (or copy it from the **GitHub** / **Settings** tab) once in your Supabase SQL Editor, then tap **Verify Phase 2 Tables**.
+
+### Step 2.3 — Enhanced Teach Flow & Folder Organization
 - **Status**: Completed
 - **Summary**:
-  - Built `KnowledgeBrowser` (folder filtering, live search across titles/tags/content, new folder creation, inline edit/delete) and `TeachPanel` (structured knowledge entry form).
-  - Automatically seeds starter folders (`Architecture`, `Patterns`, `Debugging`, `Preferences`) on first login if none exist.
-- **Verification**: Open **Teach**, save a coding note, open **Knowledge**, and refresh the browser tab to verify the note persists in Supabase.
+  - Added Quick-Teach templates (`Coding Rule`, `Bug Fix`, `Code Snippet`, `Architecture Note`) and clickable tag suggestions in `TeachPanel`.
+  - Added safe folder removal (moving notes to `Uncategorized` without deleting data) in `KnowledgeBrowser`.
+- **Verification**: Open **Teach**, tap a template, save an entry, and verify folder organization in **Knowledge**.
 
-### Step 1.5 — Memory-Retrieval Chat & Phase 1 Verification
-- **Status**: Completed (Awaiting User Tablet Verification)
+### Step 2.4 — Read-Only GitHub Repository Connector & Code Viewer
+- **Status**: Completed (Awaiting User Verification)
 - **Summary**:
-  - Built `ChatWorkspace` with persistent `chat_messages` history, deterministic RAG-style retrieval over your saved `knowledge_entries` with cited source links, `/teach` quick-save command, and one-tap **Save to Knowledge** from chat messages.
-  - Built `SettingsPanel` with connection diagnostics, inline `supabase/schema.sql` copy tool, honest Phase 1 progress metrics, and security verification.
-- **Verification**: Ask a question in **Chat / Work** matching a note you taught Mantis, confirm it cites the note, and confirm on your Galaxy Tab A9/A9+ before starting Phase 2.
+  - Built `src/lib/github.ts` and `GitHubPanel` supporting `owner/repo` or full GitHub URLs (plus optional session-only token for private repos), indexing up to 40 key source/config files into Supabase `repo_files` with a searchable file viewer and **Save File Note to Teach**.
+- **Verification**: Open **GitHub**, connect `studiosmobile092-code/Mantis`, and inspect indexed source files.
+
+### Step 2.5 — Repo-Aware Chat Retrieval
+- **Status**: Completed (Awaiting User Verification)
+- **Summary**:
+  - Upgraded `src/lib/memory.ts` and `ChatWorkspace` so Mantis searches and cites both your Knowledge notes and indexed GitHub repository files (including `/repo <query>`), with tappable source chips jumping directly to the file viewer.
+- **Verification**: Ask in **Chat / Work** about a file or symbol (e.g., `/repo TopBar` or `How does vite.config.ts set base?`) and confirm Mantis cites the matching repo file.

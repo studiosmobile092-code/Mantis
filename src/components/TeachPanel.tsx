@@ -1,12 +1,14 @@
-import {CheckCircle2, FolderPlus, PlusCircle} from 'lucide-react';
-import {type FormEvent, useState} from 'react';
+import {CheckCircle2, FolderPlus, PlusCircle, Sparkles} from 'lucide-react';
+import {type FormEvent, useMemo, useState} from 'react';
 import {parseTagsInput} from '../lib/memory';
-import type {KnowledgeFolder} from '../types/mantis';
+import type {KnowledgeEntry, KnowledgeFolder} from '../types/mantis';
 
 interface TeachPanelProps {
   folders: KnowledgeFolder[];
+  entries: KnowledgeEntry[];
   initialTitle?: string;
   initialContent?: string;
+  initialTags?: string;
   onSaveEntry: (payload: {
     title: string;
     content: string;
@@ -18,17 +20,56 @@ interface TeachPanelProps {
   onOpenKnowledge: () => void;
 }
 
+const TEACH_TEMPLATES: Array<{
+  label: string;
+  folderHint: string;
+  tags: string;
+  titlePrefix: string;
+  body: string;
+}> = [
+  {
+    label: 'Coding Rule',
+    folderHint: 'Preferences',
+    tags: 'rule, convention',
+    titlePrefix: 'Rule: ',
+    body: 'When writing code for this project, always...\n\nWhy:\n- ',
+  },
+  {
+    label: 'Bug Fix',
+    folderHint: 'Debugging',
+    tags: 'debugging, fix',
+    titlePrefix: 'Fix: ',
+    body: 'Symptom:\n\nRoot Cause:\n\nWorking Fix:\n',
+  },
+  {
+    label: 'Code Snippet',
+    folderHint: 'Patterns',
+    tags: 'snippet, pattern',
+    titlePrefix: 'Snippet: ',
+    body: '// Purpose:\n\n',
+  },
+  {
+    label: 'Architecture Note',
+    folderHint: 'Architecture',
+    tags: 'architecture, design',
+    titlePrefix: 'Architecture: ',
+    body: 'Decision:\n\nTrade-off:\n',
+  },
+];
+
 export function TeachPanel({
   folders,
+  entries,
   initialTitle = '',
   initialContent = '',
+  initialTags = '',
   onSaveEntry,
   onCreateFolder,
   onOpenKnowledge,
 }: TeachPanelProps) {
   const [title, setTitle] = useState(initialTitle);
   const [folderId, setFolderId] = useState<string>(folders[0]?.id || '');
-  const [tagsRaw, setTagsRaw] = useState('');
+  const [tagsRaw, setTagsRaw] = useState(initialTags);
   const [content, setContent] = useState(initialContent);
   const [isSaving, setIsSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
@@ -37,6 +78,43 @@ export function TeachPanel({
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+
+  const existingTags = useMemo(() => {
+    const freq = new Map<string, number>();
+    for (const entry of entries) {
+      for (const tag of entry.tags) {
+        freq.set(tag, (freq.get(tag) || 0) + 1);
+      }
+    }
+    return Array.from(freq.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([tag]) => tag);
+  }, [entries]);
+
+  function applyTemplate(tpl: (typeof TEACH_TEMPLATES)[number]) {
+    const matchedFolder = folders.find(
+      (f) => f.name.toLowerCase() === tpl.folderHint.toLowerCase(),
+    );
+    if (matchedFolder) {
+      setFolderId(matchedFolder.id);
+    }
+    if (!title.trim()) {
+      setTitle(tpl.titlePrefix);
+    }
+    setTagsRaw(tpl.tags);
+    if (!content.trim()) {
+      setContent(tpl.body);
+    }
+    setSavedNotice(null);
+    setErrorNotice(null);
+  }
+
+  function addSuggestedTag(tag: string) {
+    const current = parseTagsInput(tagsRaw);
+    if (current.includes(tag)) return;
+    setTagsRaw(current.length > 0 ? `${current.join(', ')}, ${tag}` : tag);
+  }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -94,6 +172,26 @@ export function TeachPanel({
           Store coding patterns, preferences, debugging fixes, or architecture notes in Supabase.
           Mantis retrieves and cites these entries in Chat / Work.
         </p>
+      </div>
+
+      {/* Phase 2 Quick-Teach Templates */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
+          <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+          <span>Quick-Teach Templates (optional starter structure)</span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {TEACH_TEMPLATES.map((tpl) => (
+            <button
+              key={tpl.label}
+              type="button"
+              onClick={() => applyTemplate(tpl)}
+              className="min-h-[40px] rounded-md border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:bg-slate-800"
+            >
+              {tpl.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <form
@@ -170,7 +268,7 @@ export function TeachPanel({
           </div>
         </div>
 
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <label htmlFor="teach-tags" className="block text-xs font-medium text-slate-300">
             Tags (comma-separated, optional)
           </label>
@@ -182,6 +280,21 @@ export function TeachPanel({
             placeholder="e.g. supabase, auth, typescript, pattern"
             className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
           />
+          {existingTags.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+              <span>Quick tags:</span>
+              {existingTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => addSuggestedTag(tag)}
+                  className="rounded border border-slate-800 bg-[#0B1120] px-2 py-1 font-mono text-[11px] text-slate-300 hover:border-slate-700 hover:text-emerald-300"
+                >
+                  +{tag}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="space-y-1.5">

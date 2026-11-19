@@ -3,6 +3,8 @@ import type {
   KnowledgeEntry,
   KnowledgeFolder,
   MemoryReadinessMetrics,
+  RepoFile,
+  RepoMatch,
   RetrievalMatch,
 } from '../types/mantis';
 
@@ -49,6 +51,7 @@ const STOPWORDS = new Set([
   'of',
   'on',
   'or',
+  'repo',
   'so',
   'that',
   'the',
@@ -154,24 +157,85 @@ export function retrieveRelevantKnowledge(
   return scored.slice(0, limit);
 }
 
+export function retrieveRelevantRepoFiles(
+  query: string,
+  repoFiles: RepoFile[],
+  limit = 3,
+): RepoMatch[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const tokens = tokenizeQuery(query);
+  if (!normalizedQuery || repoFiles.length === 0) return [];
+
+  const scored: RepoMatch[] = [];
+
+  for (const file of repoFiles) {
+    const pathLower = file.path.toLowerCase();
+    const contentLower = file.content.toLowerCase();
+    let score = 0;
+    const reasons: string[] = [];
+
+    if (normalizedQuery.length >= 4 && pathLower.includes(normalizedQuery)) {
+      score += 8;
+      reasons.push('Exact path match');
+    }
+
+    const matchedPathTokens: string[] = [];
+    const matchedCodeTokens: string[] = [];
+
+    for (const token of tokens) {
+      if (pathLower.includes(token)) {
+        score += 3.5;
+        matchedPathTokens.push(token);
+      }
+      if (contentLower.includes(token)) {
+        score += 1.5;
+        matchedCodeTokens.push(token);
+      }
+    }
+
+    if (matchedPathTokens.length > 0) {
+      reasons.push(`Path (${matchedPathTokens.slice(0, 3).join(', ')})`);
+    }
+    if (matchedCodeTokens.length > 0 && reasons.length === 0) {
+      reasons.push(`Code (${matchedCodeTokens.slice(0, 3).join(', ')})`);
+    }
+
+    if (score > 0) {
+      scored.push({file, score, reasons});
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path));
+  return scored.slice(0, limit);
+}
+
+function extractMatchingSnippet(content: string, tokens: string[]): string {
+  const lines = content.split('\n');
+  if (tokens.length > 0) {
+    const idx = lines.findIndex((line) =>
+      tokens.some((tok) => line.toLowerCase().includes(tok)),
+    );
+    if (idx !== -1) {
+      const start = Math.max(0, idx - 2);
+      const end = Math.min(lines.length, idx + 6);
+      return lines.slice(start, end).join('\n').trim();
+    }
+  }
+  return lines.slice(0, 8).join('\n').trim();
+}
+
 export function buildMemoryReply(
   prompt: string,
   entries: KnowledgeEntry[],
   folders: KnowledgeFolder[],
-): {replyText: string; citedEntryIds: string[]} {
+  repoFiles: RepoFile[] = [],
+  connectedRepoLabel: string | null = null,
+): {replyText: string; citedEntryIds: string[]; citedRepoPaths: string[]} {
   const trimmed = prompt.trim();
   const lower = trimmed.toLowerCase();
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
 
-  if (entries.length === 0) {
-    return {
-      replyText:
-        'My persistent memory in Supabase is currently empty. Use the Teach tab (or type `/teach Title :: Details` here) to save your first coding rule, preference, or snippet—once stored, I will retrieve and cite it automatically.',
-      citedEntryIds: [],
-    };
-  }
-
-  // Handle overview / summary intent cleanly
+  // Overview / summary intent
   if (
     lower.includes('what have i taught') ||
     lower.includes('what do you know') ||
@@ -179,55 +243,114 @@ export function buildMemoryReply(
     lower.includes('show knowledge') ||
     lower === 'help'
   ) {
+    if (entries.length === 0 && repoFiles.length === 0) {
+      return {
+        replyText:
+          'My persistent memory in Supabase is empty and no GitHub repository is indexed yet. Use Teach (or `/teach Title :: Details`) to save knowledge, or connect a repo in the GitHub tab.',
+        citedEntryIds: [],
+        citedRepoPaths: [],
+      };
+    }
+
     const recent = entries.slice(0, 5);
-    const lines = recent.map((item) => {
+    const knowledgeLines = recent.map((item) => {
       const folderName = (item.folder_id && folderMap.get(item.folder_id)) || 'Uncategorized';
       return `- [${folderName}] ${item.title}`;
     });
-    return {
-      replyText: [
-        `I currently hold ${entries.length} knowledge ${entries.length === 1 ? 'entry' : 'entries'} across ${folders.length} ${folders.length === 1 ? 'folder' : 'folders'}. Most recently updated:`,
-        ...lines,
+
+    const parts = [
+      `I hold ${entries.length} knowledge ${entries.length === 1 ? 'entry' : 'entries'} across ${folders.length} folders${
+        connectedRepoLabel
+          ? ` and ${repoFiles.length} indexed files from ${connectedRepoLabel}`
+          : ''
+      }.`,
+    ];
+
+    if (knowledgeLines.length > 0) {
+      parts.push('', 'Recent knowledge entries:', ...knowledgeLines);
+    }
+    if (repoFiles.length > 0) {
+      parts.push(
         '',
-        'Ask about any topic in your notes, use `/search <keyword>`, or teach something new with `/teach Title :: Notes`.',
-      ].join('\n'),
+        'Sample indexed repo files:',
+        ...repoFiles.slice(0, 5).map((f) => `- ${f.path}`),
+      );
+    }
+    parts.push(
+      '',
+      'Ask any question, use `/search <topic>`, `/repo <filename or symbol>`, or `/teach Title :: Details`.',
+    );
+
+    return {
+      replyText: parts.join('\n'),
       citedEntryIds: recent.map((r) => r.id),
+      citedRepoPaths: repoFiles.slice(0, 3).map((f) => f.path),
     };
   }
 
-  const searchTerm = lower.startsWith('/search ') ? trimmed.slice(8).trim() : trimmed;
-  const matches = retrieveRelevantKnowledge(searchTerm, entries, folders, 4);
+  const isRepoOnly = lower.startsWith('/repo ');
+  const isMemoryOnly = lower.startsWith('/search ');
+  const searchTerm = isRepoOnly
+    ? trimmed.slice(6).trim()
+    : isMemoryOnly
+      ? trimmed.slice(8).trim()
+      : trimmed;
 
-  if (matches.length === 0) {
+  const knowledgeMatches = isRepoOnly
+    ? []
+    : retrieveRelevantKnowledge(searchTerm, entries, folders, 3);
+  const repoMatches = isMemoryOnly ? [] : retrieveRelevantRepoFiles(searchTerm, repoFiles, 3);
+
+  if (knowledgeMatches.length === 0 && repoMatches.length === 0) {
     return {
       replyText: [
-        `I searched all ${entries.length} entries in your Supabase memory for "${searchTerm}", and did not find a match yet.`,
+        `I searched ${entries.length} knowledge entries${
+          repoFiles.length > 0 ? ` and ${repoFiles.length} indexed repo files` : ''
+        } for "${searchTerm}", and did not find a match yet.`,
         '',
-        'Phase 1 runs in Memory-Retrieval mode (no external LLM API connected yet). If you know the answer or preference you want me to remember for next time, save it via the Teach tab or send:',
-        `/teach ${searchTerm.slice(0, 48)} :: Your note or code snippet here`,
+        'Save a new rule with `/teach Title :: Details` or index your GitHub repository in the GitHub tab.',
       ].join('\n'),
       citedEntryIds: [],
+      citedRepoPaths: [],
     };
   }
 
-  const sections = matches.map((match, idx) => {
-    const snippet =
-      match.entry.content.length > 360
-        ? `${match.entry.content.slice(0, 360).trim()}...`
-        : match.entry.content.trim();
-    const tagsText = match.entry.tags.length > 0 ? ` · Tags: ${match.entry.tags.join(', ')}` : '';
-    return `${idx + 1}. ${match.entry.title} [${match.folderName}${tagsText}]\n${snippet}`;
-  });
+  const tokens = tokenizeQuery(searchTerm);
+  const output: string[] = [];
+
+  if (knowledgeMatches.length > 0) {
+    output.push(
+      `Knowledge memory matches (${knowledgeMatches.length}):`,
+      ...knowledgeMatches.map((match, idx) => {
+        const snippet =
+          match.entry.content.length > 320
+            ? `${match.entry.content.slice(0, 320).trim()}...`
+            : match.entry.content.trim();
+        const tagsText =
+          match.entry.tags.length > 0 ? ` · Tags: ${match.entry.tags.join(', ')}` : '';
+        return `${idx + 1}. ${match.entry.title} [${match.folderName}${tagsText}]\n${snippet}`;
+      }),
+    );
+  }
+
+  if (repoMatches.length > 0) {
+    if (output.length > 0) output.push('');
+    output.push(
+      `GitHub repository references${connectedRepoLabel ? ` (${connectedRepoLabel})` : ''}:`,
+      ...repoMatches.map((match, idx) => {
+        const excerpt = extractMatchingSnippet(match.file.content, tokens);
+        const clipped = excerpt.length > 340 ? `${excerpt.slice(0, 340)}...` : excerpt;
+        return `${idx + 1}. ${match.file.path} (${match.reasons.join(', ')})\n${clipped}`;
+      }),
+    );
+  }
+
+  output.push('', 'Tap any source chip below to inspect the full Knowledge note or GitHub file.');
 
   return {
-    replyText: [
-      `Found ${matches.length} relevant ${matches.length === 1 ? 'entry' : 'entries'} in your Mantis memory:`,
-      '',
-      ...sections,
-      '',
-      'Tap any cited note below to open or edit it in the Knowledge browser.',
-    ].join('\n'),
-    citedEntryIds: matches.map((m) => m.entry.id),
+    replyText: output.join('\n'),
+    citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
+    citedRepoPaths: repoMatches.map((r) => r.file.path),
   };
 }
 
@@ -235,23 +358,21 @@ export function computeMemoryReadiness(
   entries: KnowledgeEntry[],
   folders: KnowledgeFolder[],
   messages: ChatMessage[],
+  repoFiles: RepoFile[] = [],
 ): MemoryReadinessMetrics {
   const entryCount = entries.length;
   const folderCount = folders.length;
   const substantiveCount = entries.filter((e) => e.content.trim().length >= 25).length;
   const taggedCount = entries.filter((e) => e.tags.length > 0).length;
   const conversationTurns = messages.filter((m) => m.role === 'user').length;
+  const repoFileCount = repoFiles.length;
 
-  // Honest, bounded, non-gameable Phase 1 memory progress (0–100):
-  // - Up to 50 pts for substantive knowledge entries (25 entries = 50 pts)
-  // - Up to 20 pts for organized folders in use (4+ folders = 20 pts)
-  // - Up to 15 pts for tagged entries (15 tagged entries = 15 pts)
-  // - Up to 15 pts for memory-grounded conversations (15 turns = 15 pts)
   const usedFolderIds = new Set(entries.map((e) => e.folder_id).filter(Boolean));
-  const entryPoints = Math.min(50, substantiveCount * 2);
-  const folderPoints = Math.min(20, usedFolderIds.size * 5);
+  const entryPoints = Math.min(45, substantiveCount * 2);
+  const folderPoints = Math.min(15, usedFolderIds.size * 4);
   const tagPoints = Math.min(15, taggedCount);
-  const chatPoints = Math.min(15, conversationTurns);
+  const chatPoints = Math.min(10, conversationTurns);
+  const repoPoints = Math.min(15, Math.floor(repoFileCount / 2));
 
   return {
     entryCount,
@@ -259,7 +380,8 @@ export function computeMemoryReadiness(
     substantiveCount,
     taggedCount,
     conversationTurns,
-    readinessScore: Math.round(entryPoints + folderPoints + tagPoints + chatPoints),
+    repoFileCount,
+    readinessScore: Math.round(entryPoints + folderPoints + tagPoints + chatPoints + repoPoints),
   };
 }
 

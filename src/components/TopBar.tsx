@@ -6,6 +6,7 @@ interface TopBarProps {
   onSelectArea: (area: AreaId) => void;
   statusLabel: string;
   knowledgeCount: number;
+  repoFileCount: number;
   readinessScore: number;
   isSyncing: boolean;
   onSync: () => void;
@@ -24,6 +25,7 @@ export function TopBar({
   onSelectArea,
   statusLabel,
   knowledgeCount,
+  repoFileCount,
   readinessScore,
   isSyncing,
   onSync,
@@ -71,6 +73,12 @@ export function TopBar({
               <span className="text-slate-200">{statusLabel}</span>
               <span aria-hidden="true">/</span>
               <span className="tabular-nums">{knowledgeCount} notes</span>
+              {repoFileCount > 0 && (
+                <>
+                  <span aria-hidden="true">/</span>
+                  <span className="tabular-nums">{repoFileCount} files</span>
+                </>
+              )}
               <span aria-hidden="true">/</span>
               <span className="tabular-nums">Score {readinessScore}</span>
             </div>

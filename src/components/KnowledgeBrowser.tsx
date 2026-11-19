@@ -20,6 +20,7 @@ interface KnowledgeBrowserProps {
   highlightedEntryId: string | null;
   onClearHighlight: () => void;
   onCreateFolder: (name: string, description: string) => Promise<KnowledgeFolder | null>;
+  onDeleteFolder: (folderId: string) => Promise<boolean>;
   onUpdateEntry: (
     id: string,
     payload: {title: string; content: string; folderId: string | null; tags: string[]},
@@ -35,6 +36,7 @@ export function KnowledgeBrowser({
   highlightedEntryId,
   onClearHighlight,
   onCreateFolder,
+  onDeleteFolder,
   onUpdateEntry,
   onDeleteEntry,
   onOpenTeach,
@@ -45,6 +47,7 @@ export function KnowledgeBrowser({
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderDesc, setNewFolderDesc] = useState('');
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -245,25 +248,64 @@ export function KnowledgeBrowser({
             const count = folderCounts.counts.get(folder.id) || 0;
             const isSelected = selectedFolderId === folder.id;
             return (
-              <button
-                key={folder.id}
-                type="button"
-                onClick={() => {
-                  setSelectedFolderId(folder.id);
-                  onClearHighlight();
-                }}
-                className={`flex min-h-[44px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors ${
-                  isSelected
-                    ? 'bg-slate-800 font-medium text-slate-100'
-                    : 'text-slate-300 hover:bg-slate-900'
-                }`}
-              >
-                <span className="flex items-center gap-2.5 truncate">
-                  <Folder className="h-4 w-4 shrink-0 text-emerald-400/80" />
-                  <span className="truncate">{folder.name}</span>
-                </span>
-                <span className="font-mono text-xs tabular-nums text-slate-400">{count}</span>
-              </button>
+              <div key={folder.id} className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedFolderId(folder.id);
+                    setConfirmDeleteFolderId(null);
+                    onClearHighlight();
+                  }}
+                  className={`flex min-h-[44px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                    isSelected
+                      ? 'bg-slate-800 font-medium text-slate-100'
+                      : 'text-slate-300 hover:bg-slate-900'
+                  }`}
+                >
+                  <span className="flex items-center gap-2.5 truncate">
+                    <Folder className="h-4 w-4 shrink-0 text-emerald-400/80" />
+                    <span className="truncate">{folder.name}</span>
+                  </span>
+                  <span className="font-mono text-xs tabular-nums text-slate-400">{count}</span>
+                </button>
+
+                {isSelected && folders.length > 1 && (
+                  <div className="px-2 pb-1">
+                    {confirmDeleteFolderId === folder.id ? (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const ok = await onDeleteFolder(folder.id);
+                            if (ok) {
+                              setConfirmDeleteFolderId(null);
+                              setSelectedFolderId('all');
+                            }
+                          }}
+                          className="min-h-[34px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+                        >
+                          Remove Folder
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteFolderId(null)}
+                          className="min-h-[34px] rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteFolderId(folder.id)}
+                        className="text-[11px] text-slate-500 hover:text-red-300"
+                      >
+                        Remove folder (keeps notes)
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
 

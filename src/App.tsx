@@ -2,15 +2,27 @@ import type {Session} from '@supabase/supabase-js';
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {AuthGate} from './components/AuthGate';
 import {ChatWorkspace} from './components/ChatWorkspace';
-import {GitHubPreview} from './components/GitHubPreview';
+import {GitHubPanel} from './components/GitHubPanel';
 import {KnowledgeBrowser} from './components/KnowledgeBrowser';
 import {SchemaSetupBanner} from './components/SchemaSetupBanner';
 import {SettingsPanel} from './components/SettingsPanel';
 import {TeachPanel} from './components/TeachPanel';
 import {TopBar} from './components/TopBar';
+import {
+  fetchGitHubFileContent,
+  fetchGitHubRepoMetadata,
+  fetchGitHubTreeFiles,
+} from './lib/github';
 import {STARTER_FOLDERS, buildMemoryReply, computeMemoryReadiness} from './lib/memory';
 import {isMissingTableError, supabase} from './lib/supabase';
-import type {AreaId, ChatMessage, KnowledgeEntry, KnowledgeFolder} from './types/mantis';
+import type {
+  AreaId,
+  ChatMessage,
+  GitHubConnection,
+  KnowledgeEntry,
+  KnowledgeFolder,
+  RepoFile,
+} from './types/mantis';
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -20,18 +32,26 @@ export default function App() {
   const [folders, setFolders] = useState<KnowledgeFolder[]>([]);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [connection, setConnection] = useState<GitHubConnection | null>(null);
+  const [repoFiles, setRepoFiles] = useState<RepoFile[]>([]);
 
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [isSendingChat, setIsSendingChat] = useState(false);
+  const [isSyncingRepo, setIsSyncingRepo] = useState(false);
+  const [syncProgressText, setSyncProgressText] = useState<string | null>(null);
+
   const [schemaMissing, setSchemaMissing] = useState(false);
+  const [phase2SchemaMissing, setPhase2SchemaMissing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
+  const [selectedRepoPath, setSelectedRepoPath] = useState<string | null>(null);
   const [teachPrefill, setTeachPrefill] = useState<{
     key: number;
     title: string;
     content: string;
-  }>({key: 0, title: '', content: ''});
+    tags: string;
+  }>({key: 0, title: '', content: '', tags: ''});
 
   useEffect(() => {
     let mounted = true;
@@ -59,10 +79,16 @@ export default function App() {
     setErrorBanner(null);
 
     try {
-      const [foldersRes, entriesRes, messagesRes] = await Promise.all([
+      const [foldersRes, entriesRes, messagesRes, connRes, filesRes] = await Promise.all([
         supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
         supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
         supabase.from('chat_messages').select('*').order('created_at', {ascending: true}),
+        supabase
+          .from('github_connections')
+          .select('*')
+          .order('updated_at', {ascending: false})
+          .limit(1),
+        supabase.from('repo_files').select('*').order('path', {ascending: true}),
       ]);
 
       if (
@@ -77,9 +103,9 @@ export default function App() {
         return;
       }
 
-      const firstError = foldersRes.error || entriesRes.error || messagesRes.error;
-      if (firstError) {
-        setErrorBanner(firstError.message);
+      const phase1Error = foldersRes.error || entriesRes.error || messagesRes.error;
+      if (phase1Error) {
+        setErrorBanner(phase1Error.message);
         return;
       }
 
@@ -104,6 +130,24 @@ export default function App() {
       setFolders(loadedFolders);
       setEntries((entriesRes.data as KnowledgeEntry[]) || []);
       setMessages((messagesRes.data as ChatMessage[]) || []);
+
+      if (isMissingTableError(connRes.error) || isMissingTableError(filesRes.error)) {
+        setPhase2SchemaMissing(true);
+        setConnection(null);
+        setRepoFiles([]);
+      } else if (connRes.error || filesRes.error) {
+        setPhase2SchemaMissing(false);
+        setErrorBanner((connRes.error || filesRes.error)?.message || null);
+      } else {
+        setPhase2SchemaMissing(false);
+        const connList = (connRes.data as GitHubConnection[]) || [];
+        const activeConn = connList[0] || null;
+        setConnection(activeConn);
+        const allFiles = (filesRes.data as RepoFile[]) || [];
+        setRepoFiles(
+          activeConn ? allFiles.filter((f) => f.connection_id === activeConn.id) : [],
+        );
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Unable to reach Supabase');
     } finally {
@@ -118,14 +162,17 @@ export default function App() {
       setFolders([]);
       setEntries([]);
       setMessages([]);
+      setConnection(null);
+      setRepoFiles([]);
       setSchemaMissing(false);
+      setPhase2SchemaMissing(false);
       setErrorBanner(null);
     }
   }, [session, loadWorkspaceData]);
 
   const metrics = useMemo(
-    () => computeMemoryReadiness(entries, folders, messages),
-    [entries, folders, messages],
+    () => computeMemoryReadiness(entries, folders, messages, repoFiles),
+    [entries, folders, messages, repoFiles],
   );
 
   async function handleCreateFolder(
@@ -152,6 +199,21 @@ export default function App() {
     const created = data as KnowledgeFolder;
     setFolders((prev) => [...prev, created]);
     return created;
+  }
+
+  async function handleDeleteFolder(folderId: string): Promise<boolean> {
+    if (!session) return false;
+    setErrorBanner(null);
+    const {error} = await supabase.from('knowledge_folders').delete().eq('id', folderId);
+    if (error) {
+      setErrorBanner(error.message);
+      return false;
+    }
+    setFolders((prev) => prev.filter((f) => f.id !== folderId));
+    setEntries((prev) =>
+      prev.map((e) => (e.folder_id === folderId ? {...e, folder_id: null} : e)),
+    );
+    return true;
   }
 
   async function handleSaveEntry(payload: {
@@ -230,20 +292,163 @@ export default function App() {
     return true;
   }
 
+  async function handleConnectGitHubRepo(
+    owner: string,
+    repo: string,
+    branchOverride?: string,
+    token?: string,
+  ) {
+    if (!session) return;
+    setIsSyncingRepo(true);
+    setSyncProgressText(`Connecting to ${owner}/${repo}...`);
+    setErrorBanner(null);
+
+    try {
+      const meta = await fetchGitHubRepoMetadata(owner, repo, token);
+      const targetBranch = branchOverride || meta.defaultBranch;
+
+      setSyncProgressText(`Scanning file tree on branch "${targetBranch}"...`);
+      const treeFiles = await fetchGitHubTreeFiles(owner, repo, targetBranch, token, 40);
+
+      const downloaded: Array<{path: string; sha: string; size_bytes: number; content: string}> =
+        [];
+      const batchSize = 5;
+
+      for (let i = 0; i < treeFiles.length; i += batchSize) {
+        const batch = treeFiles.slice(i, i + batchSize);
+        setSyncProgressText(
+          `Indexing ${Math.min(i + batch.length, treeFiles.length)} / ${treeFiles.length} source files...`,
+        );
+        const results = await Promise.allSettled(
+          batch.map(async (f) => {
+            const content = await fetchGitHubFileContent(
+              owner,
+              repo,
+              targetBranch,
+              f.path,
+              meta.isPrivate,
+              token,
+            );
+            return {
+              path: f.path,
+              sha: f.sha,
+              size_bytes: f.size,
+              content,
+            };
+          }),
+        );
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            downloaded.push(r.value);
+          }
+        }
+      }
+
+      setSyncProgressText('Saving repository index to Supabase...');
+
+      // Remove existing connections for this user so one active repo stays clean
+      await supabase.from('github_connections').delete().eq('user_id', session.user.id);
+
+      const {data: newConn, error: connErr} = await supabase
+        .from('github_connections')
+        .insert({
+          user_id: session.user.id,
+          owner: meta.owner,
+          repo: meta.repo,
+          branch: targetBranch,
+          description: meta.description,
+          is_private: meta.isPrivate,
+          last_synced_at: new Date().toISOString(),
+        })
+        .select('*')
+        .single();
+
+      if (connErr) {
+        throw new Error(connErr.message);
+      }
+
+      const createdConn = newConn as GitHubConnection;
+      let savedFiles: RepoFile[] = [];
+
+      if (downloaded.length > 0) {
+        const rows = downloaded.map((item) => ({
+          user_id: session.user.id,
+          connection_id: createdConn.id,
+          path: item.path,
+          size_bytes: item.size_bytes,
+          sha: item.sha,
+          content: item.content,
+        }));
+        const {data: insertedFiles, error: filesErr} = await supabase
+          .from('repo_files')
+          .insert(rows)
+          .select('*');
+        if (filesErr) {
+          throw new Error(filesErr.message);
+        }
+        savedFiles = ((insertedFiles as RepoFile[]) || []).sort((a, b) =>
+          a.path.localeCompare(b.path),
+        );
+      }
+
+      setConnection(createdConn);
+      setRepoFiles(savedFiles);
+      setSelectedRepoPath(savedFiles[0]?.path || null);
+      setSyncProgressText(
+        `Indexed ${savedFiles.length} files from ${createdConn.owner}/${createdConn.repo} (${createdConn.branch}).`,
+      );
+    } finally {
+      setIsSyncingRepo(false);
+    }
+  }
+
+  async function handleResyncGitHubRepo(token?: string) {
+    if (!connection) return;
+    try {
+      await handleConnectGitHubRepo(connection.owner, connection.repo, connection.branch, token);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Unable to re-sync repository.');
+    }
+  }
+
+  async function handleDisconnectGitHubRepo() {
+    if (!session || !connection) return;
+    setIsSyncingRepo(true);
+    setErrorBanner(null);
+    try {
+      const {error} = await supabase.from('github_connections').delete().eq('id', connection.id);
+      if (error) {
+        setErrorBanner(error.message);
+        return;
+      }
+      setConnection(null);
+      setRepoFiles([]);
+      setSelectedRepoPath(null);
+      setSyncProgressText(null);
+    } finally {
+      setIsSyncingRepo(false);
+    }
+  }
+
   async function handleSendChatMessage(prompt: string) {
     if (!session) return;
     setIsSendingChat(true);
     setErrorBanner(null);
 
     try {
+      const userInsertPayload: Record<string, unknown> = {
+        user_id: session.user.id,
+        role: 'user',
+        content: prompt,
+        cited_entry_ids: [],
+      };
+      if (!phase2SchemaMissing) {
+        userInsertPayload.cited_repo_paths = [];
+      }
+
       const {data: userMsgData, error: userMsgErr} = await supabase
         .from('chat_messages')
-        .insert({
-          user_id: session.user.id,
-          role: 'user',
-          content: prompt,
-          cited_entry_ids: [],
-        })
+        .insert(userInsertPayload)
         .select('*')
         .single();
 
@@ -257,6 +462,7 @@ export default function App() {
 
       let replyText = '';
       let citedEntryIds: string[] = [];
+      let citedRepoPaths: string[] = [];
 
       if (prompt.toLowerCase().startsWith('/teach ')) {
         const rawBody = prompt.slice(7).trim();
@@ -298,19 +504,26 @@ export default function App() {
           }
         }
       } else {
-        const result = buildMemoryReply(prompt, entries, folders);
+        const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
+        const result = buildMemoryReply(prompt, entries, folders, repoFiles, repoLabel);
         replyText = result.replyText;
         citedEntryIds = result.citedEntryIds;
+        citedRepoPaths = result.citedRepoPaths;
+      }
+
+      const mantisInsertPayload: Record<string, unknown> = {
+        user_id: session.user.id,
+        role: 'mantis',
+        content: replyText,
+        cited_entry_ids: citedEntryIds,
+      };
+      if (!phase2SchemaMissing) {
+        mantisInsertPayload.cited_repo_paths = citedRepoPaths;
       }
 
       const {data: mantisMsgData, error: mantisMsgErr} = await supabase
         .from('chat_messages')
-        .insert({
-          user_id: session.user.id,
-          role: 'mantis',
-          content: replyText,
-          cited_entry_ids: citedEntryIds,
-        })
+        .insert(mantisInsertPayload)
         .select('*')
         .single();
 
@@ -369,6 +582,7 @@ export default function App() {
         onSelectArea={setActiveArea}
         statusLabel={statusLabel}
         knowledgeCount={entries.length}
+        repoFileCount={repoFiles.length}
         readinessScore={metrics.readinessScore}
         isSyncing={isLoadingData}
         onSync={() => void loadWorkspaceData(session)}
@@ -402,6 +616,7 @@ export default function App() {
           <ChatWorkspace
             messages={messages}
             entries={entries}
+            connection={connection}
             isLoading={isLoadingData}
             isSending={isSendingChat}
             onSendMessage={handleSendChatMessage}
@@ -410,11 +625,16 @@ export default function App() {
               setHighlightedEntryId(entryId);
               setActiveArea('knowledge');
             }}
+            onInspectRepoFile={(repoPath) => {
+              setSelectedRepoPath(repoPath);
+              setActiveArea('github');
+            }}
             onSaveTextToTeach={(suggestedTitle, content) => {
               setTeachPrefill({
                 key: Date.now(),
                 title: suggestedTitle,
                 content,
+                tags: '',
               });
               setActiveArea('teach');
             }}
@@ -429,6 +649,7 @@ export default function App() {
             highlightedEntryId={highlightedEntryId}
             onClearHighlight={() => setHighlightedEntryId(null)}
             onCreateFolder={handleCreateFolder}
+            onDeleteFolder={handleDeleteFolder}
             onUpdateEntry={handleUpdateEntry}
             onDeleteEntry={handleDeleteEntry}
             onOpenTeach={() => setActiveArea('teach')}
@@ -439,21 +660,52 @@ export default function App() {
           <TeachPanel
             key={teachPrefill.key}
             folders={folders}
+            entries={entries}
             initialTitle={teachPrefill.title}
             initialContent={teachPrefill.content}
+            initialTags={teachPrefill.tags}
             onSaveEntry={handleSaveEntry}
             onCreateFolder={handleCreateFolder}
             onOpenKnowledge={() => setActiveArea('knowledge')}
           />
         )}
 
-        {activeArea === 'github' && <GitHubPreview />}
+        {activeArea === 'github' && (
+          <GitHubPanel
+            connection={connection}
+            repoFiles={repoFiles}
+            phase2SchemaMissing={phase2SchemaMissing}
+            isSyncingRepo={isSyncingRepo}
+            syncProgressText={syncProgressText}
+            selectedFilePath={selectedRepoPath}
+            onSelectFilePath={setSelectedRepoPath}
+            onVerifyPhase2Tables={() => void loadWorkspaceData(session)}
+            onConnectRepo={handleConnectGitHubRepo}
+            onResyncRepo={handleResyncGitHubRepo}
+            onDisconnectRepo={handleDisconnectGitHubRepo}
+            onSaveFileToTeach={(file) => {
+              const snippet =
+                file.content.length > 1500
+                  ? `${file.content.slice(0, 1500)}\n// ...`
+                  : file.content;
+              setTeachPrefill({
+                key: Date.now(),
+                title: `Repo note: ${file.path}`,
+                content: `From ${connection?.owner || ''}/${connection?.repo || ''} (${file.path}):\n\n${snippet}`,
+                tags: 'github, source',
+              });
+              setActiveArea('teach');
+            }}
+          />
+        )}
 
         {activeArea === 'settings' && (
           <SettingsPanel
             userEmail={session.user.email || 'Signed-in user'}
             metrics={metrics}
             schemaMissing={schemaMissing}
+            phase2SchemaMissing={phase2SchemaMissing}
+            connection={connection}
             onSignOut={handleSignOut}
           />
         )}
