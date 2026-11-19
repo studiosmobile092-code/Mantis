@@ -1,0 +1,6 @@
+{
+  "name": "Mantis",
+  "description": "Web-first personal coding AI agent with persistent Supabase memory and GitHub Pages dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
