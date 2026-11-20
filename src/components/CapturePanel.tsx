@@ -17,6 +17,7 @@ import {type ClipboardEvent, type FormEvent, useEffect, useRef, useState} from '
 import {
   distillWithAiBrain,
   extractUrlViaBrain,
+  normalizeExternalUrl,
   type DistilledKnowledgeItem,
 } from '../lib/aiBrain';
 import {
@@ -303,8 +304,12 @@ export function CapturePanel({
 
   async function handleExtractUrlSubmit(event: FormEvent) {
     event.preventDefault();
-    const clean = targetUrl.trim();
-    if (!clean) return;
+    const clean = normalizeExternalUrl(targetUrl);
+    if (!clean) {
+      setErrorMessage('Paste a YouTube video URL or web article link first.');
+      return;
+    }
+    setTargetUrl(clean);
     setErrorMessage(null);
     setStatusMessage(null);
 
@@ -682,11 +687,14 @@ export function CapturePanel({
             </p>
             <div className="flex flex-col gap-2.5 sm:flex-row">
               <input
-                type="url"
-                required
+                type="text"
+                inputMode="url"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={targetUrl}
                 onChange={(e) => setTargetUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=... or https://docs..."
+                placeholder="https://www.youtube.com/watch?v=... or youtube.com/..."
                 className="min-h-[44px] flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
               />
               <button

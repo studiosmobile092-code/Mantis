@@ -13,6 +13,7 @@ import {
   DEFAULT_BRAIN_MODEL,
   askAiBrainChat,
   getLocalBrainConfig,
+  normalizeBrainUrl,
   setLocalBrainConfig,
   suggestCodeWithAiBrain,
   type DistilledKnowledgeItem,
@@ -446,17 +447,26 @@ export default function App() {
   }
 
   async function handleSaveBrainConfig(url: string, model: string, autoLearn: boolean) {
-    setBrainUrl(url);
+    const cleanUrl = normalizeBrainUrl(url);
+    setBrainUrl(cleanUrl);
     setBrainModel(model);
     setAutoLearnFromChat(autoLearn);
-    setLocalBrainConfig(url, model);
-    if (!session || phase5SchemaMissing) return;
-    await supabase.from('user_preferences').upsert({
-      user_id: session.user.id,
-      brain_url: url,
-      preferred_model: model,
-      auto_learn_from_chat: autoLearn,
-    });
+    setLocalBrainConfig(cleanUrl, model);
+    if (!session) return;
+    const {error} = await supabase.from('user_preferences').upsert(
+      {
+        user_id: session.user.id,
+        brain_url: cleanUrl,
+        preferred_model: model,
+        auto_learn_from_chat: autoLearn,
+      },
+      {onConflict: 'user_id'},
+    );
+    if (!error) {
+      setPhase5SchemaMissing(false);
+    } else if (isMissingTableError(error)) {
+      setPhase5SchemaMissing(true);
+    }
   }
 
   async function handleSaveCapturedEntries(
@@ -982,14 +992,42 @@ export default function App() {
           const matchedFile = repoFiles.find((f) =>
             f.path.toLowerCase().includes(targetQuery.toLowerCase()),
           );
-          const draft = matchedFile
+          const targetPath = matchedFile
+            ? matchedFile.path
+            : targetQuery.includes('.')
+              ? targetQuery
+              : 'src/lib/proposedHelper.ts';
+          let draft = matchedFile
             ? generateImprovementSuggestion(matchedFile, '', entries, folders)
-            : generateNewCodeSuggestion(
-                targetQuery.includes('.') ? targetQuery : 'src/lib/proposedHelper.ts',
-                targetQuery,
+            : generateNewCodeSuggestion(targetPath, targetQuery, entries, folders);
+
+          if (brainUrl.trim() && session.access_token) {
+            try {
+              const aiDraft = await suggestCodeWithAiBrain({
+                brainUrl,
+                accessToken: session.access_token,
+                model: brainModel,
+                filePath: targetPath,
+                originalContent: matchedFile?.content || '',
+                goal: matchedFile
+                  ? `Improve ${matchedFile.path} following saved Knowledge rules`
+                  : targetQuery,
                 entries,
                 folders,
-              );
+              });
+              if (aiDraft.proposedContent.trim()) {
+                draft = {
+                  ...draft,
+                  title: aiDraft.title,
+                  rationale: `${aiDraft.rationale} (AI Model: ${aiDraft.model})`,
+                  proposedContent: aiDraft.proposedContent,
+                };
+              }
+            } catch {
+              // Fallback cleanly to deterministic analyzer
+            }
+          }
+
           const created = await persistSuggestionDraft(draft);
           if (created) {
             if (matchedFile) {

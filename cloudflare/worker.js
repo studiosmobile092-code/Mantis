@@ -146,6 +146,37 @@ function extractYouTubeVideoId(rawUrl) {
   return null;
 }
 
+function extractBalancedJsonArray(source, startIndex) {
+  if (source[startIndex] !== '[') return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '[') {
+      depth += 1;
+    } else if (ch === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(startIndex, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
 async function extractYouTubeTranscript(url, videoId) {
   const pageRes = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
     headers: {
@@ -167,16 +198,16 @@ async function extractYouTubeTranscript(url, videoId) {
   const idx = html.indexOf(captionsMarker);
   if (idx === -1) {
     throw new Error(
-      'No public caption track found in YouTube page HTML (video may lack captions or YouTube blocked automated fetch). Try Live Screen Capture or Mic/Paste mode instead.',
+      'No public caption track found on this YouTube video (captions may be disabled or blocked). Try Live Screen Capture or Mic/Paste mode instead.',
     );
   }
 
-  const slice = html.slice(idx + captionsMarker.length);
-  const endBracket = slice.indexOf(']');
-  if (endBracket === -1) {
+  const arrayStart = html.indexOf('[', idx + captionsMarker.length);
+  const jsonSlice = arrayStart !== -1 ? extractBalancedJsonArray(html, arrayStart) : null;
+  if (!jsonSlice) {
     throw new Error('Could not parse YouTube caption track list.');
   }
-  const tracks = JSON.parse(slice.slice(0, endBracket + 1));
+  const tracks = JSON.parse(jsonSlice);
   if (!Array.isArray(tracks) || tracks.length === 0) {
     throw new Error('Caption track list is empty.');
   }
@@ -201,6 +232,10 @@ async function extractYouTubeTranscript(url, videoId) {
   while ((match = regex.exec(xml)) !== null) {
     const cleaned = decodeHtmlEntities(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     if (cleaned) lines.push(cleaned);
+  }
+
+  if (lines.length === 0) {
+    throw new Error('YouTube caption track returned empty text.');
   }
 
   return {
@@ -235,13 +270,19 @@ async function extractWebArticle(url) {
   const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : url;
 
-  const cleaned = raw
+  const articleMatch =
+    raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i) ||
+    raw.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+  const bodyHtml = articleMatch ? articleMatch[1] : raw;
+
+  const cleaned = bodyHtml
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
     .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
+    .replace(/<aside[\s\S]*?<\/aside>/gi, ' ')
     .replace(/<footer[\s\S]*?<\/footer>/gi, ' ')
-    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|section|article|br)>/gi, '\n')
+    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|section|article|pre|code|br)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
 
   const text = decodeHtmlEntities(cleaned)

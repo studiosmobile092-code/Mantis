@@ -1,6 +1,6 @@
 import {Check, Copy, Cpu, Database, GitBranch, LogOut, ShieldCheck, Wifi} from 'lucide-react';
-import {type FormEvent, useState} from 'react';
-import {BRAIN_MODEL_OPTIONS, testBrainConnection} from '../lib/aiBrain';
+import {type FormEvent, useEffect, useState} from 'react';
+import {BRAIN_MODEL_OPTIONS, normalizeBrainUrl, testBrainConnection} from '../lib/aiBrain';
 import {
   MANTIS_CLOUDFLARE_WORKER_JS,
   MANTIS_PHASE1_SCHEMA_SQL,
@@ -55,6 +55,18 @@ export function SettingsPanel({
   const [brainMessage, setBrainMessage] = useState<string | null>(null);
   const [showWorkerCode, setShowWorkerCode] = useState(false);
 
+  useEffect(() => {
+    setUrlDraft(brainUrl);
+  }, [brainUrl]);
+
+  useEffect(() => {
+    setModelDraft(brainModel);
+  }, [brainModel]);
+
+  useEffect(() => {
+    setAutoLearnDraft(autoLearnFromChat);
+  }, [autoLearnFromChat]);
+
   const maskedKey = `${SUPABASE_PUBLISHABLE_KEY.slice(0, 18)}...${SUPABASE_PUBLISHABLE_KEY.slice(-6)}`;
 
   async function handleTestConnection() {
@@ -91,7 +103,8 @@ export function SettingsPanel({
     event.preventDefault();
     setBrainStatus('testing');
     setBrainMessage(null);
-    const cleanUrl = urlDraft.trim().replace(/\/+$/, '');
+    const cleanUrl = normalizeBrainUrl(urlDraft);
+    setUrlDraft(cleanUrl);
     try {
       await onSaveBrainConfig(cleanUrl, modelDraft, autoLearnDraft);
       if (!cleanUrl) {
@@ -164,10 +177,14 @@ export function SettingsPanel({
             </label>
             <input
               id="brain-url"
-              type="url"
+              type="text"
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="https://mantis-brain.yourname.workers.dev"
+              placeholder="mantis.garrettwins3.workers.dev or https://..."
               className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
             />
           </div>
@@ -255,8 +272,9 @@ export function SettingsPanel({
               <ol className="list-inside list-decimal space-y-1 leading-relaxed text-slate-400">
                 <li>
                   Open <code className="font-mono text-slate-200">dash.cloudflare.com</code> →
-                  Workers &amp; Pages → Create → Create Worker → name it{' '}
-                  <code className="font-mono text-slate-200">mantis-brain</code> → Deploy.
+                  Workers &amp; Pages → <strong>Create application</strong> →{' '}
+                  <strong>Start with Hello World!</strong> (do <em>not</em> import the GitHub repo)
+                  → name it <code className="font-mono text-slate-200">mantis-brain</code> → Deploy.
                 </li>
                 <li>
                   Tap <strong>Edit code</strong>, replace everything with the copied Worker code

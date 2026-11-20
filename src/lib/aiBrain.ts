@@ -38,28 +38,58 @@ export function setLocalBrainConfig(brainUrl: string, model: string): void {
   }
 }
 
+export function normalizeExternalUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  return `https://${trimmed}`;
+}
+
 export function normalizeBrainUrl(raw: string): string {
-  return raw.trim().replace(/\/+$/, '');
+  return normalizeExternalUrl(raw).replace(/\/+$/, '');
 }
 
 export async function testBrainConnection(
   brainUrl: string,
 ): Promise<{ok: boolean; hasHfToken: boolean; defaultModel: string; latencyMs: number}> {
   const cleanUrl = normalizeBrainUrl(brainUrl);
-  if (!/^https?:\/\//i.test(cleanUrl)) {
-    throw new Error('Enter a valid https:// Cloudflare Worker URL.');
+  if (!cleanUrl) {
+    throw new Error('Enter your Cloudflare Worker URL (e.g. https://mantis-brain.yourname.workers.dev).');
+  }
+  try {
+    const parsed = new URL(cleanUrl);
+    if (!parsed.hostname.includes('.') && parsed.hostname !== 'localhost') {
+      throw new Error('Invalid host');
+    }
+  } catch {
+    throw new Error('Enter a valid Worker domain or URL (e.g. mantis.garrettwins3.workers.dev).');
   }
   const start = performance.now();
   const res = await fetch(`${cleanUrl}/health`);
   const latencyMs = Math.round(performance.now() - start);
+  const contentType = res.headers.get('content-type') || '';
   if (!res.ok) {
     throw new Error(`Worker health check returned HTTP ${res.status}.`);
   }
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      'This URL returned a webpage instead of the Mantis AI Brain Worker JSON. In Cloudflare, create a "Hello World" Worker (do not import the GitHub repo), paste the copied Worker Code, and Deploy.',
+    );
+  }
   const data = (await res.json()) as {
     ok?: boolean;
+    service?: string;
     hasHfToken?: boolean;
     defaultModel?: string;
   };
+  if (data.service !== 'mantis-ai-brain') {
+    throw new Error('URL responded, but it is not running the Mantis AI Brain Worker code.');
+  }
   return {
     ok: Boolean(data.ok),
     hasHfToken: Boolean(data.hasHfToken),

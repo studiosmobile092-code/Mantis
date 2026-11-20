@@ -6,7 +6,10 @@ let ocrWorkerPromise: Promise<Worker> | null = null;
 
 async function getOcrWorker(): Promise<Worker> {
   if (!ocrWorkerPromise) {
-    ocrWorkerPromise = createWorker('eng');
+    ocrWorkerPromise = createWorker('eng').catch((err) => {
+      ocrWorkerPromise = null;
+      throw err;
+    });
   }
   return ocrWorkerPromise;
 }
