@@ -1,6 +1,11 @@
 import {Check, Copy, Cpu, Database, GitBranch, LogOut, ShieldCheck, Wifi} from 'lucide-react';
 import {type FormEvent, useEffect, useState} from 'react';
-import {BRAIN_MODEL_OPTIONS, normalizeBrainUrl, testBrainConnection} from '../lib/aiBrain';
+import {
+  BRAIN_MODEL_OPTIONS,
+  DEFAULT_BACKUP_EDGE_URL,
+  normalizeBrainUrl,
+  probeActiveBrainRoute,
+} from '../lib/aiBrain';
 import {
   MANTIS_CLOUDFLARE_WORKER_JS,
   MANTIS_PHASE1_SCHEMA_SQL,
@@ -8,38 +13,51 @@ import {
   MANTIS_PHASE3_SCHEMA_SQL,
   MANTIS_PHASE4_SCHEMA_SQL,
   MANTIS_PHASE5_SCHEMA_SQL,
+  MANTIS_SUPABASE_EDGE_FUNCTION_TS,
 } from '../lib/schemaText';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from '../lib/supabase';
-import type {GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
+import type {BrainRouteStatus, GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
 
 interface SettingsPanelProps {
   userEmail: string;
   metrics: MemoryReadinessMetrics;
+  routeStatus: BrainRouteStatus;
   schemaMissing: boolean;
   phase2SchemaMissing: boolean;
   phase3SchemaMissing: boolean;
   phase4SchemaMissing: boolean;
   phase5SchemaMissing: boolean;
   brainUrl: string;
+  backupBrainUrl: string;
   brainModel: string;
   autoLearnFromChat: boolean;
+  preferBuiltInFirst: boolean;
   accessToken: string;
   connection: GitHubConnection | null;
-  onSaveBrainConfig: (url: string, model: string, autoLearn: boolean) => Promise<void>;
+  onSaveBrainConfig: (
+    url: string,
+    backupUrl: string,
+    model: string,
+    autoLearn: boolean,
+    preferBuiltIn: boolean,
+  ) => Promise<void>;
   onSignOut: () => Promise<void>;
 }
 
 export function SettingsPanel({
   userEmail,
   metrics,
+  routeStatus,
   schemaMissing,
   phase2SchemaMissing,
   phase3SchemaMissing,
   phase4SchemaMissing,
   phase5SchemaMissing,
   brainUrl,
+  backupBrainUrl,
   brainModel,
   autoLearnFromChat,
+  preferBuiltInFirst,
   accessToken,
   connection,
   onSaveBrainConfig,
@@ -47,19 +65,29 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [pingMessage, setPingMessage] = useState<string | null>(null);
-  const [copiedWhich, setCopiedWhich] = useState<1 | 2 | 3 | 4 | 5 | 'worker' | null>(null);
+  const [copiedWhich, setCopiedWhich] = useState<
+    1 | 2 | 3 | 4 | 5 | 'worker' | 'supabase-fn' | null
+  >(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const [urlDraft, setUrlDraft] = useState(brainUrl);
+  const [backupUrlDraft, setBackupUrlDraft] = useState(backupBrainUrl);
   const [modelDraft, setModelDraft] = useState(brainModel);
   const [autoLearnDraft, setAutoLearnDraft] = useState(autoLearnFromChat);
+  const [preferBuiltInDraft, setPreferBuiltInDraft] = useState(preferBuiltInFirst);
+
   const [brainStatus, setBrainStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [brainMessage, setBrainMessage] = useState<string | null>(null);
   const [showWorkerCode, setShowWorkerCode] = useState(false);
+  const [showEdgeCode, setShowEdgeCode] = useState(false);
 
   useEffect(() => {
     setUrlDraft(brainUrl);
   }, [brainUrl]);
+
+  useEffect(() => {
+    setBackupUrlDraft(backupBrainUrl);
+  }, [backupBrainUrl]);
 
   useEffect(() => {
     setModelDraft(brainModel);
@@ -68,6 +96,10 @@ export function SettingsPanel({
   useEffect(() => {
     setAutoLearnDraft(autoLearnFromChat);
   }, [autoLearnFromChat]);
+
+  useEffect(() => {
+    setPreferBuiltInDraft(preferBuiltInFirst);
+  }, [preferBuiltInFirst]);
 
   const maskedKey = `${SUPABASE_PUBLISHABLE_KEY.slice(0, 18)}...${SUPABASE_PUBLISHABLE_KEY.slice(-6)}`;
 
@@ -91,7 +123,10 @@ export function SettingsPanel({
     }
   }
 
-  async function handleCopyText(text: string, which: 1 | 2 | 3 | 4 | 5 | 'worker') {
+  async function handleCopyText(
+    text: string,
+    which: 1 | 2 | 3 | 4 | 5 | 'worker' | 'supabase-fn',
+  ) {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedWhich(which);
@@ -105,37 +140,58 @@ export function SettingsPanel({
     event.preventDefault();
     setBrainStatus('testing');
     setBrainMessage(null);
-    const cleanUrl = normalizeBrainUrl(urlDraft);
-    setUrlDraft(cleanUrl);
+    const cleanPrimary = normalizeBrainUrl(urlDraft);
+    const cleanBackup = normalizeBrainUrl(backupUrlDraft);
+    setUrlDraft(cleanPrimary);
+    setBackupUrlDraft(cleanBackup);
+
     try {
-      await onSaveBrainConfig(cleanUrl, modelDraft, autoLearnDraft);
-      if (!cleanUrl) {
+      await onSaveBrainConfig(
+        cleanPrimary,
+        cleanBackup,
+        modelDraft,
+        autoLearnDraft,
+        preferBuiltInDraft,
+      );
+
+      if (!cleanPrimary && !cleanBackup) {
+        await probeActiveBrainRoute({
+          brainUrl: '',
+          backupBrainUrl: '',
+          accessToken,
+          preferredModel: modelDraft,
+        });
         setBrainStatus('ok');
-        setBrainMessage('Cleared AI Brain URL. Mantis will run in local Memory Retrieval mode.');
+        setBrainMessage('Saved Built-in Local Engine mode.');
         return;
       }
-      const health = await testBrainConnection(cleanUrl, accessToken, modelDraft);
-      if (!health.hasAnyProvider) {
+
+      const resolved = await probeActiveBrainRoute({
+        brainUrl: cleanPrimary,
+        backupBrainUrl: cleanBackup,
+        accessToken,
+        preferredModel: modelDraft,
+      });
+
+      if (resolved.activeKind === 'built-in-only') {
         setBrainStatus('error');
         setBrainMessage(
-          `Worker responded in ${health.latencyMs} ms, but no AI provider is attached yet. In Cloudflare → Settings → Bindings, add Workers AI named "AI" (free 10k Neurons/day, zero keys needed), or add GROQ_API_KEY / OLLAMA_URL.`,
+          resolved.failoverReason ||
+            'Neither Primary nor Backup URL responded. Check endpoint deployment and Secrets.',
         );
-      } else if (health.inferenceVerified) {
-        setBrainStatus('ok');
-        const via =
-          health.activeProviders.length > 0 ? ` via ${health.activeProviders.join(', ')}` : '';
-        setBrainMessage(
-          `Verified live AI Brain in ${health.latencyMs} ms (${health.verifiedModel || modelDraft}${via}).`,
-        );
-      } else {
-        setBrainStatus('ok');
-        setBrainMessage(
-          `Connected to Worker in ${health.latencyMs} ms (providers: ${health.activeProviders.join(', ') || 'configured'}).`,
-        );
+        return;
       }
+
+      setBrainStatus('ok');
+      const providersText =
+        resolved.activeProviders.length > 0 ? ` · Providers: ${resolved.activeProviders.join(', ')}` : '';
+      const failoverText = resolved.failoverReason ? ` (${resolved.failoverReason})` : '';
+      setBrainMessage(
+        `Active Route: ${resolved.activeKind} at ${resolved.activeEndpoint} in ${resolved.latencyMs ?? 0} ms${providersText}${failoverText}`,
+      );
     } catch (err) {
       setBrainStatus('error');
-      setBrainMessage(err instanceof Error ? err.message : 'Unable to reach Cloudflare Worker.');
+      setBrainMessage(err instanceof Error ? err.message : 'Unable to save or probe Brain routes.');
     }
   }
 
@@ -151,38 +207,40 @@ export function SettingsPanel({
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <div className="space-y-1 border-b border-slate-800 pb-4">
-        <h1 className="text-xl font-semibold tracking-tight text-slate-100">Settings &amp; Status</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-slate-100">
+          Studio Engine &amp; Chromebook Failover Settings
+        </h1>
         <p className="text-sm text-slate-400">
-          AI Brain (Cloudflare + Hugging Face), Supabase sync, readiness score, and SQL migrations.
+          Configure Built-in AI priority, dual-route Cloudflare + Chromebook Supabase failover, and database schemas.
         </p>
       </div>
 
-      {/* Real AI Brain Setup (Cloudflare Worker + Hugging Face) */}
+      {/* Dual-Route AI Engine Config */}
       <form
         onSubmit={handleSaveAndTestBrain}
-        className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6"
+        className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-base font-semibold text-slate-100">
               <Cpu className="h-4 w-4 text-emerald-400" />
-              <span>Real AI Brain (Cloudflare Workers AI · Ollama · Groq · HF)</span>
+              <span>AI Engine Routing &amp; Chromebook Failover</span>
             </div>
             <p className="text-xs leading-relaxed text-slate-400">
-              Connect your Cloudflare Worker with free daily Workers AI (10,000 Neurons/day, zero
-              keys), Groq, OpenRouter, or your own Ollama URL (http://localhost:11434 or tunnel) —
-              zero secrets ever touch GitHub.
+              Your Built-in AI runs instantly in-browser. Cloud Assist connects via your Cloudflare
+              Worker (Tablet) and fails over automatically to your non-.dev Supabase Edge Function
+              whenever your Chromebook organization blocks <code className="font-mono">.dev</code> sites.
             </p>
           </div>
-          <span className="font-mono text-xs text-slate-400">
-            {brainUrl ? 'Configured' : 'Memory Mode'}
+          <span className="font-mono text-xs text-emerald-400">
+            Route: {routeStatus.activeKind}
           </span>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
             <label htmlFor="brain-url" className="block text-xs font-medium text-slate-300">
-              Cloudflare Worker or Ollama URL
+              Primary Endpoint (Cloudflare Worker or Ollama)
             </label>
             <input
               id="brain-url"
@@ -193,14 +251,43 @@ export function SettingsPanel({
               spellCheck={false}
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="mantis-brain.garrettwins3.workers.dev or http://localhost:11434"
+              placeholder="mantis-brain.garrettwins3.workers.dev"
               className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
             />
           </div>
 
           <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="backup-brain-url" className="block text-xs font-medium text-slate-300">
+                Chromebook Backup URL (Non-.dev Supabase)
+              </label>
+              <button
+                type="button"
+                onClick={() => setBackupUrlDraft(DEFAULT_BACKUP_EDGE_URL)}
+                className="font-mono text-[11px] font-medium text-emerald-400 hover:text-emerald-300"
+              >
+                Use Supabase URL
+              </button>
+            </div>
+            <input
+              id="backup-brain-url"
+              type="text"
+              inputMode="url"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              value={backupUrlDraft}
+              onChange={(e) => setBackupUrlDraft(e.target.value)}
+              placeholder={DEFAULT_BACKUP_EDGE_URL}
+              className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
             <label htmlFor="brain-model" className="block text-xs font-medium text-slate-300">
-              Hugging Face Model
+              Cloud Assist Model Preference
             </label>
             <select
               id="brain-model"
@@ -215,41 +302,67 @@ export function SettingsPanel({
               ))}
             </select>
           </div>
+
+          <div className="flex flex-col justify-end gap-2">
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-200">
+              <input
+                type="checkbox"
+                checked={preferBuiltInDraft}
+                onChange={(e) => setPreferBuiltInDraft(e.target.checked)}
+                className="h-4 w-4 accent-emerald-500"
+              />
+              <span>Built-in AI leads every turn (Cloud Brain distills &amp; assists)</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={autoLearnDraft}
+                onChange={(e) => setAutoLearnDraft(e.target.checked)}
+                className="h-4 w-4 accent-emerald-500"
+              />
+              <span>Auto-mine rules &amp; facts during chats</span>
+            </label>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
-            <input
-              type="checkbox"
-              checked={autoLearnDraft}
-              onChange={(e) => setAutoLearnDraft(e.target.checked)}
-              className="h-4 w-4 accent-emerald-500"
-            />
-            <span>Auto-save reusable facts &amp; rules learned during AI chats</span>
-          </label>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-3">
+          <button
+            type="button"
+            onClick={() => void handleCopyText(MANTIS_CLOUDFLARE_WORKER_JS, 'worker')}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+          >
+            {copiedWhich === 'worker' ? (
+              <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            <span>{copiedWhich === 'worker' ? 'Worker Code Copied' : 'Copy Worker Code'}</span>
+          </button>
 
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void handleCopyText(MANTIS_CLOUDFLARE_WORKER_JS, 'worker')}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-            >
-              {copiedWhich === 'worker' ? (
-                <Check className="h-3.5 w-3.5 text-emerald-400" />
-              ) : (
-                <Copy className="h-3.5 w-3.5" />
-              )}
-              <span>{copiedWhich === 'worker' ? 'Worker Code Copied' : 'Copy Worker Code'}</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => void handleCopyText(MANTIS_SUPABASE_EDGE_FUNCTION_TS, 'supabase-fn')}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+          >
+            {copiedWhich === 'supabase-fn' ? (
+              <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            <span>
+              {copiedWhich === 'supabase-fn'
+                ? 'Supabase Edge Code Copied'
+                : 'Copy Chromebook Edge Function'}
+            </span>
+          </button>
 
-            <button
-              type="submit"
-              disabled={brainStatus === 'testing'}
-              className="inline-flex min-h-[40px] items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
-            >
-              <span>{brainStatus === 'testing' ? 'Testing...' : 'Save & Test AI Brain'}</span>
-            </button>
-          </div>
+          <button
+            type="submit"
+            disabled={brainStatus === 'testing'}
+            className="inline-flex min-h-[40px] items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+          >
+            <span>{brainStatus === 'testing' ? 'Testing Routes...' : 'Save & Test Both Routes'}</span>
+          </button>
         </div>
 
         {brainMessage && (
@@ -265,7 +378,17 @@ export function SettingsPanel({
           </div>
         )}
 
-        <div className="border-t border-slate-800 pt-3">
+        {/* Zero-CLI Guides */}
+        <div className="flex flex-wrap gap-4 border-t border-slate-800 pt-3">
+          <button
+            type="button"
+            onClick={() => setShowEdgeCode((v) => !v)}
+            className="text-xs font-medium text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
+          >
+            {showEdgeCode
+              ? 'Hide Chromebook .supabase.co Edge Function setup'
+              : 'Show 2-minute Chromebook non-.dev Edge Function setup'}
+          </button>
           <button
             type="button"
             onClick={() => setShowWorkerCode((v) => !v)}
@@ -273,48 +396,72 @@ export function SettingsPanel({
           >
             {showWorkerCode
               ? 'Hide Cloudflare Worker setup & code'
-              : 'Show 3-minute Cloudflare Worker setup & code'}
+              : 'Show Cloudflare Worker setup & code'}
           </button>
-
-          {showWorkerCode && (
-            <div className="mt-3 space-y-2.5 text-xs text-slate-300">
-              <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
-                <li>
-                  <strong>Zero-Limit Option 1 — Cloudflare Workers AI (Recommended, Free Daily):</strong>{' '}
-                  Open <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
-                  <strong>Settings → Bindings → Add → Workers AI</strong> → Variable name:{' '}
-                  <code className="font-mono text-slate-200">AI</code> → Save. (10,000 free Neurons
-                  every day, zero API keys, bypasses Hugging Face&apos;s $0.10/mo cap.)
-                </li>
-                <li>
-                  <strong>Option 2 — Your Own Ollama Hardware (0 Cloud Limits):</strong> Add{' '}
-                  <code className="font-mono text-slate-200">OLLAMA_URL</code> in Cloudflare (or
-                  paste <code className="font-mono text-slate-200">http://localhost:11434</code> or
-                  your <code className="font-mono text-slate-200">trycloudflare.com</code> Ollama URL
-                  above).
-                </li>
-                <li>
-                  <strong>Option 3 — Groq Free API:</strong> Add Secret{' '}
-                  <code className="font-mono text-slate-200">GROQ_API_KEY</code> from{' '}
-                  <code className="font-mono text-slate-200">console.groq.com</code> (free tier, no
-                  card) or <code className="font-mono text-slate-200">OPENROUTER_API_KEY</code>.
-                </li>
-                <li>
-                  In <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
-                  <strong>Edit code</strong>, paste the copied Worker Code below and tap{' '}
-                  <strong>Deploy</strong>, then tap <strong>Save &amp; Test AI Brain</strong> above.
-                </li>
-              </ol>
-              <pre className="max-h-48 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-                {MANTIS_CLOUDFLARE_WORKER_JS}
-              </pre>
-            </div>
-          )}
         </div>
+
+        {showEdgeCode && (
+          <div className="space-y-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
+            <div className="font-semibold text-emerald-300">
+              Bypass Chromebook `.dev` Block via Supabase Edge Function (Zero CLI)
+            </div>
+            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
+              <li>
+                Tap <strong>Copy Chromebook Edge Function</strong> above, then open{' '}
+                <code className="font-mono text-slate-200">
+                  supabase.com/dashboard/project/ncbtoawlltxukzzdyvhc/functions
+                </code>
+                .
+              </li>
+              <li>
+                Click <strong>Deploy a new function → Via Editor</strong>, name it exactly{' '}
+                <code className="font-mono text-slate-200">mantis-brain</code>, paste the code, and
+                deploy.
+              </li>
+              <li>
+                In <strong>Details</strong> for <code className="font-mono text-slate-200">mantis-brain</code>,
+                turn OFF <strong>Enforce JWT Verification</strong> (our code checks your user token
+                internally while letting <code className="font-mono text-slate-200">/health</code> respond cleanly).
+              </li>
+              <li>
+                In <strong>Edge Functions → Manage Secrets</strong>, add a free key such as{' '}
+                <code className="font-mono text-slate-200">GROQ_API_KEY</code> (from{' '}
+                <code className="font-mono text-slate-200">console.groq.com</code>) or{' '}
+                <code className="font-mono text-slate-200">OPENROUTER_API_KEY</code>.
+              </li>
+              <li>
+                Tap <strong>Use Supabase URL</strong> next to Chromebook Backup URL above and click{' '}
+                <strong>Save &amp; Test Both Routes</strong>.
+              </li>
+            </ol>
+            <pre className="max-h-44 overflow-auto rounded border border-slate-800 bg-[#0F172A] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+              {MANTIS_SUPABASE_EDGE_FUNCTION_TS}
+            </pre>
+          </div>
+        )}
+
+        {showWorkerCode && (
+          <div className="space-y-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
+            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
+              <li>
+                Open Cloudflare <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
+                <strong>Settings → Bindings → Add → Workers AI</strong> → Variable name:{' '}
+                <code className="font-mono text-slate-200">AI</code> (10,000 free Neurons/day).
+              </li>
+              <li>
+                Tap <strong>Edit code</strong>, paste the copied Worker Code, and click{' '}
+                <strong>Deploy</strong>.
+              </li>
+            </ol>
+            <pre className="max-h-44 overflow-auto rounded border border-slate-800 bg-[#0F172A] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+              {MANTIS_CLOUDFLARE_WORKER_JS}
+            </pre>
+          </div>
+        )}
       </form>
 
       {/* Honest Memory, Repo & Suggestion Readiness Breakdown */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold text-slate-100">
@@ -383,32 +530,27 @@ export function SettingsPanel({
               {metrics.selfAuditCount}
             </div>
             <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
-              {metrics.conversationTurns} chat turns
+              {metrics.conversationTurns} turns
             </div>
           </div>
         </div>
       </section>
 
       {/* GitHub Pages Deployment Checklist */}
-      <section className="space-y-2.5 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
+      <section className="space-y-2.5 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
           <GitBranch className="h-4 w-4 text-emerald-400" />
           <span>GitHub Pages Static Deployment Note</span>
         </div>
         <p className="text-xs leading-relaxed text-slate-300">
-          Set your GitHub repository&apos;s <strong>Settings → Pages → Source</strong> to{' '}
-          <strong>GitHub Actions</strong> (never <em>Deploy from a branch</em> on{' '}
-          <code className="font-mono text-slate-100">main</code>, which serves raw unbuilt{' '}
-          <code className="font-mono text-slate-100">.tsx</code> files and renders a white screen).
-          The workflow uses Node 22 and{' '}
-          <code className="font-mono text-slate-100">npm install --legacy-peer-deps</code> with
-          relative <code className="font-mono text-slate-100">./</code> asset paths so{' '}
-          <code className="font-mono text-slate-100">/Mantis/</code> builds cleanly.
+          Ensure GitHub repository <strong>Settings → Pages → Source</strong> is set to{' '}
+          <strong>GitHub Actions</strong> with relative <code className="font-mono">./</code> asset
+          paths so <code className="font-mono">/Mantis/</code> deploys cleanly.
         </p>
       </section>
 
       {/* Supabase Connection & Security */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-100">Supabase Connection</h2>
@@ -454,14 +596,14 @@ export function SettingsPanel({
         <div className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-3.5 text-xs text-slate-300">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
           <span>
-            Security verified: Neither your Supabase Secret key nor your Hugging Face token is
-            included in this website or repository.
+            Security verified: Neither your Supabase Secret key nor your AI provider keys are stored
+            in frontend code or GitHub.
           </span>
         </div>
       </section>
 
       {/* Phase 1–5 SQL References */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Database className="h-4 w-4 text-slate-400" />
@@ -482,97 +624,47 @@ export function SettingsPanel({
             <span>{copiedWhich === 5 ? 'Phase 5 SQL Copied' : 'Copy Phase 5 SQL'}</span>
           </button>
         </div>
-        <pre className="max-h-40 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+        <pre className="max-h-36 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
           {MANTIS_PHASE5_SCHEMA_SQL}
         </pre>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-slate-200">
             <Database className="h-4 w-4 text-slate-400" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Phase 4 SQL Migration ({phase4SchemaMissing ? 'Setup Required' : 'Active'})
-            </h2>
+            <span>
+              Phases 1–4 Status: P1 {schemaMissing ? 'Missing' : 'Active'} · P2{' '}
+              {phase2SchemaMissing ? 'Missing' : 'Active'} · P3{' '}
+              {phase3SchemaMissing ? 'Missing' : 'Active'} · P4{' '}
+              {phase4SchemaMissing ? 'Missing' : 'Active'}
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleCopyText(MANTIS_PHASE4_SCHEMA_SQL, 4)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-          >
-            {copiedWhich === 4 ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <span>{copiedWhich === 4 ? 'Phase 4 SQL Copied' : 'Copy Phase 4 SQL'}</span>
-          </button>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-slate-400" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Phase 3 SQL Migration ({phase3SchemaMissing ? 'Setup Required' : 'Active'})
-            </h2>
+          <div className="flex flex-wrap gap-2">
+            {[
+              {num: 4 as const, sql: MANTIS_PHASE4_SCHEMA_SQL},
+              {num: 3 as const, sql: MANTIS_PHASE3_SCHEMA_SQL},
+              {num: 2 as const, sql: MANTIS_PHASE2_SCHEMA_SQL},
+              {num: 1 as const, sql: MANTIS_PHASE1_SCHEMA_SQL},
+            ].map((item) => (
+              <button
+                key={item.num}
+                type="button"
+                onClick={() => void handleCopyText(item.sql, item.num)}
+                className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700"
+              >
+                {copiedWhich === item.num ? (
+                  <Check className="h-3 w-3 text-emerald-400" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+                <span>P{item.num}</span>
+              </button>
+            ))}
           </div>
-          <button
-            type="button"
-            onClick={() => void handleCopyText(MANTIS_PHASE3_SCHEMA_SQL, 3)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-          >
-            {copiedWhich === 3 ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <span>{copiedWhich === 3 ? 'Phase 3 SQL Copied' : 'Copy Phase 3 SQL'}</span>
-          </button>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-slate-400" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Phase 2 SQL Migration ({phase2SchemaMissing ? 'Setup Required' : 'Active'})
-            </h2>
-          </div>
-          <button
-            type="button"
-            onClick={() => void handleCopyText(MANTIS_PHASE2_SCHEMA_SQL, 2)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-          >
-            {copiedWhich === 2 ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <span>{copiedWhich === 2 ? 'Phase 2 SQL Copied' : 'Copy Phase 2 SQL'}</span>
-          </button>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-slate-400" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Phase 1 Base Schema ({schemaMissing ? 'Setup Required' : 'Active'})
-            </h2>
-          </div>
-          <button
-            type="button"
-            onClick={() => void handleCopyText(MANTIS_PHASE1_SCHEMA_SQL, 1)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-          >
-            {copiedWhich === 1 ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <span>{copiedWhich === 1 ? 'Phase 1 SQL Copied' : 'Copy Phase 1 SQL'}</span>
-          </button>
         </div>
       </section>
 
       {/* Account Session */}
-      <section className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-slate-800 bg-slate-900 p-5">
+      <section className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
         <div className="space-y-0.5">
           <div className="text-xs text-slate-400">Signed-in Single-User Session</div>
           <div className="font-mono text-sm text-slate-100">{userEmail}</div>

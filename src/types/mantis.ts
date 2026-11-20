@@ -1,4 +1,56 @@
-export type AreaId = 'chat' | 'knowledge' | 'capture' | 'teach' | 'github' | 'settings';
+export type AreaId = 'studio' | 'knowledge' | 'ingest' | 'github' | 'settings';
+
+export type BrainRouteKind =
+  | 'primary-worker'
+  | 'backup-supabase'
+  | 'ollama-direct'
+  | 'built-in-only';
+
+export interface BrainRouteStatus {
+  activeKind: BrainRouteKind;
+  activeEndpoint: string;
+  failoverReason: string | null;
+  latencyMs: number | null;
+  activeProviders: string[];
+  lastCheckedAt: string | null;
+}
+
+export type LearningEventKind =
+  | 'auto_mined'
+  | 'manual_teach'
+  | 'url_ingested'
+  | 'voice_captured'
+  | 'ocr_distilled'
+  | 'reinforced'
+  | 'cloud_assisted'
+  | 'repo_indexed';
+
+export interface LearningEvent {
+  id: string;
+  kind: LearningEventKind;
+  title: string;
+  detail: string;
+  source: string;
+  createdAt: string;
+}
+
+export interface ConceptNode {
+  label: string;
+  count: number;
+  entryIds: string[];
+  related: string[];
+}
+
+export interface KnowledgeGrowthStats {
+  totalEntries: number;
+  uniqueConcepts: number;
+  autoMinedCount: number;
+  capturedCount: number;
+  manualTeachCount: number;
+  totalRecalls: number;
+  avgConfidence: number;
+  topConcepts: ConceptNode[];
+}
 
 export interface KnowledgeFolder {
   id: string;
@@ -25,8 +77,10 @@ export interface KnowledgeEntry {
 export interface UserPreferences {
   user_id: string;
   brain_url: string;
+  backup_brain_url?: string;
   preferred_model: string;
   auto_learn_from_chat: boolean;
+  prefer_built_in_first?: boolean;
   capture_interval_ms: number;
   updated_at: string;
 }

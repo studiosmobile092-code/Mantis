@@ -1,7 +1,16 @@
-import type {ChatMessage, KnowledgeEntry, KnowledgeFolder, RepoFile} from '../types/mantis';
+import type {
+  BrainRouteKind,
+  BrainRouteStatus,
+  ChatMessage,
+  KnowledgeEntry,
+  KnowledgeFolder,
+  RepoFile,
+} from '../types/mantis';
 import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles} from './memory';
+import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL} from './supabase';
 
 export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
+export const DEFAULT_BACKUP_EDGE_URL = `${SUPABASE_URL.replace(/\/+$/, '')}/functions/v1/mantis-brain`;
 
 export const BRAIN_MODEL_OPTIONS: Array<{id: string; label: string}> = [
   {id: 'Qwen/Qwen2.5-Coder-32B-Instruct', label: 'Qwen 2.5 Coder 32B (Best for Code)'},
@@ -12,20 +21,75 @@ export const BRAIN_MODEL_OPTIONS: Array<{id: string; label: string}> = [
 ];
 
 const STORAGE_BRAIN_URL_KEY = 'mantis_brain_worker_url';
+const STORAGE_BACKUP_URL_KEY = 'mantis_brain_backup_url';
 const STORAGE_BRAIN_MODEL_KEY = 'mantis_brain_model';
+const STORAGE_BRAIN_MODE_KEY = 'mantis_brain_provider_mode';
+const STORAGE_PREFER_BUILT_IN_KEY = 'mantis_prefer_built_in_first';
 
-export function getLocalBrainConfig(): {brainUrl: string; model: string} {
-  try {
-    return {
-      brainUrl: window.localStorage.getItem(STORAGE_BRAIN_URL_KEY) || '',
-      model: window.localStorage.getItem(STORAGE_BRAIN_MODEL_KEY) || DEFAULT_BRAIN_MODEL,
-    };
-  } catch {
-    return {brainUrl: '', model: DEFAULT_BRAIN_MODEL};
+let currentRouteStatus: BrainRouteStatus = {
+  activeKind: 'built-in-only',
+  activeEndpoint: '',
+  failoverReason: null,
+  latencyMs: null,
+  activeProviders: [],
+  lastCheckedAt: null,
+};
+
+const routeListeners = new Set<(status: BrainRouteStatus) => void>();
+
+export function getRouteStatus(): BrainRouteStatus {
+  return currentRouteStatus;
+}
+
+export function subscribeRouteStatus(listener: (status: BrainRouteStatus) => void): () => void {
+  routeListeners.add(listener);
+  listener(currentRouteStatus);
+  return () => {
+    routeListeners.delete(listener);
+  };
+}
+
+function updateRouteStatus(patch: Partial<BrainRouteStatus>) {
+  currentRouteStatus = {
+    ...currentRouteStatus,
+    ...patch,
+    lastCheckedAt: new Date().toISOString(),
+  };
+  for (const listener of routeListeners) {
+    listener(currentRouteStatus);
   }
 }
 
-export function setLocalBrainConfig(brainUrl: string, model: string): void {
+export function getLocalBrainConfig(): {
+  brainUrl: string;
+  backupBrainUrl: string;
+  model: string;
+  preferBuiltInFirst: boolean;
+} {
+  try {
+    const preferRaw = window.localStorage.getItem(STORAGE_PREFER_BUILT_IN_KEY);
+    return {
+      brainUrl: window.localStorage.getItem(STORAGE_BRAIN_URL_KEY) || '',
+      backupBrainUrl: window.localStorage.getItem(STORAGE_BACKUP_URL_KEY) || '',
+      model: window.localStorage.getItem(STORAGE_BRAIN_MODEL_KEY) || DEFAULT_BRAIN_MODEL,
+      preferBuiltInFirst: preferRaw === null ? true : preferRaw === 'true',
+    };
+  } catch {
+    return {
+      brainUrl: '',
+      backupBrainUrl: '',
+      model: DEFAULT_BRAIN_MODEL,
+      preferBuiltInFirst: true,
+    };
+  }
+}
+
+export function setLocalBrainConfig(
+  brainUrl: string,
+  model: string,
+  backupBrainUrl?: string,
+  preferBuiltInFirst?: boolean,
+): void {
   try {
     const cleanUrl = brainUrl.trim().replace(/\/+$/, '');
     if (cleanUrl) {
@@ -33,7 +97,18 @@ export function setLocalBrainConfig(brainUrl: string, model: string): void {
     } else {
       window.localStorage.removeItem(STORAGE_BRAIN_URL_KEY);
     }
+    if (backupBrainUrl !== undefined) {
+      const cleanBackup = backupBrainUrl.trim().replace(/\/+$/, '');
+      if (cleanBackup) {
+        window.localStorage.setItem(STORAGE_BACKUP_URL_KEY, cleanBackup);
+      } else {
+        window.localStorage.removeItem(STORAGE_BACKUP_URL_KEY);
+      }
+    }
     window.localStorage.setItem(STORAGE_BRAIN_MODEL_KEY, model.trim() || DEFAULT_BRAIN_MODEL);
+    if (preferBuiltInFirst !== undefined) {
+      window.localStorage.setItem(STORAGE_PREFER_BUILT_IN_KEY, String(preferBuiltInFirst));
+    }
   } catch {
     // ignore storage errors
   }
@@ -55,8 +130,6 @@ export function normalizeBrainUrl(raw: string): string {
   return normalizeExternalUrl(raw).replace(/\/+$/, '');
 }
 
-const STORAGE_BRAIN_MODE_KEY = 'mantis_brain_provider_mode';
-
 export function getLocalBrainMode(): 'worker' | 'ollama' {
   try {
     return window.localStorage.getItem(STORAGE_BRAIN_MODE_KEY) === 'ollama' ? 'ollama' : 'worker';
@@ -73,12 +146,39 @@ function setLocalBrainMode(mode: 'worker' | 'ollama'): void {
   }
 }
 
-export async function testBrainConnection(
-  brainUrl: string,
-  accessToken?: string,
-  preferredModel?: string,
-): Promise<{
+function isSupabaseEdgeUrl(url: string): boolean {
+  return url.toLowerCase().includes('.supabase.co/functions/v1/');
+}
+
+function buildEndpointHeaders(endpointUrl: string, accessToken?: string): Record<string, string> {
+  const headers: Record<string, string> = {'Content-Type': 'application/json'};
+  if (isSupabaseEdgeUrl(endpointUrl)) {
+    headers.apikey = SUPABASE_PUBLISHABLE_KEY;
+    headers.Authorization = `Bearer ${accessToken || SUPABASE_PUBLISHABLE_KEY}`;
+  } else if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
+  return headers;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 7500,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {...init, signal: controller.signal});
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export interface EndpointTestResult {
   ok: boolean;
+  endpointUrl: string;
+  routeKind: BrainRouteKind;
   hasHfToken: boolean;
   hasAnyProvider: boolean;
   activeProviders: string[];
@@ -86,10 +186,17 @@ export async function testBrainConnection(
   inferenceVerified: boolean;
   verifiedModel?: string;
   latencyMs: number;
-}> {
+}
+
+export async function testBrainConnection(
+  brainUrl: string,
+  accessToken?: string,
+  preferredModel?: string,
+  routeKindHint?: BrainRouteKind,
+): Promise<EndpointTestResult> {
   const cleanUrl = normalizeBrainUrl(brainUrl);
   if (!cleanUrl) {
-    throw new Error('Enter your Cloudflare Worker or Ollama URL.');
+    throw new Error('Enter your Cloudflare Worker, Supabase Edge Function, or Ollama URL.');
   }
   try {
     const parsed = new URL(cleanUrl);
@@ -97,27 +204,34 @@ export async function testBrainConnection(
       throw new Error('Invalid host');
     }
   } catch {
-    throw new Error('Enter a valid URL (e.g. mantis-brain.garrettwins3.workers.dev or http://localhost:11434).');
+    throw new Error('Enter a valid URL (e.g. mantis-brain.garrettwins3.workers.dev or https://...supabase.co/functions/v1/mantis-brain).');
   }
 
+  const isBackup = routeKindHint === 'backup-supabase' || isSupabaseEdgeUrl(cleanUrl);
   const start = performance.now();
   let res: Response;
   try {
-    res = await fetch(`${cleanUrl}/health`);
+    const healthHeaders: Record<string, string> = {};
+    if (isSupabaseEdgeUrl(cleanUrl)) {
+      healthHeaders.apikey = SUPABASE_PUBLISHABLE_KEY;
+      healthHeaders.Authorization = `Bearer ${accessToken || SUPABASE_PUBLISHABLE_KEY}`;
+    }
+    res = await fetchWithTimeout(`${cleanUrl}/health`, {headers: healthHeaders}, 6500);
   } catch (networkErr) {
-    throw new Error(
-      `Could not reach ${cleanUrl}: ${
-        networkErr instanceof Error ? networkErr.message : 'Network or CORS blocked'
-      }.`,
-    );
+    const reason =
+      networkErr instanceof Error && networkErr.name === 'AbortError'
+        ? 'Timed out after 6.5s'
+        : networkErr instanceof Error
+          ? networkErr.message
+          : 'Network or .dev domain blocked';
+    throw new Error(`Could not reach ${cleanUrl}: ${reason}.`);
   }
 
   const latencyMs = Math.round(performance.now() - start);
   const contentType = res.headers.get('content-type') || '';
 
-  // Direct Ollama server detection (/health is 404 on Ollama, /api/tags returns installed models)
-  if (res.status === 404) {
-    const ollamaTagsRes = await fetch(`${cleanUrl}/api/tags`).catch(() => null);
+  if (res.status === 404 && !isBackup) {
+    const ollamaTagsRes = await fetchWithTimeout(`${cleanUrl}/api/tags`, {}, 4000).catch(() => null);
     if (ollamaTagsRes && ollamaTagsRes.ok) {
       const tagsData = (await ollamaTagsRes.json().catch(() => ({}))) as {
         models?: Array<{name?: string}>;
@@ -127,21 +241,27 @@ export async function testBrainConnection(
         throw new Error('Connected to Ollama, but no models are installed yet (run e.g. `ollama pull qwen2.5-coder:7b`).');
       }
       const chosenOllamaModel = installed[0];
-      const pingRes = await fetch(`${cleanUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          model: chosenOllamaModel,
-          messages: [{role: 'user', content: 'Reply with only READY.'}],
-          max_tokens: 16,
-        }),
-      });
+      const pingRes = await fetchWithTimeout(
+        `${cleanUrl}/v1/chat/completions`,
+        {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            model: chosenOllamaModel,
+            messages: [{role: 'user', content: 'Reply with only READY.'}],
+            max_tokens: 16,
+          }),
+        },
+        10000,
+      );
       if (!pingRes.ok) {
         throw new Error(`Ollama chat test returned HTTP ${pingRes.status}.`);
       }
       setLocalBrainMode('ollama');
       return {
         ok: true,
+        endpointUrl: cleanUrl,
+        routeKind: 'ollama-direct',
         hasHfToken: false,
         hasAnyProvider: true,
         activeProviders: ['ollama-direct'],
@@ -154,11 +274,11 @@ export async function testBrainConnection(
   }
 
   if (!res.ok) {
-    throw new Error(`Worker health check returned HTTP ${res.status}.`);
+    throw new Error(`Health check returned HTTP ${res.status}.`);
   }
   if (!contentType.includes('application/json')) {
     throw new Error(
-      'This URL returned a webpage instead of the Mantis AI Brain Worker JSON. In Cloudflare, create a "Hello World" Worker (do not import the GitHub repo), paste the copied Worker Code, and Deploy.',
+      'This URL returned HTML instead of Mantis AI Brain JSON. Verify the Worker or Edge Function deployment.',
     );
   }
 
@@ -171,10 +291,10 @@ export async function testBrainConnection(
     defaultModel?: string;
   };
   if (data.service !== 'mantis-ai-brain') {
-    throw new Error('URL responded, but it is not running the Mantis AI Brain Worker code.');
+    throw new Error('URL responded, but it is not running Mantis AI Brain.');
   }
 
-  setLocalBrainMode('worker');
+  if (!isBackup) setLocalBrainMode('worker');
   const hasHfToken = Boolean(data.hasHfToken);
   const activeProviders = Array.isArray(data.activeProviders)
     ? data.activeProviders
@@ -183,10 +303,13 @@ export async function testBrainConnection(
       : [];
   const hasAnyProvider =
     typeof data.hasAnyProvider === 'boolean' ? data.hasAnyProvider : activeProviders.length > 0;
+  const resolvedKind: BrainRouteKind = isBackup ? 'backup-supabase' : 'primary-worker';
 
   if (!hasAnyProvider || !accessToken) {
     return {
       ok: Boolean(data.ok),
+      endpointUrl: cleanUrl,
+      routeKind: resolvedKind,
       hasHfToken,
       hasAnyProvider,
       activeProviders,
@@ -196,31 +319,32 @@ export async function testBrainConnection(
     };
   }
 
-  // Run an actual live inference test via the Worker
-  let verifyRes = await fetch(`${cleanUrl}/ai/verify`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${accessToken}`,
+  let verifyRes = await fetchWithTimeout(
+    `${cleanUrl}/ai/verify`,
+    {
+      method: 'POST',
+      headers: buildEndpointHeaders(cleanUrl, accessToken),
+      body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
     },
-    body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
-  });
+    14000,
+  );
 
   if (verifyRes.status === 404) {
-    verifyRes = await fetch(`${cleanUrl}/ai/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
+    verifyRes = await fetchWithTimeout(
+      `${cleanUrl}/ai/chat`,
+      {
+        method: 'POST',
+        headers: buildEndpointHeaders(cleanUrl, accessToken),
+        body: JSON.stringify({
+          prompt: 'Reply with only the word READY.',
+          model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
+          knowledgeContext: [],
+          repoContext: [],
+          history: [],
+        }),
       },
-      body: JSON.stringify({
-        prompt: 'Reply with only the word READY.',
-        model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
-        knowledgeContext: [],
-        repoContext: [],
-        history: [],
-      }),
-    });
+      14000,
+    );
   }
 
   const totalLatencyMs = Math.round(performance.now() - start);
@@ -238,6 +362,8 @@ export async function testBrainConnection(
 
   return {
     ok: Boolean(data.ok),
+    endpointUrl: cleanUrl,
+    routeKind: resolvedKind,
     hasHfToken,
     hasAnyProvider: true,
     activeProviders,
@@ -246,6 +372,180 @@ export async function testBrainConnection(
     verifiedModel: verifyPayload.model || preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
     latencyMs: totalLatencyMs,
   };
+}
+
+/**
+ * Probes Primary (Cloudflare .workers.dev) and automatically fails over to
+ * Chromebook-safe Backup (.supabase.co/functions/v1/mantis-brain) if Primary is blocked.
+ */
+export async function probeActiveBrainRoute(params: {
+  brainUrl: string;
+  backupBrainUrl: string;
+  accessToken?: string;
+  preferredModel?: string;
+}): Promise<BrainRouteStatus> {
+  const primary = normalizeBrainUrl(params.brainUrl);
+  const backup = normalizeBrainUrl(params.backupBrainUrl);
+
+  if (!primary && !backup) {
+    const status: BrainRouteStatus = {
+      activeKind: 'built-in-only',
+      activeEndpoint: '',
+      failoverReason: null,
+      latencyMs: null,
+      activeProviders: [],
+      lastCheckedAt: new Date().toISOString(),
+    };
+    updateRouteStatus(status);
+    return status;
+  }
+
+  let primaryFailureReason: string | null = null;
+
+  if (primary) {
+    try {
+      const res = await testBrainConnection(
+        primary,
+        params.accessToken,
+        params.preferredModel,
+        primary.includes('localhost:11434') || primary.includes('127.0.0.1:11434')
+          ? 'ollama-direct'
+          : 'primary-worker',
+      );
+      const status: BrainRouteStatus = {
+        activeKind: res.routeKind,
+        activeEndpoint: res.endpointUrl,
+        failoverReason: null,
+        latencyMs: res.latencyMs,
+        activeProviders: res.activeProviders,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      updateRouteStatus(status);
+      return status;
+    } catch (err) {
+      primaryFailureReason =
+        err instanceof Error ? err.message : 'Primary endpoint unreachable';
+    }
+  }
+
+  if (backup) {
+    try {
+      const backupRes = await testBrainConnection(
+        backup,
+        params.accessToken,
+        params.preferredModel,
+        'backup-supabase',
+      );
+      const status: BrainRouteStatus = {
+        activeKind: 'backup-supabase',
+        activeEndpoint: backupRes.endpointUrl,
+        failoverReason: primaryFailureReason
+          ? `Primary blocked/unreachable -> auto-routed via Chromebook Backup`
+          : null,
+        latencyMs: backupRes.latencyMs,
+        activeProviders: backupRes.activeProviders,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      updateRouteStatus(status);
+      return status;
+    } catch (backupErr) {
+      updateRouteStatus({
+        activeKind: 'built-in-only',
+        activeEndpoint: '',
+        failoverReason: backupErr instanceof Error ? backupErr.message : primaryFailureReason,
+        latencyMs: null,
+        activeProviders: [],
+      });
+      return currentRouteStatus;
+    }
+  }
+
+  updateRouteStatus({
+    activeKind: 'built-in-only',
+    activeEndpoint: '',
+    failoverReason: primaryFailureReason,
+    latencyMs: null,
+    activeProviders: [],
+  });
+  return currentRouteStatus;
+}
+
+function getOrderedCandidateEndpoints(brainUrl: string, backupBrainUrl?: string): string[] {
+  const candidates: string[] = [];
+  const active = currentRouteStatus.activeEndpoint;
+  const primary = normalizeBrainUrl(brainUrl);
+  const backup = normalizeBrainUrl(backupBrainUrl || '');
+
+  // If failover already discovered backup works on this Chromebook session, try active first!
+  if (active && (active === primary || active === backup)) {
+    candidates.push(active);
+  }
+  if (primary && !candidates.includes(primary)) {
+    candidates.push(primary);
+  }
+  if (backup && !candidates.includes(backup)) {
+    candidates.push(backup);
+  }
+  return candidates;
+}
+
+async function postBrainEndpointWithFailover<T>(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  path: string;
+  body: Record<string, unknown>;
+  timeoutMs?: number;
+}): Promise<{payload: T; endpointUsed: string}> {
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  if (candidates.length === 0) {
+    throw new Error('No Cloud Assist endpoint configured. Add Worker or Supabase Backup URL in Settings.');
+  }
+
+  let lastError = 'Cloud endpoint unreachable';
+  for (let i = 0; i < candidates.length; i += 1) {
+    const endpoint = candidates[i];
+    const start = performance.now();
+    try {
+      const res = await fetchWithTimeout(
+        `${endpoint}${params.path}`,
+        {
+          method: 'POST',
+          headers: buildEndpointHeaders(endpoint, params.accessToken),
+          body: JSON.stringify(params.body),
+        },
+        params.timeoutMs ?? 20000,
+      );
+
+      const json = (await res.json().catch(() => ({}))) as T & {error?: string};
+      if (!res.ok) {
+        lastError = json.error || `HTTP ${res.status} from ${endpoint}`;
+        continue;
+      }
+
+      const kind: BrainRouteKind = isSupabaseEdgeUrl(endpoint)
+        ? 'backup-supabase'
+        : endpoint.includes('11434')
+          ? 'ollama-direct'
+          : 'primary-worker';
+      updateRouteStatus({
+        activeKind: kind,
+        activeEndpoint: endpoint,
+        failoverReason: i > 0 ? 'Auto-switched to Chromebook Backup (.supabase.co)' : currentRouteStatus.failoverReason,
+        latencyMs: Math.round(performance.now() - start),
+      });
+      return {payload: json, endpointUsed: endpoint};
+    } catch (err) {
+      lastError =
+        err instanceof Error && err.name === 'AbortError'
+          ? `Timeout reaching ${endpoint}`
+          : err instanceof Error
+            ? err.message
+            : 'Network blocked';
+    }
+  }
+
+  throw new Error(lastError);
 }
 
 export interface ParsedLearnDirective {
@@ -294,7 +594,7 @@ async function callDirectOllamaChat(
 ): Promise<{text: string; model: string}> {
   let chosenModel = 'qwen2.5-coder:7b';
   try {
-    const tagsRes = await fetch(`${ollamaUrl}/api/tags`);
+    const tagsRes = await fetchWithTimeout(`${ollamaUrl}/api/tags`, {}, 3000);
     if (tagsRes.ok) {
       const tagsData = (await tagsRes.json()) as {models?: Array<{name?: string}>};
       const first = (tagsData.models || []).find((m) => Boolean(m.name))?.name;
@@ -304,16 +604,20 @@ async function callDirectOllamaChat(
     // use fallback model name
   }
 
-  const res = await fetch(`${ollamaUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      model: chosenModel,
-      messages,
-      max_tokens: maxTokens,
-      temperature: 0.25,
-    }),
-  });
+  const res = await fetchWithTimeout(
+    `${ollamaUrl}/v1/chat/completions`,
+    {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model: chosenModel,
+        messages,
+        max_tokens: maxTokens,
+        temperature: 0.25,
+      }),
+    },
+    30000,
+  );
   const payload = (await res.json().catch(() => ({}))) as {
     choices?: Array<{message?: {content?: string}}>;
     error?: {message?: string} | string;
@@ -329,6 +633,7 @@ async function callDirectOllamaChat(
 
 export async function askAiBrainChat(params: {
   brainUrl: string;
+  backupBrainUrl?: string;
   accessToken: string;
   model: string;
   prompt: string;
@@ -354,9 +659,13 @@ export async function askAiBrainChat(params: {
   );
   const repoMatches = retrieveRelevantRepoFiles(params.prompt, params.repoFiles, 4);
 
-  if (getLocalBrainMode() === 'ollama' || cleanUrl.includes('localhost:11434') || cleanUrl.includes('127.0.0.1:11434')) {
+  if (
+    getLocalBrainMode() === 'ollama' ||
+    cleanUrl.includes('localhost:11434') ||
+    cleanUrl.includes('127.0.0.1:11434')
+  ) {
     const systemPrompt = [
-      'You are Mantis, a personal coding AI companion. Ground your answers in the user Knowledge and Repo snippets below.',
+      'You are Mantis Cloud Assist, helping the built-in Mantis Studio engine. Ground your answers in the user Knowledge and Repo snippets below.',
       'If the user teaches a reusable preference, fact, or fix, end with: [LEARN: Short Title | Folder | tag1, tag2 | Concise note]',
       knowledgeMatches.length > 0
         ? `KNOWLEDGE:\n${knowledgeMatches
@@ -390,13 +699,16 @@ export async function askAiBrainChat(params: {
     };
   }
 
-  const res = await fetch(`${cleanUrl}/ai/chat`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`,
-    },
-    body: JSON.stringify({
+  const {payload} = await postBrainEndpointWithFailover<{
+    reply?: string;
+    model?: string;
+    error?: string;
+  }>({
+    brainUrl: params.brainUrl,
+    backupBrainUrl: params.backupBrainUrl,
+    accessToken: params.accessToken,
+    path: '/ai/chat',
+    body: {
       prompt: params.prompt,
       model: params.model,
       knowledgeContext: knowledgeMatches.map((m) => ({
@@ -412,16 +724,11 @@ export async function askAiBrainChat(params: {
         role: m.role === 'user' ? 'user' : 'assistant',
         content: m.content,
       })),
-    }),
+    },
   });
 
-  const payload = (await res.json().catch(() => ({}))) as {
-    reply?: string;
-    model?: string;
-    error?: string;
-  };
-  if (!res.ok || !payload.reply) {
-    throw new Error(payload.error || `AI Brain returned HTTP ${res.status}.`);
+  if (!payload.reply) {
+    throw new Error(payload.error || 'AI Brain returned an empty reply.');
   }
 
   const {cleanReply, learnedItems} = parseLearnDirectives(payload.reply);
@@ -443,6 +750,7 @@ export interface DistilledKnowledgeItem {
 
 export async function distillWithAiBrain(params: {
   brainUrl: string;
+  backupBrainUrl?: string;
   accessToken: string;
   model: string;
   text: string;
@@ -472,27 +780,26 @@ export async function distillWithAiBrain(params: {
     };
   }
 
-  const res = await fetch(`${cleanUrl}/ai/distill`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`,
-    },
-    body: JSON.stringify({
-      text: params.text,
-      sourceTitle: params.sourceTitle,
-      sourceType: params.sourceType,
-      model: params.model,
-    }),
-  });
-  const payload = (await res.json().catch(() => ({}))) as {
+  const {payload} = await postBrainEndpointWithFailover<{
     summary?: string;
     entries?: DistilledKnowledgeItem[];
     model?: string;
     error?: string;
-  };
-  if (!res.ok || !Array.isArray(payload.entries)) {
-    throw new Error(payload.error || `AI Distillation failed (${res.status}).`);
+  }>({
+    brainUrl: params.brainUrl,
+    backupBrainUrl: params.backupBrainUrl,
+    accessToken: params.accessToken,
+    path: '/ai/distill',
+    body: {
+      text: params.text,
+      sourceTitle: params.sourceTitle,
+      sourceType: params.sourceType,
+      model: params.model,
+    },
+  });
+
+  if (!Array.isArray(payload.entries)) {
+    throw new Error(payload.error || 'AI Distillation failed.');
   }
   return {
     summary: payload.summary || '',
@@ -503,6 +810,7 @@ export async function distillWithAiBrain(params: {
 
 export async function suggestCodeWithAiBrain(params: {
   brainUrl: string;
+  backupBrainUrl?: string;
   accessToken: string;
   model: string;
   filePath: string;
@@ -549,13 +857,18 @@ export async function suggestCodeWithAiBrain(params: {
     };
   }
 
-  const res = await fetch(`${cleanUrl}/ai/suggest`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`,
-    },
-    body: JSON.stringify({
+  const {payload} = await postBrainEndpointWithFailover<{
+    title?: string;
+    rationale?: string;
+    proposedContent?: string;
+    model?: string;
+    error?: string;
+  }>({
+    brainUrl: params.brainUrl,
+    backupBrainUrl: params.backupBrainUrl,
+    accessToken: params.accessToken,
+    path: '/ai/suggest',
+    body: {
       filePath: params.filePath,
       originalContent: params.originalContent,
       goal: params.goal,
@@ -564,17 +877,11 @@ export async function suggestCodeWithAiBrain(params: {
         title: m.entry.title,
         content: m.entry.content,
       })),
-    }),
+    },
   });
-  const payload = (await res.json().catch(() => ({}))) as {
-    title?: string;
-    rationale?: string;
-    proposedContent?: string;
-    model?: string;
-    error?: string;
-  };
-  if (!res.ok || !payload.proposedContent) {
-    throw new Error(payload.error || `AI suggestion failed (${res.status}).`);
+
+  if (!payload.proposedContent) {
+    throw new Error(payload.error || 'AI suggestion failed.');
   }
   return {
     title: payload.title || `AI Proposal: ${params.filePath}`,
@@ -584,34 +891,96 @@ export async function suggestCodeWithAiBrain(params: {
   };
 }
 
+/**
+ * Browser fallback reader when neither Worker nor Backup Edge Function is available yet:
+ * Tries CORS-friendly Markdown reader (r.jina.ai) for web articles.
+ */
+async function extractUrlClientFallback(
+  url: string,
+): Promise<{kind: 'youtube' | 'article'; url: string; title: string; text: string} | null> {
+  const isYt = /youtube\.com|youtu\.be/i.test(url);
+  try {
+    const readerRes = await fetchWithTimeout(
+      `https://r.jina.ai/${url}`,
+      {headers: {Accept: 'text/plain, text/markdown'}},
+      12000,
+    );
+    if (readerRes.ok) {
+      const raw = await readerRes.text();
+      if (raw.trim().length >= 90) {
+        const titleMatch = raw.match(/^Title:\s*(.+)$/m);
+        const title = titleMatch ? titleMatch[1].trim() : url;
+        const cleaned = raw
+          .replace(/^Title:.*$/m, '')
+          .replace(/^URL Source:.*$/m, '')
+          .replace(/^Markdown Content:\s*$/m, '')
+          .trim()
+          .slice(0, 35000);
+        if (cleaned.length >= 90) {
+          return {
+            kind: isYt ? 'youtube' : 'article',
+            url,
+            title,
+            text: cleaned,
+          };
+        }
+      }
+    }
+  } catch {
+    // ignore CORS or network errors on fallback reader
+  }
+  return null;
+}
+
 export async function extractUrlViaBrain(params: {
   brainUrl: string;
+  backupBrainUrl?: string;
   accessToken: string;
   url: string;
 }): Promise<{kind: 'youtube' | 'article'; url: string; title: string; text: string}> {
-  const cleanUrl = normalizeBrainUrl(params.brainUrl);
-  const res = await fetch(`${cleanUrl}/extract-url`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${params.accessToken}`,
-    },
-    body: JSON.stringify({url: params.url}),
-  });
-  const payload = (await res.json().catch(() => ({}))) as {
-    kind?: 'youtube' | 'article';
-    url?: string;
-    title?: string;
-    text?: string;
-    error?: string;
-  };
-  if (!res.ok || !payload.text) {
-    throw new Error(payload.error || `URL extraction failed (${res.status}).`);
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+
+  if (candidates.length > 0) {
+    try {
+      const {payload} = await postBrainEndpointWithFailover<{
+        kind?: 'youtube' | 'article';
+        url?: string;
+        title?: string;
+        text?: string;
+        error?: string;
+      }>({
+        brainUrl: params.brainUrl,
+        backupBrainUrl: params.backupBrainUrl,
+        accessToken: params.accessToken,
+        path: '/extract-url',
+        body: {url: params.url},
+        timeoutMs: 22000,
+      });
+
+      if (payload.text) {
+        return {
+          kind: payload.kind || 'article',
+          url: payload.url || params.url,
+          title: payload.title || params.url,
+          text: payload.text,
+        };
+      }
+    } catch (backendErr) {
+      // Try browser CORS-safe reader fallback for articles before failing
+      const fallback = await extractUrlClientFallback(params.url);
+      if (fallback) {
+        return fallback;
+      }
+      throw backendErr;
+    }
   }
-  return {
-    kind: payload.kind || 'article',
-    url: payload.url || params.url,
-    title: payload.title || params.url,
-    text: payload.text,
-  };
+
+  const fallback = await extractUrlClientFallback(params.url);
+  if (fallback) {
+    return fallback;
+  }
+
+  throw new Error(
+    'Could not fetch that link directly from the browser. Add your Chromebook Supabase Backup URL in Settings (non-.dev) so Mantis can extract YouTube transcripts & protected articles.',
+  );
 }

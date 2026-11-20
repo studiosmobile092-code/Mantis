@@ -18,6 +18,7 @@ interface KnowledgeBrowserProps {
   entries: KnowledgeEntry[];
   isLoading: boolean;
   highlightedEntryId: string | null;
+  initialFolderId?: string;
   onClearHighlight: () => void;
   onCreateFolder: (name: string, description: string) => Promise<KnowledgeFolder | null>;
   onDeleteFolder: (folderId: string) => Promise<boolean>;
@@ -34,6 +35,7 @@ export function KnowledgeBrowser({
   entries,
   isLoading,
   highlightedEntryId,
+  initialFolderId,
   onClearHighlight,
   onCreateFolder,
   onDeleteFolder,
@@ -41,7 +43,7 @@ export function KnowledgeBrowser({
   onDeleteEntry,
   onOpenTeach,
 }: KnowledgeBrowserProps) {
-  const [selectedFolderId, setSelectedFolderId] = useState<string>('all');
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(initialFolderId || 'all');
   const [selectedTag, setSelectedTag] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewFolderForm, setShowNewFolderForm] = useState(false);
@@ -59,6 +61,12 @@ export function KnowledgeBrowser({
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isDeletingId, setIsDeletingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialFolderId) {
+      setSelectedFolderId(initialFolderId);
+    }
+  }, [initialFolderId]);
 
   useEffect(() => {
     if (highlightedEntryId) {

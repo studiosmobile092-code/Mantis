@@ -32,6 +32,7 @@ import {distillTextLocally, mergeIncrementalCaption} from '../lib/textDistiller'
 
 interface CapturePanelProps {
   brainUrl: string;
+  backupBrainUrl: string;
   brainModel: string;
   accessToken: string;
   onSaveCapturedEntries: (
@@ -41,7 +42,7 @@ interface CapturePanelProps {
   onOpenKnowledge: () => void;
 }
 
-type CaptureTab = 'screen' | 'url_text' | 'image_mic';
+type CaptureTab = 'url_text' | 'image_mic' | 'screen';
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -68,8 +69,18 @@ interface SpeechRecognitionLike {
   stop: () => void;
 }
 
+interface LinkIngestRecord {
+  id: string;
+  url: string;
+  title: string;
+  kind: 'youtube' | 'article';
+  savedCount: number;
+  createdAt: string;
+}
+
 export function CapturePanel({
   brainUrl,
+  backupBrainUrl,
   brainModel,
   accessToken,
   onSaveCapturedEntries,
@@ -78,12 +89,14 @@ export function CapturePanel({
   const hasDisplayApi = supportsDisplayCapture();
   const hasMicApi = supportsSpeechRecognition();
 
-  const [activeTab, setActiveTab] = useState<CaptureTab>(hasDisplayApi ? 'screen' : 'url_text');
+  // Default to URL / Text or Live Mic so both Tablet & Chromebook work immediately on open
+  const [activeTab, setActiveTab] = useState<CaptureTab>('url_text');
 
   // Shared rolling capture buffer
-  const [sourceTitle, setSourceTitle] = useState('Live Screen & Caption Capture');
+  const [sourceTitle, setSourceTitle] = useState('Ingested Learning Session');
   const [capturedLines, setCapturedLines] = useState<string[]>([]);
   const [framesScanned, setFramesScanned] = useState(0);
+  const [framesSkipped, setFramesSkipped] = useState(0);
   const [notesLearned, setNotesLearned] = useState(0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -95,21 +108,34 @@ export function CapturePanel({
   const [scanIntervalMs, setScanIntervalMs] = useState(2000);
   const [autoLearnEnabled, setAutoLearnEnabled] = useState(true);
   const [lastConfidence, setLastConfidence] = useState<number | null>(null);
+  const [cropPreviewUrl, setCropPreviewUrl] = useState<string | null>(null);
 
   // URL / Paste state
   const [targetUrl, setTargetUrl] = useState('');
   const [pastedText, setPastedText] = useState('');
   const [isExtractingUrl, setIsExtractingUrl] = useState(false);
+  const [extractStepText, setExtractStepText] = useState<string | null>(null);
+  const [linkHistory, setLinkHistory] = useState<LinkIngestRecord[]>([]);
 
-  // Image / Mic state
+  // Image / Live Mic state
   const [isOcrImageBusy, setIsOcrImageBusy] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [micLevel, setMicLevel] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const prevLuminanceGridRef = useRef<number[] | null>(null);
   const isScanningFrameRef = useRef(false);
+
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const isMicWantedRef = useRef(false);
+  const micRestartTimerRef = useRef<number | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const audioMeterRafRef = useRef<number | null>(null);
+
   const linesRef = useRef<string[]>([]);
   const unlearnedLineStartRef = useRef(0);
 
@@ -131,11 +157,37 @@ export function CapturePanel({
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    prevLuminanceGridRef.current = null;
     setIsRecordingScreen(false);
   };
 
+  const stopAudioMeter = () => {
+    if (audioMeterRafRef.current !== null) {
+      window.cancelAnimationFrame(audioMeterRafRef.current);
+      audioMeterRafRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      void audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+    }
+    if (audioStreamRef.current) {
+      for (const track of audioStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      audioStreamRef.current = null;
+    }
+    setMicLevel(0);
+  };
+
   const stopMicCapture = () => {
+    isMicWantedRef.current = false;
+    if (micRestartTimerRef.current !== null) {
+      window.clearTimeout(micRestartTimerRef.current);
+      micRestartTimerRef.current = null;
+    }
     if (recognitionRef.current) {
+      recognitionRef.current.onend = null;
+      recognitionRef.current.onerror = null;
       try {
         recognitionRef.current.stop();
       } catch {
@@ -143,6 +195,8 @@ export function CapturePanel({
       }
       recognitionRef.current = null;
     }
+    stopAudioMeter();
+    setInterimTranscript('');
     setIsListeningMic(false);
   };
 
@@ -152,6 +206,7 @@ export function CapturePanel({
       stopMicCapture();
       void terminateOcrWorker();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function distillAndStoreLines(
@@ -168,10 +223,11 @@ export function CapturePanel({
       let items: DistilledKnowledgeItem[] = [];
       let summary = '';
 
-      if (brainUrl.trim() && accessToken) {
+      if ((brainUrl.trim() || backupBrainUrl.trim()) && accessToken) {
         try {
           const distilled = await distillWithAiBrain({
             brainUrl,
+            backupBrainUrl,
             accessToken,
             model: brainModel,
             text: rawText,
@@ -181,7 +237,6 @@ export function CapturePanel({
           items = distilled.entries;
           summary = distilled.summary;
         } catch {
-          // Graceful local fallback if AI Brain temporarily errors
           const local = distillTextLocally(rawText, title, sourceType);
           items = local.entries;
           summary = local.summary;
@@ -196,9 +251,11 @@ export function CapturePanel({
       const savedCount = await onSaveCapturedEntries(items, sourceType);
       setNotesLearned((prev) => prev + savedCount);
       setStatusMessage(
-        `Learned ${savedCount} Knowledge ${savedCount === 1 ? 'entry' : 'entries'} from ${sourceType}${
-          summary ? ` — ${summary}` : ''
-        }`,
+        savedCount > 0
+          ? `Stored ${savedCount} Knowledge ${savedCount === 1 ? 'entry' : 'entries'} from ${sourceType}${
+              summary ? ` — ${summary}` : ''
+            }`
+          : 'Entries matched existing knowledge (no duplicate rows added).',
       );
       return savedCount;
     } finally {
@@ -211,18 +268,28 @@ export function CapturePanel({
     if (!video || isScanningFrameRef.current || video.readyState < 2) return;
     isScanningFrameRef.current = true;
     try {
-      const {text, confidence} = await captureVideoFrameText(video, captureZone);
-      setFramesScanned((n) => n + 1);
-      setLastConfidence(confidence);
+      const result = await captureVideoFrameText(video, captureZone, prevLuminanceGridRef.current);
+      prevLuminanceGridRef.current = result.grid;
+      if (result.previewDataUrl) {
+        setCropPreviewUrl(result.previewDataUrl);
+      }
 
-      if (text.trim()) {
-        const {mergedLines, addedText} = mergeIncrementalCaption(linesRef.current, text);
+      if (result.skippedUnchanged) {
+        setFramesSkipped((n) => n + 1);
+        return;
+      }
+
+      setFramesScanned((n) => n + 1);
+      setLastConfidence(result.confidence);
+
+      if (result.text.trim()) {
+        const {mergedLines, addedText} = mergeIncrementalCaption(linesRef.current, result.text);
         if (addedText) {
           linesRef.current = mergedLines;
           setCapturedLines(mergedLines);
 
           const pendingCount = mergedLines.length - unlearnedLineStartRef.current;
-          if (autoLearnEnabled && pendingCount >= 6) {
+          if (autoLearnEnabled && pendingCount >= 5) {
             const batch = mergedLines.slice(unlearnedLineStartRef.current);
             unlearnedLineStartRef.current = mergedLines.length;
             void distillAndStoreLines(batch, sourceTitle, 'screen_ocr');
@@ -241,7 +308,7 @@ export function CapturePanel({
     setStatusMessage(null);
     if (!supportsDisplayCapture()) {
       setErrorMessage(
-        'Screen recording via browser tab is blocked on Android Chrome. Use URL / Text or Screenshot OCR / Live Mic tabs on this tablet.',
+        'Screen recording via browser tab is blocked on Android Chrome. Use YouTube / Article URL or Screenshots & Live Mic tabs on this tablet.',
       );
       return;
     }
@@ -252,6 +319,7 @@ export function CapturePanel({
         audio: false,
       });
       streamRef.current = stream;
+      prevLuminanceGridRef.current = null;
 
       const [videoTrack] = stream.getVideoTracks();
       if (videoTrack) {
@@ -267,11 +335,16 @@ export function CapturePanel({
 
       setIsRecordingScreen(true);
       setStatusMessage(
-        `Recording live (${captureZone === 'bottom_captions' ? 'YouTube Captions Strip' : captureZone === 'center_article' ? 'Center Article' : 'Full Screen'}). OCR worker warming up...`,
+        `Recording live (${
+          captureZone === 'bottom_captions'
+            ? 'YouTube Captions Strip'
+            : captureZone === 'center_article'
+              ? 'Center Article'
+              : 'Full Screen'
+        }). Diff-gated OCR active...`,
       );
 
-      // Run initial scan after 700ms and repeat on interval
-      window.setTimeout(() => void scanSingleVideoFrame(), 700);
+      window.setTimeout(() => void scanSingleVideoFrame(), 650);
       timerRef.current = window.setInterval(() => {
         void scanSingleVideoFrame();
       }, scanIntervalMs);
@@ -312,34 +385,47 @@ export function CapturePanel({
     setTargetUrl(clean);
     setErrorMessage(null);
     setStatusMessage(null);
-
-    if (!brainUrl.trim()) {
-      setErrorMessage(
-        'Connect your free Cloudflare Worker AI Brain in Settings first to fetch external YouTube captions and web articles automatically, or paste text directly below.',
-      );
-      return;
-    }
-
     setIsExtractingUrl(true);
+    setExtractStepText('1/3 Fetching source transcript or article body...');
+
     try {
       const extracted = await extractUrlViaBrain({
         brainUrl,
+        backupBrainUrl,
         accessToken,
         url: clean,
       });
+
       setSourceTitle(extracted.title);
+      setExtractStepText('2/3 Deduplicating and mining concepts...');
       const {mergedLines} = mergeIncrementalCaption(linesRef.current, extracted.text);
       linesRef.current = mergedLines;
       setCapturedLines(mergedLines);
       unlearnedLineStartRef.current = mergedLines.length;
 
-      await distillAndStoreLines(
+      const sourceType = extracted.kind === 'youtube' ? 'youtube_transcript' : 'article_ingest';
+      setExtractStepText('3/3 Saving distilled knowledge to Supabase...');
+      const savedCount = await distillAndStoreLines(
         extracted.text.split('\n'),
         extracted.title,
-        extracted.kind === 'youtube' ? 'youtube_transcript' : 'article_ingest',
+        sourceType,
       );
+
+      setLinkHistory((prev) => [
+        {
+          id: `${Date.now()}`,
+          url: clean,
+          title: extracted.title,
+          kind: extracted.kind,
+          savedCount,
+          createdAt: new Date().toISOString(),
+        },
+        ...prev.slice(0, 5),
+      ]);
       setTargetUrl('');
+      setExtractStepText(null);
     } catch (err) {
+      setExtractStepText(null);
       setErrorMessage(err instanceof Error ? err.message : 'Could not extract URL text.');
     } finally {
       setIsExtractingUrl(false);
@@ -416,51 +502,83 @@ export function CapturePanel({
     }
   }
 
-  function handleToggleMic() {
-    setErrorMessage(null);
-    if (isListeningMic) {
-      stopMicCapture();
-      const unlearned = linesRef.current.slice(unlearnedLineStartRef.current);
-      if (unlearned.length > 0) {
-        unlearnedLineStartRef.current = linesRef.current.length;
-        void distillAndStoreLines(unlearned, sourceTitle || 'Voice / Audio Capture', 'mic_transcript');
-      }
-      return;
-    }
+  async function startWebAudioMeter() {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      audioStreamRef.current = stream;
 
+      const AudioContextCtor =
+        window.AudioContext ||
+        (window as unknown as {webkitAudioContext?: typeof AudioContext}).webkitAudioContext;
+      if (!AudioContextCtor) return;
+
+      const ctx = new AudioContextCtor();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        if (!isMicWantedRef.current) return;
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i += 1) {
+          sum += dataArray[i];
+        }
+        const avg = sum / dataArray.length;
+        const normalized = Math.min(100, Math.round((avg / 90) * 100));
+        setMicLevel(normalized);
+        audioMeterRafRef.current = window.requestAnimationFrame(tick);
+      };
+      audioMeterRafRef.current = window.requestAnimationFrame(tick);
+    } catch {
+      // SpeechRecognition can still run even if AudioContext meter permission is skipped
+    }
+  }
+
+  function spawnRecognitionSession() {
     const win = window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionLike;
       webkitSpeechRecognition?: new () => SpeechRecognitionLike;
     };
     const SpeechCtor = win.SpeechRecognition || win.webkitSpeechRecognition;
-    if (!SpeechCtor) {
-      setErrorMessage('Speech recognition is unavailable in this browser.');
-      return;
-    }
+    if (!SpeechCtor) return;
 
     const recognition = new SpeechCtor();
     recognition.continuous = true;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onresult = (event) => {
-      const transcripts: string[] = [];
+      const finals: string[] = [];
+      let liveInterim = '';
+
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
-        if (res.isFinal && res[0]?.transcript) {
-          transcripts.push(res[0].transcript.trim());
+        const transcript = (res[0]?.transcript || '').trim();
+        if (!transcript) continue;
+        if (res.isFinal) {
+          finals.push(transcript);
+        } else {
+          liveInterim = liveInterim ? `${liveInterim} ${transcript}` : transcript;
         }
       }
-      if (transcripts.length > 0) {
+
+      setInterimTranscript(liveInterim);
+
+      if (finals.length > 0) {
         const {mergedLines, addedText} = mergeIncrementalCaption(
           linesRef.current,
-          transcripts.join('\n'),
+          finals.join('\n'),
         );
         if (addedText) {
           linesRef.current = mergedLines;
           setCapturedLines(mergedLines);
           const pending = mergedLines.length - unlearnedLineStartRef.current;
-          if (autoLearnEnabled && pending >= 5) {
+          if (autoLearnEnabled && pending >= 4) {
             const batch = mergedLines.slice(unlearnedLineStartRef.current);
             unlearnedLineStartRef.current = mergedLines.length;
             void distillAndStoreLines(batch, sourceTitle || 'Live Audio Capture', 'mic_transcript');
@@ -470,35 +588,86 @@ export function CapturePanel({
     };
 
     recognition.onerror = (ev) => {
-      setErrorMessage(`Mic listener error: ${ev.error || 'unknown'}`);
-      stopMicCapture();
+      const errCode = ev.error || '';
+      if (errCode === 'no-speech' || errCode === 'aborted') {
+        // Benign silence on Android Chrome — let onend auto-restart cleanly
+        return;
+      }
+      if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
+        setErrorMessage('Microphone access was denied by browser settings. Allow microphone access and retry.');
+        stopMicCapture();
+        return;
+      }
+      setErrorMessage(`Mic listener notice: ${errCode || 'reconnecting...'}`);
     };
 
     recognition.onend = () => {
-      setIsListeningMic(false);
+      if (isMicWantedRef.current) {
+        // Auto-heal Chrome's Android continuous cutoff
+        micRestartTimerRef.current = window.setTimeout(() => {
+          if (isMicWantedRef.current) {
+            spawnRecognitionSession();
+          }
+        }, 250);
+      } else {
+        setIsListeningMic(false);
+      }
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      // Ignore start race conditions
+    }
+  }
+
+  async function handleToggleMic() {
+    setErrorMessage(null);
+    if (isListeningMic) {
+      stopMicCapture();
+      const unlearned = linesRef.current.slice(unlearnedLineStartRef.current);
+      if (unlearned.length > 0) {
+        unlearnedLineStartRef.current = linesRef.current.length;
+        await distillAndStoreLines(unlearned, sourceTitle || 'Voice / Audio Capture', 'mic_transcript');
+      } else {
+        setStatusMessage('Mic stopped. Buffer saved.');
+      }
+      return;
+    }
+
+    if (!supportsSpeechRecognition()) {
+      setErrorMessage('Speech recognition is unavailable in this browser.');
+      return;
+    }
+
+    isMicWantedRef.current = true;
     setIsListeningMic(true);
-    setStatusMessage('Listening live — speak or play audio nearby to transcribe & auto-learn.');
+    setStatusMessage('Continuous live listener active — speak or play nearby audio; auto-saves continuously.');
+    void startWebAudioMeter();
+    spawnRecognitionSession();
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6" onPaste={handlePasteClipboard}>
+    <div className="mx-auto max-w-5xl space-y-5" onPaste={handlePasteClipboard}>
       <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-slate-100">
-            Live Screen, Caption &amp; Article Learner
+            Ingest &amp; Live Capture Lab
           </h1>
           <p className="text-sm text-slate-400">
-            Capture live screen captions, YouTube videos, articles, or screenshots and automatically
-            distill them into persistent Supabase Knowledge.
+            Ingest YouTube videos, web articles, continuous mic speech, or screen OCR into Supabase Knowledge.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 font-mono text-xs tabular-nums text-slate-400">
-          <span>{framesScanned} scans</span>
+          <span>{framesScanned} OCR scans</span>
+          {framesSkipped > 0 && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{framesSkipped} skipped static</span>
+            </>
+          )}
           <span aria-hidden="true">·</span>
           <span>{capturedLines.length} lines</span>
           <span aria-hidden="true">·</span>
@@ -507,20 +676,7 @@ export function CapturePanel({
       </div>
 
       {/* Mode Selector */}
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900 p-1.5">
-        <button
-          type="button"
-          onClick={() => setActiveTab('screen')}
-          className={`inline-flex min-h-[42px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
-            activeTab === 'screen'
-              ? 'bg-slate-800 text-slate-100'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Monitor className="h-4 w-4" />
-          <span>Live Screen OCR</span>
-        </button>
-
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-800 bg-[#0F172A] p-1.5">
         <button
           type="button"
           onClick={() => setActiveTab('url_text')}
@@ -531,7 +687,7 @@ export function CapturePanel({
           }`}
         >
           <Globe className="h-4 w-4" />
-          <span>YouTube / Article URL</span>
+          <span>YouTube &amp; Article Links</span>
         </button>
 
         <button
@@ -543,23 +699,36 @@ export function CapturePanel({
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
-          <Camera className="h-4 w-4" />
-          <span>Screenshots &amp; Live Mic</span>
+          <Mic className="h-4 w-4" />
+          <span>Live Mic &amp; Screenshots</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('screen')}
+          className={`inline-flex min-h-[42px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
+            activeTab === 'screen'
+              ? 'bg-slate-800 text-slate-100'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Monitor className="h-4 w-4" />
+          <span>Screen OCR (Chromebook / Desktop)</span>
         </button>
       </div>
 
-      {/* Shared Topic Title */}
-      <div className="grid gap-3 rounded-lg border border-slate-800 bg-slate-900 p-4 sm:grid-cols-[1fr_auto]">
+      {/* Shared Session Title */}
+      <div className="grid gap-3 rounded-lg border border-slate-800 bg-[#0F172A] p-4 sm:grid-cols-[1fr_auto]">
         <div className="space-y-1">
           <label htmlFor="capture-topic" className="block text-xs font-medium text-slate-300">
-            Session Topic / Knowledge Title Prefix
+            Knowledge Title Prefix
           </label>
           <input
             id="capture-topic"
             type="text"
             value={sourceTitle}
             onChange={(e) => setSourceTitle(e.target.value)}
-            placeholder="e.g. React Hooks YouTube Tutorial"
+            placeholder="e.g. TypeScript Patterns Tutorial"
             className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
           />
         </div>
@@ -575,16 +744,209 @@ export function CapturePanel({
         </label>
       </div>
 
-      {/* Tab 1: Live Screen OCR */}
+      {/* Tab 1: YouTube / Article URL + Bulk Paste */}
+      {activeTab === 'url_text' && (
+        <div className="space-y-4">
+          <form
+            onSubmit={handleExtractUrlSubmit}
+            className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                <Link2 className="h-4 w-4 text-emerald-400" />
+                <span>Read &amp; Learn from YouTube or Web Article URL</span>
+              </div>
+              {!(brainUrl.trim() || backupBrainUrl.trim()) && (
+                <span className="font-mono text-[11px] text-amber-300">
+                  Browser reader fallback (add Cloud Backup in Settings for YouTube captions)
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2.5 sm:flex-row">
+              <input
+                type="text"
+                inputMode="url"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={targetUrl}
+                onChange={(e) => setTargetUrl(e.target.value)}
+                placeholder="Paste youtube.com/watch?v=... or any documentation URL"
+                className="min-h-[44px] flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={isExtractingUrl || isDistilling}
+                className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+              >
+                <Sparkles className="h-4 w-4" />
+                <span>{isExtractingUrl ? 'Extracting...' : 'Read & Learn Link'}</span>
+              </button>
+            </div>
+
+            {extractStepText && (
+              <div className="rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-sky-300">
+                {extractStepText}
+              </div>
+            )}
+
+            {linkHistory.length > 0 && (
+              <div className="space-y-1.5 border-t border-slate-800 pt-3">
+                <div className="text-[11px] font-medium text-slate-400">Ingested Links (Session)</div>
+                <div className="space-y-1">
+                  {linkHistory.map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-800 bg-[#0B1120] px-3 py-1.5 text-xs"
+                    >
+                      <span className="truncate font-medium text-slate-200">{item.title}</span>
+                      <span className="font-mono text-[11px] tabular-nums text-emerald-400">
+                        {item.kind} · {item.savedCount} saved
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </form>
+
+          <form
+            onSubmit={handleLearnPastedText}
+            className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+              <FileText className="h-4 w-4 text-sky-400" />
+              <span>Paste Any Article, Docs Page, or Transcript</span>
+            </div>
+            <textarea
+              rows={5}
+              value={pastedText}
+              onChange={(e) => setPastedText(e.target.value)}
+              placeholder="Paste any article, notes, or transcript here — Mantis splits concepts and stores them automatically..."
+              className="w-full rounded-md border border-slate-700 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+            />
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={!pastedText.trim() || isDistilling}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-50"
+              >
+                <Sparkles className="h-4 w-4 text-emerald-400" />
+                <span>{isDistilling ? 'Distilling...' : 'Distill & Store Text'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Tab 2: Live Mic & Screenshot OCR */}
+      {activeTab === 'image_mic' && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+                <Mic className="h-4 w-4 text-sky-400" />
+                <span>Continuous Live Mic &amp; Audio Listener</span>
+              </div>
+              <span className="font-mono text-[11px] tabular-nums text-slate-400">
+                {isListeningMic ? `Signal ${micLevel}%` : 'Idle'}
+              </span>
+            </div>
+
+            <p className="text-xs leading-relaxed text-slate-400">
+              Auto-restarts cleanly on Android Chrome pauses and streams live spoken words below
+              until you tap Stop.
+            </p>
+
+            {/* Real Web Audio 16-bar Level Meter */}
+            <div
+              aria-label="Microphone audio signal meter"
+              className="flex h-8 items-end gap-1 rounded-md border border-slate-800 bg-[#0B1120] px-2.5 py-1.5"
+            >
+              {Array.from({length: 16}).map((_, idx) => {
+                const threshold = ((idx + 1) / 16) * 100;
+                const active = isListeningMic && micLevel >= threshold * 0.7;
+                return (
+                  <div
+                    key={idx}
+                    className={`flex-1 rounded-xs transition-all duration-75 ${
+                      active ? 'bg-emerald-500' : 'bg-slate-800'
+                    }`}
+                    style={{height: `${35 + (idx % 4) * 16}%`}}
+                  />
+                );
+              })}
+            </div>
+
+            {isListeningMic && (
+              <div className="min-h-[44px] rounded-md border border-slate-800 bg-[#0B1120] px-3 py-2 font-mono text-xs text-emerald-300">
+                {interimTranscript || 'Listening for speech or nearby video audio...'}
+              </div>
+            )}
+
+            <button
+              type="button"
+              disabled={!hasMicApi}
+              onClick={() => void handleToggleMic()}
+              className={`inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
+                isListeningMic
+                  ? 'bg-red-600 hover:bg-red-500'
+                  : 'bg-emerald-600 hover:bg-emerald-500'
+              }`}
+            >
+              {isListeningMic ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              <span>
+                {!hasMicApi
+                  ? 'Speech API Unsupported Here'
+                  : isListeningMic
+                    ? 'Stop Listening & Save'
+                    : 'Start Live Mic Listener'}
+              </span>
+            </button>
+          </div>
+
+          <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
+              <Camera className="h-4 w-4 text-emerald-400" />
+              <span>Screenshot / Photo Batch OCR</span>
+            </div>
+            <p className="text-xs leading-relaxed text-slate-400">
+              Upload screenshots on tablet or Chromebook (or press Ctrl+V to paste directly).
+              On-device OCR reads the text and stores concepts automatically.
+            </p>
+            <label className="flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-700 bg-[#0B1120] px-4 py-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/60 hover:bg-slate-800/60">
+              <ClipboardPaste className="h-4 w-4 text-emerald-400" />
+              <span>
+                {isOcrImageBusy ? 'Reading Image Text...' : 'Choose Screenshot(s) or Photo'}
+              </span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                disabled={isOcrImageBusy}
+                onChange={(e) => {
+                  if (e.target.files) {
+                    void processImageFiles(e.target.files);
+                    e.target.value = '';
+                  }
+                }}
+                className="sr-only"
+              />
+            </label>
+          </div>
+        </div>
+      )}
+
+      {/* Tab 3: Diff-Gated Screen OCR */}
       {activeTab === 'screen' && (
-        <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5">
+        <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
           {!hasDisplayApi && (
             <div className="rounded-md border border-amber-500/40 bg-amber-950/20 p-4 text-xs leading-relaxed text-amber-200">
-              <strong>Android Tablet Browser Notice:</strong> Chrome on Android blocks web pages
-              from recording other apps via <code className="font-mono">getDisplayMedia</code>. On
-              your Galaxy Tab A9+, use <strong>YouTube / Article URL</strong> (reads entire video
-              captions or articles in 1 tap!) or <strong>Screenshots &amp; Live Mic</strong>. On
-              your Chromebook, <strong>Start Screen Record</strong> works natively.
+              <strong>Android Browser Notice:</strong> Chrome on Android blocks{' '}
+              <code className="font-mono">getDisplayMedia</code>. On your Galaxy Tab A9+, use{' '}
+              <strong>YouTube &amp; Article Links</strong> or <strong>Live Mic &amp; Screenshots</strong>. On Chromebook,{' '}
+              <strong>Record Screen &amp; Read</strong> works natively.
             </div>
           )}
 
@@ -631,7 +993,7 @@ export function CapturePanel({
                   className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500"
                 >
                   <Square className="h-4 w-4" />
-                  <span>Stop &amp; Learn Remaining</span>
+                  <span>Stop &amp; Save Remaining</span>
                 </button>
               ) : (
                 <button
@@ -647,162 +1009,39 @@ export function CapturePanel({
             </div>
           </div>
 
-          <div className="overflow-hidden rounded-md border border-slate-800 bg-[#0B1120]">
-            <video
-              ref={videoRef}
-              muted
-              playsInline
-              className={`w-full object-contain ${isRecordingScreen ? 'max-h-60' : 'hidden'}`}
-            />
-            {!isRecordingScreen && (
-              <div className="p-6 text-center text-xs text-slate-400">
-                Tap <strong>Record Screen &amp; Read</strong>, select your YouTube or article tab,
-                and Mantis will crop, deduplicate rolling captions, and store what it reads.
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="overflow-hidden rounded-md border border-slate-800 bg-[#0B1120]">
+              <video
+                ref={videoRef}
+                muted
+                playsInline
+                className={`w-full object-contain ${isRecordingScreen ? 'max-h-52' : 'hidden'}`}
+              />
+              {!isRecordingScreen && (
+                <div className="p-6 text-center text-xs text-slate-400">
+                  Start recording a browser tab on Chromebook; static frames are skipped automatically
+                  to save CPU.
+                </div>
+              )}
+            </div>
+
+            {cropPreviewUrl && isRecordingScreen && (
+              <div className="space-y-1.5 rounded-md border border-slate-800 bg-[#0B1120] p-2.5">
+                <div className="font-mono text-[11px] text-slate-400">
+                  OCR Crop Target ({captureZone})
+                </div>
+                <img
+                  src={cropPreviewUrl}
+                  alt="Cropped OCR preview"
+                  className="max-h-40 w-full rounded border border-slate-800 object-contain"
+                />
               </div>
             )}
           </div>
         </section>
       )}
 
-      {/* Tab 2: YouTube / Article URL + Bulk Paste */}
-      {activeTab === 'url_text' && (
-        <div className="space-y-4">
-          <form
-            onSubmit={handleExtractUrlSubmit}
-            className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5"
-          >
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <Link2 className="h-4 w-4 text-emerald-400" />
-              <span>Auto-Read YouTube Video Captions or Web Article</span>
-            </div>
-            <p className="text-xs leading-relaxed text-slate-400">
-              Works directly on your Galaxy Tab A9+. Paste any YouTube link or article URL — Mantis
-              extracts every word of the transcript or article and distills it into Knowledge.
-              {!brainUrl.trim() && (
-                <span className="text-amber-300">
-                  {' '}
-                  (Requires your free Cloudflare Worker URL in Settings.)
-                </span>
-              )}
-            </p>
-            <div className="flex flex-col gap-2.5 sm:flex-row">
-              <input
-                type="text"
-                inputMode="url"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                value={targetUrl}
-                onChange={(e) => setTargetUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=... or youtube.com/..."
-                className="min-h-[44px] flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
-              />
-              <button
-                type="submit"
-                disabled={isExtractingUrl || isDistilling}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
-              >
-                <Sparkles className="h-4 w-4" />
-                <span>{isExtractingUrl ? 'Reading URL...' : 'Read & Learn All'}</span>
-              </button>
-            </div>
-          </form>
-
-          <form
-            onSubmit={handleLearnPastedText}
-            className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5"
-          >
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <FileText className="h-4 w-4 text-sky-400" />
-              <span>Paste Any Article, Docs Page, or Transcript</span>
-            </div>
-            <textarea
-              rows={5}
-              value={pastedText}
-              onChange={(e) => setPastedText(e.target.value)}
-              placeholder="Select-all & copy text from any webpage or transcript on your tablet, paste it here, and Mantis will chunk, summarize, and store every concept..."
-              className="w-full rounded-md border border-slate-700 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
-            />
-            <div className="flex justify-end">
-              <button
-                type="submit"
-                disabled={!pastedText.trim() || isDistilling}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-50"
-              >
-                <Sparkles className="h-4 w-4 text-emerald-400" />
-                <span>{isDistilling ? 'Distilling...' : 'Distill & Learn Text'}</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Tab 3: Screenshots & Live Mic */}
-      {activeTab === 'image_mic' && (
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <Camera className="h-4 w-4 text-emerald-400" />
-              <span>Screenshot / Photo Batch OCR</span>
-            </div>
-            <p className="text-xs leading-relaxed text-slate-400">
-              Take screenshots on your Galaxy Tab (or paste an image with Ctrl+V). Mantis runs
-              on-device OCR to read every word and store it into Knowledge.
-            </p>
-            <label className="flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-700 bg-[#0B1120] px-4 py-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/60 hover:bg-slate-800/60">
-              <ClipboardPaste className="h-4 w-4 text-emerald-400" />
-              <span>
-                {isOcrImageBusy ? 'Reading Image Text...' : 'Choose Screenshot(s) or Camera'}
-              </span>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                disabled={isOcrImageBusy}
-                onChange={(e) => {
-                  if (e.target.files) {
-                    void processImageFiles(e.target.files);
-                    e.target.value = '';
-                  }
-                }}
-                className="sr-only"
-              />
-            </label>
-          </div>
-
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <Mic className="h-4 w-4 text-sky-400" />
-              <span>Live Audio / Caption Mic Listener</span>
-            </div>
-            <p className="text-xs leading-relaxed text-slate-400">
-              Uses Chrome&apos;s built-in speech recognizer on Android &amp; Chromebook to transcribe
-              spoken explanations or nearby video audio in real time.
-            </p>
-            <button
-              type="button"
-              disabled={!hasMicApi}
-              onClick={handleToggleMic}
-              className={`inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
-                isListeningMic
-                  ? 'bg-red-600 hover:bg-red-500'
-                  : 'bg-emerald-600 hover:bg-emerald-500'
-              }`}
-            >
-              {isListeningMic ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-              <span>
-                {!hasMicApi
-                  ? 'Speech API Unsupported Here'
-                  : isListeningMic
-                    ? 'Stop Listening & Save'
-                    : 'Start Live Mic Listener'}
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Feedback Alerts */}
+      {/* Alerts */}
       {errorMessage && (
         <div
           role="alert"
@@ -833,11 +1072,11 @@ export function CapturePanel({
         </div>
       )}
 
-      {/* Live Deduplicated Buffer */}
-      <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
+      {/* Deduplicated Buffer */}
+      <section className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-mono text-xs text-slate-300">
-            <span className="font-semibold text-slate-100">Live Deduplicated Text Buffer</span>
+            <span className="font-semibold text-slate-100">Deduplicated Capture Buffer</span>
             {lastConfidence !== null && (
               <>
                 <span aria-hidden="true">·</span>
@@ -854,7 +1093,7 @@ export function CapturePanel({
               className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
             >
               <Sparkles className="h-3.5 w-3.5" />
-              <span>{isDistilling ? 'Learning...' : 'Distill & Save Buffer Now'}</span>
+              <span>{isDistilling ? 'Learning...' : 'Distill & Save Buffer'}</span>
             </button>
             <button
               type="button"
@@ -872,10 +1111,10 @@ export function CapturePanel({
           </div>
         </div>
 
-        <pre className="max-h-64 min-h-[120px] overflow-auto whitespace-pre-wrap rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
+        <pre className="max-h-60 min-h-[110px] overflow-auto whitespace-pre-wrap rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
           {capturedLines.length > 0
             ? capturedLines.join('\n')
-            : 'Captured captions, article paragraphs, and screenshot OCR text appear here automatically (deduplicated in real time).'}
+            : 'Captured YouTube captions, articles, voice transcripts, and OCR lines collect here automatically.'}
         </pre>
       </section>
     </div>

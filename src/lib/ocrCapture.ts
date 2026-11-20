@@ -44,12 +44,52 @@ export function supportsSpeechRecognition(): boolean {
   return Boolean(win.SpeechRecognition || win.webkitSpeechRecognition);
 }
 
+/**
+ * Computes a tiny 16x9 grayscale grid from the cropped canvas so unchanged frames
+ * skip expensive Tesseract OCR passes completely.
+ */
+function computeLuminanceGrid(
+  sourceCanvas: HTMLCanvasElement,
+): number[] {
+  const sampleW = 16;
+  const sampleH = 9;
+  const tiny = document.createElement('canvas');
+  tiny.width = sampleW;
+  tiny.height = sampleH;
+  const tctx = tiny.getContext('2d');
+  if (!tctx) return [];
+  tctx.drawImage(sourceCanvas, 0, 0, sampleW, sampleH);
+  const {data} = tctx.getImageData(0, 0, sampleW, sampleH);
+  const grid: number[] = [];
+  for (let i = 0; i < data.length; i += 4) {
+    const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    grid.push(Math.round(lum));
+  }
+  return grid;
+}
+
+function hasSignificantFrameChange(prev: number[] | null, next: number[], threshold = 4.5): boolean {
+  if (!prev || prev.length === 0 || prev.length !== next.length) return true;
+  let diffSum = 0;
+  for (let i = 0; i < next.length; i += 1) {
+    diffSum += Math.abs(next[i] - prev[i]);
+  }
+  return diffSum / next.length >= threshold;
+}
+
 export async function captureVideoFrameText(
   video: HTMLVideoElement,
   zone: CaptureZone,
-): Promise<{text: string; confidence: number}> {
+  prevGrid?: number[] | null,
+): Promise<{
+  text: string;
+  confidence: number;
+  grid: number[];
+  skippedUnchanged: boolean;
+  previewDataUrl: string | null;
+}> {
   if (video.videoWidth === 0 || video.videoHeight === 0) {
-    return {text: '', confidence: 0};
+    return {text: '', confidence: 0, grid: prevGrid || [], skippedUnchanged: true, previewDataUrl: null};
   }
 
   const vw = video.videoWidth;
@@ -73,24 +113,39 @@ export async function captureVideoFrameText(
   }
 
   const canvas = document.createElement('canvas');
-  // Scale slightly for sharper small caption fonts without blowing mobile memory
   const scale = zone === 'bottom_captions' ? 1.5 : 1;
   canvas.width = Math.max(1, Math.round(sw * scale));
   canvas.height = Math.max(1, Math.round(sh * scale));
 
   const ctx = canvas.getContext('2d');
   if (!ctx) {
-    return {text: '', confidence: 0};
+    return {text: '', confidence: 0, grid: prevGrid || [], skippedUnchanged: true, previewDataUrl: null};
   }
 
   ctx.filter = 'contrast(1.25)';
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+  const nextGrid = computeLuminanceGrid(canvas);
+  const previewDataUrl = canvas.toDataURL('image/jpeg', 0.65);
+
+  if (prevGrid && !hasSignificantFrameChange(prevGrid, nextGrid)) {
+    return {
+      text: '',
+      confidence: 0,
+      grid: nextGrid,
+      skippedUnchanged: true,
+      previewDataUrl,
+    };
+  }
 
   const worker = await getOcrWorker();
   const result = await worker.recognize(canvas);
   return {
     text: result.data.text || '',
     confidence: Math.round(result.data.confidence || 0),
+    grid: nextGrid,
+    skippedUnchanged: false,
+    previewDataUrl,
   };
 }
 

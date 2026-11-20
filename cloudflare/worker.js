@@ -322,6 +322,7 @@ function decodeHtmlEntities(str) {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
     .replace(/&nbsp;/g, ' ');
 }
 
@@ -375,127 +376,317 @@ function extractBalancedJsonArray(source, startIndex) {
   return null;
 }
 
-async function extractYouTubeTranscript(url, videoId) {
-  const pageRes = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+async function fetchCaptionTrackLines(trackUrl) {
+  const capRes = await fetch(trackUrl, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
     },
   });
-  if (!pageRes.ok) {
-    throw new Error(`YouTube returned status ${pageRes.status}.`);
-  }
-  const html = await pageRes.text();
-  const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-  const title = titleMatch
-    ? decodeHtmlEntities(titleMatch[1].replace(/\s*-\s*YouTube\s*$/i, '').trim())
-    : `YouTube Video ${videoId}`;
+  if (!capRes.ok) return [];
+  const raw = await capRes.text();
 
-  const captionsMarker = '"captionTracks":';
-  const idx = html.indexOf(captionsMarker);
-  if (idx === -1) {
-    throw new Error(
-      'No public caption track found on this YouTube video (captions may be disabled or blocked). Try Live Screen Capture or Mic/Paste mode instead.',
-    );
-  }
-
-  const arrayStart = html.indexOf('[', idx + captionsMarker.length);
-  const jsonSlice = arrayStart !== -1 ? extractBalancedJsonArray(html, arrayStart) : null;
-  if (!jsonSlice) {
-    throw new Error('Could not parse YouTube caption track list.');
-  }
-  const tracks = JSON.parse(jsonSlice);
-  if (!Array.isArray(tracks) || tracks.length === 0) {
-    throw new Error('Caption track list is empty.');
+  // Support json3 caption format if returned
+  if (raw.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      const events = Array.isArray(parsed.events) ? parsed.events : [];
+      const out = [];
+      for (const ev of events) {
+        if (!Array.isArray(ev.segs)) continue;
+        const line = ev.segs
+          .map((s) => String(s.utf8 || ''))
+          .join('')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (line && line !== '\n') out.push(line);
+      }
+      if (out.length > 0) return out;
+    } catch {
+      // fall through to XML parser
+    }
   }
 
-  const chosen =
-    tracks.find((t) => (t.languageCode || '').startsWith('en') && t.kind !== 'asr') ||
-    tracks.find((t) => (t.languageCode || '').startsWith('en')) ||
-    tracks[0];
-
-  if (!chosen?.baseUrl) {
-    throw new Error('Missing caption track URL.');
-  }
-
-  const capRes = await fetch(chosen.baseUrl);
-  if (!capRes.ok) {
-    throw new Error(`Failed to fetch caption track (${capRes.status}).`);
-  }
-  const xml = await capRes.text();
   const lines = [];
   const regex = /<text[^>]*>([\s\S]*?)<\/text>/g;
   let match;
-  while ((match = regex.exec(xml)) !== null) {
+  while ((match = regex.exec(raw)) !== null) {
     const cleaned = decodeHtmlEntities(match[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     if (cleaned) lines.push(cleaned);
   }
-
-  if (lines.length === 0) {
-    throw new Error('YouTube caption track returned empty text.');
-  }
-
-  return {
-    kind: 'youtube',
-    url,
-    title,
-    text: lines.join('\n'),
-  };
+  return lines;
 }
 
-async function extractWebArticle(url) {
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'MantisWebReader/1.0 (+https://studiosmobile092-code.github.io/Mantis/)',
-      Accept: 'text/html,text/plain,application/json',
+async function fetchYouTubeInnerTube(videoId) {
+  const clients = [
+    {
+      clientName: 'ANDROID',
+      clientVersion: '19.29.37',
+      androidSdkVersion: 30,
+      userAgent: 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip',
     },
-  });
-  if (!res.ok) {
-    throw new Error(`Target site returned HTTP ${res.status}.`);
+    {
+      clientName: 'WEB',
+      clientVersion: '2.20240801.01.00',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    },
+  ];
+
+  for (const client of clients) {
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': client.userAgent,
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        body: JSON.stringify({
+          videoId,
+          context: {
+            client: {
+              clientName: client.clientName,
+              clientVersion: client.clientVersion,
+              androidSdkVersion: client.androidSdkVersion,
+              hl: 'en',
+              gl: 'US',
+            },
+          },
+        }),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const title = String(data?.videoDetails?.title || '').trim();
+      const author = String(data?.videoDetails?.author || '').trim();
+      const description = String(data?.videoDetails?.shortDescription || '').trim();
+      const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (Array.isArray(tracks) && tracks.length > 0) {
+        return {title, author, description, tracks};
+      }
+      if (title || description) {
+        return {title, author, description, tracks: []};
+      }
+    } catch {
+      // try next client
+    }
   }
-  const contentType = res.headers.get('content-type') || '';
-  const raw = await res.text();
-  if (!contentType.includes('html')) {
+  return null;
+}
+
+async function extractYouTubeTranscript(url, videoId) {
+  let title = `YouTube Video ${videoId}`;
+  let author = '';
+  let description = '';
+  let tracks = [];
+
+  // Strategy 1: YouTube InnerTube player API (returns clean captionTracks + metadata)
+  const inner = await fetchYouTubeInnerTube(videoId);
+  if (inner) {
+    if (inner.title) title = inner.title;
+    if (inner.author) author = inner.author;
+    if (inner.description) description = inner.description;
+    if (Array.isArray(inner.tracks) && inner.tracks.length > 0) {
+      tracks = inner.tracks;
+    }
+  }
+
+  // Strategy 2: Desktop watch HTML page parsing fallback
+  if (tracks.length === 0) {
+    const pageRes = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    if (pageRes.ok) {
+      const html = await pageRes.text();
+      const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+      if (titleMatch && !inner?.title) {
+        title = decodeHtmlEntities(titleMatch[1].replace(/\s*-\s*YouTube\s*$/i, '').trim());
+      }
+      if (!description) {
+        const descMatch = html.match(/"shortDescription":"((?:\\.|[^"\\])*)"/);
+        if (descMatch) {
+          try {
+            description = JSON.parse(`"${descMatch[1]}"`);
+          } catch {
+            // ignore
+          }
+        }
+      }
+      const captionsMarker = '"captionTracks":';
+      const idx = html.indexOf(captionsMarker);
+      if (idx !== -1) {
+        const arrayStart = html.indexOf('[', idx + captionsMarker.length);
+        const jsonSlice = arrayStart !== -1 ? extractBalancedJsonArray(html, arrayStart) : null;
+        if (jsonSlice) {
+          try {
+            const parsed = JSON.parse(jsonSlice);
+            if (Array.isArray(parsed)) tracks = parsed;
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  }
+
+  if (tracks.length > 0) {
+    const chosen =
+      tracks.find((t) => (t.languageCode || '').startsWith('en') && t.kind !== 'asr') ||
+      tracks.find((t) => (t.languageCode || '').startsWith('en')) ||
+      tracks[0];
+
+    if (chosen?.baseUrl) {
+      const lines = await fetchCaptionTrackLines(chosen.baseUrl);
+      if (lines.length > 0) {
+        const header = author ? `Channel: ${author}\n` : '';
+        return {
+          kind: 'youtube',
+          url,
+          title,
+          text: `${header}${lines.join('\n')}`,
+        };
+      }
+    }
+  }
+
+  // Strategy 3: oEmbed + video description fallback when captions are disabled
+  if (!description) {
+    try {
+      const oembedRes = await fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+      );
+      if (oembedRes.ok) {
+        const oembed = await oembedRes.json();
+        if (oembed?.title) title = String(oembed.title);
+        if (oembed?.author_name) author = String(oembed.author_name);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (description.trim().length >= 40) {
     return {
-      kind: 'article',
+      kind: 'youtube',
       url,
-      title: url,
-      text: raw.slice(0, 35000),
+      title,
+      text: [
+        `Video Title: ${title}`,
+        author ? `Channel: ${author}` : '',
+        'Note: Public captions were disabled on this video, extracted full video description:',
+        '',
+        description.trim(),
+      ]
+        .filter(Boolean)
+        .join('\n'),
     };
   }
 
-  const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : url;
+  throw new Error(
+    `Found "${title}", but public captions are disabled or blocked on this video. Use Screenshots & Live Mic or paste the transcript below.`,
+  );
+}
 
-  const articleMatch =
-    raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i) ||
-    raw.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
-  const bodyHtml = articleMatch ? articleMatch[1] : raw;
+async function fetchJinaMarkdownFallback(url) {
+  const jinaUrl = `https://r.jina.ai/${url}`;
+  const res = await fetch(jinaUrl, {
+    headers: {
+      Accept: 'text/plain, text/markdown',
+      'X-Return-Format': 'markdown',
+    },
+  });
+  if (!res.ok) return null;
+  const raw = await res.text();
+  if (!raw || raw.trim().length < 80) return null;
 
-  const cleaned = bodyHtml
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
-    .replace(/<aside[\s\S]*?<\/aside>/gi, ' ')
-    .replace(/<footer[\s\S]*?<\/footer>/gi, ' ')
-    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|section|article|pre|code|br)>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ');
+  const titleMatch = raw.match(/^Title:\s*(.+)$/m);
+  const title = titleMatch ? titleMatch[1].trim() : url;
+  const body = raw
+    .replace(/^Title:.*$/m, '')
+    .replace(/^URL Source:.*$/m, '')
+    .replace(/^Markdown Content:\s*$/m, '')
+    .trim();
 
-  const text = decodeHtmlEntities(cleaned)
-    .split('\n')
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter((line) => line.length >= 3)
-    .join('\n')
-    .slice(0, 35000);
-
+  if (body.length < 80) return null;
   return {
     kind: 'article',
     url,
     title,
-    text,
+    text: body.slice(0, 35000),
   };
+}
+
+async function extractWebArticle(url) {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        Accept: 'text/html,text/plain,application/json,text/markdown',
+      },
+    });
+    if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      const raw = await res.text();
+      if (!contentType.includes('html')) {
+        return {
+          kind: 'article',
+          url,
+          title: url,
+          text: raw.slice(0, 35000),
+        };
+      }
+
+      const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : url;
+
+      const articleMatch =
+        raw.match(/<article[^>]*>([\s\S]*?)<\/article>/i) ||
+        raw.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+      const bodyHtml = articleMatch ? articleMatch[1] : raw;
+
+      const cleaned = bodyHtml
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+        .replace(/<nav[\s\S]*?<\/nav>/gi, ' ')
+        .replace(/<aside[\s\S]*?<\/aside>/gi, ' ')
+        .replace(/<footer[\s\S]*?<\/footer>/gi, ' ')
+        .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|section|article|pre|code|br)>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ');
+
+      const text = decodeHtmlEntities(cleaned)
+        .split('\n')
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter((line) => line.length >= 3)
+        .join('\n')
+        .slice(0, 35000);
+
+      if (text.length >= 260) {
+        return {
+          kind: 'article',
+          url,
+          title,
+          text,
+        };
+      }
+    }
+  } catch {
+    // Fall through to markdown reader fallback
+  }
+
+  const readerResult = await fetchJinaMarkdownFallback(url);
+  if (readerResult) {
+    return readerResult;
+  }
+
+  throw new Error(
+    'Could not read clean article text from that URL (the site may require login or block automated readers). Copy-paste the text into the box below.',
+  );
 }
 
 export default {

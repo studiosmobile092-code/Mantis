@@ -1,6 +1,8 @@
 import cloudflareWorkerSource from '../../cloudflare/worker.js?raw';
+import supabaseEdgeFunctionSource from '../../supabase/functions/mantis-brain/index.ts?raw';
 
 export const MANTIS_CLOUDFLARE_WORKER_JS = cloudflareWorkerSource;
+export const MANTIS_SUPABASE_EDGE_FUNCTION_TS = supabaseEdgeFunctionSource;
 
 export const MANTIS_PHASE1_SCHEMA_SQL = `-- Mantis Web-First Phase 1 Schema
 -- Run once in Supabase SQL Editor:
@@ -258,7 +260,7 @@ grant select, insert, update, delete on table
   to authenticated;
 grant usage, select on all sequences in schema public to authenticated;`;
 
-export const MANTIS_PHASE5_SCHEMA_SQL = `-- Mantis Web-First Phase 5 Migration SQL (Trainable Memory + AI Brain Preferences)
+export const MANTIS_PHASE5_SCHEMA_SQL = `-- Mantis Web-First Phase 5 Migration SQL (Trainable Memory + Dual-Route AI Brain Preferences)
 -- Run once in Supabase SQL Editor:
 -- https://supabase.com/dashboard/project/ncbtoawlltxukzzdyvhc/sql
 
@@ -269,11 +271,17 @@ alter table public.knowledge_entries
 create table if not exists public.user_preferences (
   user_id uuid primary key default auth.uid(),
   brain_url text not null default '',
+  backup_brain_url text not null default '',
   preferred_model text not null default 'Qwen/Qwen2.5-Coder-32B-Instruct',
   auto_learn_from_chat boolean not null default true,
+  prefer_built_in_first boolean not null default true,
   capture_interval_ms integer not null default 2000,
   updated_at timestamptz not null default now()
 );
+
+alter table public.user_preferences
+  add column if not exists backup_brain_url text not null default '',
+  add column if not exists prefer_built_in_first boolean not null default true;
 
 drop trigger if exists trg_user_preferences_updated_at on public.user_preferences;
 create trigger trg_user_preferences_updated_at
