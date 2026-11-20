@@ -1,7 +1,9 @@
 import cloudflareWorkerSource from '../../cloudflare/worker.js?raw';
+import supabaseEdgeHelpersSource from '../../supabase/functions/mantis-brain/helpers.ts?raw';
 import supabaseEdgeFunctionSource from '../../supabase/functions/mantis-brain/index.ts?raw';
 
 export const MANTIS_CLOUDFLARE_WORKER_JS = cloudflareWorkerSource;
+export const MANTIS_SUPABASE_EDGE_HELPERS_TS = supabaseEdgeHelpersSource;
 export const MANTIS_SUPABASE_EDGE_FUNCTION_TS = supabaseEdgeFunctionSource;
 
 export const MANTIS_PHASE1_SCHEMA_SQL = `-- Mantis Web-First Phase 1 Schema
