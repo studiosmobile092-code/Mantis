@@ -110,9 +110,9 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   - **YouTube/Article URL & Mic/OCR Reliability**: Added YouTube InnerTube `/youtubei/v1/player` + balanced `captionTracks` + oEmbed metadata fallback and `r.jina.ai` article fallback to both backends and browser client fallback; rebuilt continuous `SpeechRecognition` with `interimResults = true` + Android auto-restart loop + live Web Audio `AnalyserNode` 16-bar mic meter; added grayscale luminance frame-diff gating + live crop thumbnail preview in `ocrCapture.ts` and `CapturePanel.tsx`.
 - **Verification**: Run `npm run lint`, `npm run build`, and secret scan across `src/`, `cloudflare/`, and `supabase/`. In Supabase SQL Editor, run updated `supabase/schema_phase5.sql` once, and optionally deploy `supabase/functions/mantis-brain/index.ts` via Supabase Dashboard Edge Functions Editor to unlock AI Assist & URL ingestion on `.dev`-blocked Chromebooks.
 
-### Step 5.5 — Tablet-Safe Two-File Edge Function Split (`helpers.ts` + `index.ts`)
+### Step 5.5 — Tablet-Safe Edge Function Split (`helpers.ts`, `providers.ts`, `routes.ts`, 3-line `index.ts`)
 - **Status**: Completed
 - **Summary**:
-  - Split `supabase/functions/mantis-brain/index.ts` (previously ~28 KB) into two lightweight, self-contained files (`supabase/functions/mantis-brain/helpers.ts` + `supabase/functions/mantis-brain/index.ts`, ~10–11 KB each) so pasting in the Supabase Dashboard web editor on Android tablet Chrome never crashes the browser tab and requires zero cursor-alignment inside a single large file.
-  - Updated `src/lib/schemaText.ts` and `src/components/SettingsPanel.tsx` with dedicated **Copy Edge Part 1 (helpers.ts)** and **Copy Edge Part 2 (index.ts)** buttons and `+ Add File` instructions.
-- **Verification**: Run `npm run lint` and `npm run build`, then paste `helpers.ts` via **+ Add File** and `index.ts` into Supabase Edge Functions (`mantis-brain`) and deploy.
+  - Split `supabase/functions/mantis-brain` into four tiny modules (`helpers.ts` ~10.5 KB, `providers.ts` ~4.3 KB, `routes.ts` ~5.6 KB, and a 3-line `index.ts` without remote `jsr:` imports) so Supabase's web editor on Android tablet Chrome never stalls or crashes when replacing `index.ts`.
+  - Updated `src/lib/schemaText.ts` and `src/components/SettingsPanel.tsx` with dedicated 1-tap copy buttons for all four files.
+- **Verification**: Run `npm run lint` and `npm run build`, add `helpers.ts`, `providers.ts`, and `routes.ts` via **+ Add File**, replace `index.ts` with 3 lines, and deploy `mantis-brain`.

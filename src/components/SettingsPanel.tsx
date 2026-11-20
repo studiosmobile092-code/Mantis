@@ -15,6 +15,8 @@ import {
   MANTIS_PHASE5_SCHEMA_SQL,
   MANTIS_SUPABASE_EDGE_FUNCTION_TS,
   MANTIS_SUPABASE_EDGE_HELPERS_TS,
+  MANTIS_SUPABASE_EDGE_PROVIDERS_TS,
+  MANTIS_SUPABASE_EDGE_ROUTES_TS,
 } from '../lib/schemaText';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from '../lib/supabase';
 import type {BrainRouteStatus, GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
@@ -67,7 +69,17 @@ export function SettingsPanel({
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [pingMessage, setPingMessage] = useState<string | null>(null);
   const [copiedWhich, setCopiedWhich] = useState<
-    1 | 2 | 3 | 4 | 5 | 'worker' | 'supabase-helpers' | 'supabase-fn' | null
+    | 1
+    | 2
+    | 3
+    | 4
+    | 5
+    | 'worker'
+    | 'supabase-helpers'
+    | 'supabase-providers'
+    | 'supabase-routes'
+    | 'supabase-fn'
+    | null
   >(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
@@ -126,7 +138,17 @@ export function SettingsPanel({
 
   async function handleCopyText(
     text: string,
-    which: 1 | 2 | 3 | 4 | 5 | 'worker' | 'supabase-helpers' | 'supabase-fn',
+    which:
+      | 1
+      | 2
+      | 3
+      | 4
+      | 5
+      | 'worker'
+      | 'supabase-helpers'
+      | 'supabase-providers'
+      | 'supabase-routes'
+      | 'supabase-fn',
   ) {
     try {
       await navigator.clipboard.writeText(text);
@@ -342,35 +364,12 @@ export function SettingsPanel({
 
           <button
             type="button"
-            onClick={() => void handleCopyText(MANTIS_SUPABASE_EDGE_HELPERS_TS, 'supabase-helpers')}
+            onClick={() => setShowEdgeCode((v) => !v)}
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
           >
-            {copiedWhich === 'supabase-helpers' ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
+            <Copy className="h-3.5 w-3.5" />
             <span>
-              {copiedWhich === 'supabase-helpers'
-                ? 'Part 1 (helpers.ts) Copied'
-                : 'Copy Edge Part 1 (helpers.ts)'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => void handleCopyText(MANTIS_SUPABASE_EDGE_FUNCTION_TS, 'supabase-fn')}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
-          >
-            {copiedWhich === 'supabase-fn' ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            <span>
-              {copiedWhich === 'supabase-fn'
-                ? 'Part 2 (index.ts) Copied'
-                : 'Copy Edge Part 2 (index.ts)'}
+              {showEdgeCode ? 'Hide Chromebook Edge Files' : 'Chromebook Edge Files (4 Light Files)'}
             </span>
           </button>
 
@@ -419,9 +418,31 @@ export function SettingsPanel({
         </div>
 
         {showEdgeCode && (
-          <div className="space-y-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
+          <div className="space-y-3 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
             <div className="font-semibold text-emerald-300">
-              Bypass Chromebook `.dev` Block via Supabase Edge Function (2 Light Files, Zero CLI)
+              Bypass Chromebook `.dev` Block via Supabase Edge Function (4 Tiny Tablet-Safe Files)
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                {id: 'supabase-helpers' as const, label: '1. Copy helpers.ts', code: MANTIS_SUPABASE_EDGE_HELPERS_TS},
+                {id: 'supabase-providers' as const, label: '2. Copy providers.ts', code: MANTIS_SUPABASE_EDGE_PROVIDERS_TS},
+                {id: 'supabase-routes' as const, label: '3. Copy routes.ts', code: MANTIS_SUPABASE_EDGE_ROUTES_TS},
+                {id: 'supabase-fn' as const, label: '4. Copy index.ts (3 lines)', code: MANTIS_SUPABASE_EDGE_FUNCTION_TS},
+              ].map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => void handleCopyText(item.code, item.id)}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                >
+                  {copiedWhich === item.id ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                  <span>{copiedWhich === item.id ? 'Copied!' : item.label}</span>
+                </button>
+              ))}
             </div>
             <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
               <li>
@@ -432,42 +453,26 @@ export function SettingsPanel({
                 and click <strong>Deploy a new function → Via Editor</strong>.
               </li>
               <li>
-                Click <strong>+ Add File</strong>, name it{' '}
-                <code className="font-mono text-slate-200">helpers.ts</code>, copy{' '}
-                <strong>Edge Part 1 (helpers.ts)</strong> above, and paste it into{' '}
-                <code className="font-mono text-slate-200">helpers.ts</code>.
+                Use <strong>+ Add File</strong> to create <code className="font-mono text-slate-200">helpers.ts</code>,{' '}
+                <code className="font-mono text-slate-200">providers.ts</code>, and{' '}
+                <code className="font-mono text-slate-200">routes.ts</code>, pasting each file above.
               </li>
               <li>
-                Click <code className="font-mono text-slate-200">index.ts</code>, select all and
-                delete the starter template, copy <strong>Edge Part 2 (index.ts)</strong> above,
-                and paste it into <code className="font-mono text-slate-200">index.ts</code>. Name
-                the function <code className="font-mono text-slate-200">mantis-brain</code> and
-                deploy.
+                Open <code className="font-mono text-slate-200">index.ts</code>, delete all 26 starter
+                lines, and paste the 3-line <code className="font-mono text-slate-200">index.ts</code>.
+                Name the function <code className="font-mono text-slate-200">mantis-brain</code> and deploy.
               </li>
               <li>
                 In <strong>Details</strong> for <code className="font-mono text-slate-200">mantis-brain</code>,
-                turn OFF <strong>Enforce JWT Verification</strong> (our code checks your user token
-                internally while letting <code className="font-mono text-slate-200">/health</code> respond cleanly).
-              </li>
-              <li>
-                In <strong>Edge Functions → Secrets</strong>, add a free key such as{' '}
-                <code className="font-mono text-slate-200">GROQ_API_KEY</code> (from{' '}
-                <code className="font-mono text-slate-200">console.groq.com</code>) or{' '}
-                <code className="font-mono text-slate-200">OPENROUTER_API_KEY</code>.
+                turn OFF <strong>Enforce JWT Verification</strong>, and add{' '}
+                <code className="font-mono text-slate-200">GROQ_API_KEY</code> under{' '}
+                <strong>Edge Functions → Secrets</strong>.
               </li>
               <li>
                 Tap <strong>Use Supabase URL</strong> next to Chromebook Backup URL above and click{' '}
                 <strong>Save &amp; Test Both Routes</strong>.
               </li>
             </ol>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <pre className="max-h-40 overflow-auto rounded border border-slate-800 bg-[#0F172A] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-                {MANTIS_SUPABASE_EDGE_HELPERS_TS}
-              </pre>
-              <pre className="max-h-40 overflow-auto rounded border border-slate-800 bg-[#0F172A] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-                {MANTIS_SUPABASE_EDGE_FUNCTION_TS}
-              </pre>
-            </div>
           </div>
         )}
 

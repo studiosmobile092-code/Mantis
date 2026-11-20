@@ -1,9 +1,13 @@
 import cloudflareWorkerSource from '../../cloudflare/worker.js?raw';
 import supabaseEdgeHelpersSource from '../../supabase/functions/mantis-brain/helpers.ts?raw';
+import supabaseEdgeProvidersSource from '../../supabase/functions/mantis-brain/providers.ts?raw';
+import supabaseEdgeRoutesSource from '../../supabase/functions/mantis-brain/routes.ts?raw';
 import supabaseEdgeFunctionSource from '../../supabase/functions/mantis-brain/index.ts?raw';
 
 export const MANTIS_CLOUDFLARE_WORKER_JS = cloudflareWorkerSource;
 export const MANTIS_SUPABASE_EDGE_HELPERS_TS = supabaseEdgeHelpersSource;
+export const MANTIS_SUPABASE_EDGE_PROVIDERS_TS = supabaseEdgeProvidersSource;
+export const MANTIS_SUPABASE_EDGE_ROUTES_TS = supabaseEdgeRoutesSource;
 export const MANTIS_SUPABASE_EDGE_FUNCTION_TS = supabaseEdgeFunctionSource;
 
 export const MANTIS_PHASE1_SCHEMA_SQL = `-- Mantis Web-First Phase 1 Schema
