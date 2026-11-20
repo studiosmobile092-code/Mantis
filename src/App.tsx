@@ -1361,6 +1361,7 @@ export default function App() {
             brainUrl={brainUrl}
             brainModel={brainModel}
             autoLearnFromChat={autoLearnFromChat}
+            accessToken={session.access_token}
             connection={connection}
             onSaveBrainConfig={handleSaveBrainConfig}
             onSignOut={handleSignOut}

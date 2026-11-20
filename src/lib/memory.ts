@@ -72,13 +72,26 @@ const STOPWORDS = new Set([
   'your',
 ]);
 
+const GREETINGS = new Set([
+  'hi',
+  'hello',
+  'hey',
+  'yo',
+  'sup',
+  'howdy',
+  'greetings',
+  'good morning',
+  'good afternoon',
+  'good evening',
+]);
+
 export function tokenizeQuery(input: string): string[] {
   const raw = input
     .toLowerCase()
     .replace(/[^a-z0-9_.\-/+#\s]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t) && !GREETINGS.has(t));
   return Array.from(new Set(raw));
 }
 
@@ -274,6 +287,21 @@ export function buildMemoryReply(
   const trimmed = prompt.trim();
   const lower = trimmed.toLowerCase();
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
+
+  const cleanedGreeting = lower.replace(/[!?.]+$/g, '').trim();
+  if (GREETINGS.has(cleanedGreeting)) {
+    return {
+      replyText: [
+        `Hey! Mantis is online${
+          connectedRepoLabel ? ` with ${connectedRepoLabel} (${repoFiles.length} files)` : ''
+        } and ${entries.length} saved Knowledge ${entries.length === 1 ? 'entry' : 'entries'}.`,
+        '',
+        'Ask a coding question, share something to remember, paste a YouTube/article link in Capture, or run `/self-audit`.',
+      ].join('\n'),
+      citedEntryIds: [],
+      citedRepoPaths: [],
+    };
+  }
 
   // Overview / summary intent
   if (

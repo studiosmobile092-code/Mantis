@@ -20,8 +20,10 @@ const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_wCDq_uAfoddEBuNLYeLcmQ_
 
 const FALLBACK_MODELS = [
   'Qwen/Qwen2.5-Coder-32B-Instruct',
-  'Qwen/Qwen2.5-72B-Instruct',
+  'Qwen/Qwen3-Coder-30B-A3B-Instruct',
   'meta-llama/Llama-3.3-70B-Instruct',
+  'Qwen/Qwen2.5-72B-Instruct',
+  'meta-llama/Llama-3.1-8B-Instruct',
 ];
 
 function corsHeaders(origin) {
@@ -104,12 +106,28 @@ async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 14
 
     if (res.ok) {
       const payload = await res.json();
-      const text = payload?.choices?.[0]?.message?.content;
+      const msg = payload?.choices?.[0]?.message;
+      const text = (msg?.content || msg?.reasoning_content || '').trim();
       if (text) {
         return {text, model};
       }
     } else {
       const errText = await res.text();
+      if (res.status === 401) {
+        throw new Error(
+          'Hugging Face rejected HF_TOKEN (401 Unauthorized). Create a fresh token at huggingface.co/settings/tokens and update HF_TOKEN in Cloudflare Variables & Secrets.',
+        );
+      }
+      if (res.status === 403) {
+        throw new Error(
+          'Hugging Face token lacks "Make calls to Inference Providers" permission (403 Forbidden). Edit your token permissions at huggingface.co/settings/tokens or create a new Inference token.',
+        );
+      }
+      if (res.status === 402) {
+        throw new Error(
+          'Hugging Face monthly free Inference Providers credit limit reached (402 Payment Required).',
+        );
+      }
       lastError = `${model} (${res.status}): ${errText.slice(0, 200)}`;
     }
   }
@@ -339,6 +357,20 @@ export default {
     }
 
     try {
+      if (url.pathname === '/ai/verify') {
+        const {text, model} = await callHuggingFaceChat(
+          env,
+          [
+            {role: 'system', content: 'Respond with only the word READY.'},
+            {role: 'user', content: 'Ping'},
+          ],
+          body.model,
+          16,
+          0.1,
+        );
+        return jsonResponse({ok: true, model, sample: text.slice(0, 40)}, 200, origin);
+      }
+
       if (url.pathname === '/ai/chat') {
         const prompt = String(body.prompt || '').trim();
         const knowledgeContext = Array.isArray(body.knowledgeContext) ? body.knowledgeContext : [];

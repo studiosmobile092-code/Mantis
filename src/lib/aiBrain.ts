@@ -5,9 +5,10 @@ export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
 
 export const BRAIN_MODEL_OPTIONS: Array<{id: string; label: string}> = [
   {id: 'Qwen/Qwen2.5-Coder-32B-Instruct', label: 'Qwen 2.5 Coder 32B (Best for Code)'},
-  {id: 'Qwen/Qwen2.5-72B-Instruct', label: 'Qwen 2.5 72B Instruct (General + Deep Reasoning)'},
-  {id: 'meta-llama/Llama-3.3-70B-Instruct', label: 'Llama 3.3 70B Instruct'},
-  {id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B', label: 'DeepSeek R1 Distill Qwen 32B'},
+  {id: 'Qwen/Qwen3-Coder-30B-A3B-Instruct', label: 'Qwen 3 Coder 30B (Fast Coding Model)'},
+  {id: 'meta-llama/Llama-3.3-70B-Instruct', label: 'Llama 3.3 70B Instruct (All-Rounder)'},
+  {id: 'Qwen/Qwen2.5-72B-Instruct', label: 'Qwen 2.5 72B Instruct (Deep Reasoning)'},
+  {id: 'deepseek-ai/DeepSeek-V3.2', label: 'DeepSeek V3.2 (Reasoning + Code)'},
 ];
 
 const STORAGE_BRAIN_URL_KEY = 'mantis_brain_worker_url';
@@ -56,7 +57,16 @@ export function normalizeBrainUrl(raw: string): string {
 
 export async function testBrainConnection(
   brainUrl: string,
-): Promise<{ok: boolean; hasHfToken: boolean; defaultModel: string; latencyMs: number}> {
+  accessToken?: string,
+  preferredModel?: string,
+): Promise<{
+  ok: boolean;
+  hasHfToken: boolean;
+  defaultModel: string;
+  inferenceVerified: boolean;
+  verifiedModel?: string;
+  latencyMs: number;
+}> {
   const cleanUrl = normalizeBrainUrl(brainUrl);
   if (!cleanUrl) {
     throw new Error('Enter your Cloudflare Worker URL (e.g. https://mantis-brain.yourname.workers.dev).');
@@ -67,7 +77,7 @@ export async function testBrainConnection(
       throw new Error('Invalid host');
     }
   } catch {
-    throw new Error('Enter a valid Worker domain or URL (e.g. mantis.garrettwins3.workers.dev).');
+    throw new Error('Enter a valid Worker domain or URL (e.g. mantis-brain.garrettwins3.workers.dev).');
   }
   const start = performance.now();
   const res = await fetch(`${cleanUrl}/health`);
@@ -90,11 +100,66 @@ export async function testBrainConnection(
   if (data.service !== 'mantis-ai-brain') {
     throw new Error('URL responded, but it is not running the Mantis AI Brain Worker code.');
   }
+
+  const hasHfToken = Boolean(data.hasHfToken);
+  if (!hasHfToken || !accessToken) {
+    return {
+      ok: Boolean(data.ok),
+      hasHfToken,
+      defaultModel: data.defaultModel || DEFAULT_BRAIN_MODEL,
+      inferenceVerified: false,
+      latencyMs,
+    };
+  }
+
+  // Run an actual live Hugging Face inference test via the Worker
+  let verifyRes = await fetch(`${cleanUrl}/ai/verify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
+  });
+
+  // Backwards-compatibility if user hasn't re-pasted updated worker.js with /ai/verify yet
+  if (verifyRes.status === 404) {
+    verifyRes = await fetch(`${cleanUrl}/ai/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        prompt: 'Reply with only the word READY.',
+        model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
+        knowledgeContext: [],
+        repoContext: [],
+        history: [],
+      }),
+    });
+  }
+
+  const totalLatencyMs = Math.round(performance.now() - start);
+  const verifyPayload = (await verifyRes.json().catch(() => ({}))) as {
+    ok?: boolean;
+    reply?: string;
+    model?: string;
+    error?: string;
+  };
+  if (!verifyRes.ok) {
+    throw new Error(
+      verifyPayload.error || `AI inference check failed with HTTP ${verifyRes.status}.`,
+    );
+  }
+
   return {
     ok: Boolean(data.ok),
-    hasHfToken: Boolean(data.hasHfToken),
+    hasHfToken: true,
     defaultModel: data.defaultModel || DEFAULT_BRAIN_MODEL,
-    latencyMs,
+    inferenceVerified: true,
+    verifiedModel: verifyPayload.model || preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
+    latencyMs: totalLatencyMs,
   };
 }
 

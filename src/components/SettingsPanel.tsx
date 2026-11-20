@@ -23,6 +23,7 @@ interface SettingsPanelProps {
   brainUrl: string;
   brainModel: string;
   autoLearnFromChat: boolean;
+  accessToken: string;
   connection: GitHubConnection | null;
   onSaveBrainConfig: (url: string, model: string, autoLearn: boolean) => Promise<void>;
   onSignOut: () => Promise<void>;
@@ -39,6 +40,7 @@ export function SettingsPanel({
   brainUrl,
   brainModel,
   autoLearnFromChat,
+  accessToken,
   connection,
   onSaveBrainConfig,
   onSignOut,
@@ -112,16 +114,21 @@ export function SettingsPanel({
         setBrainMessage('Cleared AI Brain URL. Mantis will run in local Memory Retrieval mode.');
         return;
       }
-      const health = await testBrainConnection(cleanUrl);
+      const health = await testBrainConnection(cleanUrl, accessToken, modelDraft);
       if (!health.hasHfToken) {
         setBrainStatus('error');
         setBrainMessage(
           `Worker responded in ${health.latencyMs} ms, but HF_TOKEN secret is not set in Cloudflare yet.`,
         );
+      } else if (health.inferenceVerified) {
+        setBrainStatus('ok');
+        setBrainMessage(
+          `Verified live AI Brain in ${health.latencyMs} ms (${health.verifiedModel || modelDraft} responded cleanly).`,
+        );
       } else {
         setBrainStatus('ok');
         setBrainMessage(
-          `Connected to AI Brain in ${health.latencyMs} ms (HF_TOKEN active, default ${health.defaultModel}).`,
+          `Connected to Worker in ${health.latencyMs} ms (HF_TOKEN active, default ${health.defaultModel}).`,
         );
       }
     } catch (err) {
