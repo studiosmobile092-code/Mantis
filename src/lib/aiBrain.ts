@@ -55,6 +55,24 @@ export function normalizeBrainUrl(raw: string): string {
   return normalizeExternalUrl(raw).replace(/\/+$/, '');
 }
 
+const STORAGE_BRAIN_MODE_KEY = 'mantis_brain_provider_mode';
+
+export function getLocalBrainMode(): 'worker' | 'ollama' {
+  try {
+    return window.localStorage.getItem(STORAGE_BRAIN_MODE_KEY) === 'ollama' ? 'ollama' : 'worker';
+  } catch {
+    return 'worker';
+  }
+}
+
+function setLocalBrainMode(mode: 'worker' | 'ollama'): void {
+  try {
+    window.localStorage.setItem(STORAGE_BRAIN_MODE_KEY, mode);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export async function testBrainConnection(
   brainUrl: string,
   accessToken?: string,
@@ -62,6 +80,8 @@ export async function testBrainConnection(
 ): Promise<{
   ok: boolean;
   hasHfToken: boolean;
+  hasAnyProvider: boolean;
+  activeProviders: string[];
   defaultModel: string;
   inferenceVerified: boolean;
   verifiedModel?: string;
@@ -69,7 +89,7 @@ export async function testBrainConnection(
 }> {
   const cleanUrl = normalizeBrainUrl(brainUrl);
   if (!cleanUrl) {
-    throw new Error('Enter your Cloudflare Worker URL (e.g. https://mantis-brain.yourname.workers.dev).');
+    throw new Error('Enter your Cloudflare Worker or Ollama URL.');
   }
   try {
     const parsed = new URL(cleanUrl);
@@ -77,12 +97,62 @@ export async function testBrainConnection(
       throw new Error('Invalid host');
     }
   } catch {
-    throw new Error('Enter a valid Worker domain or URL (e.g. mantis-brain.garrettwins3.workers.dev).');
+    throw new Error('Enter a valid URL (e.g. mantis-brain.garrettwins3.workers.dev or http://localhost:11434).');
   }
+
   const start = performance.now();
-  const res = await fetch(`${cleanUrl}/health`);
+  let res: Response;
+  try {
+    res = await fetch(`${cleanUrl}/health`);
+  } catch (networkErr) {
+    throw new Error(
+      `Could not reach ${cleanUrl}: ${
+        networkErr instanceof Error ? networkErr.message : 'Network or CORS blocked'
+      }.`,
+    );
+  }
+
   const latencyMs = Math.round(performance.now() - start);
   const contentType = res.headers.get('content-type') || '';
+
+  // Direct Ollama server detection (/health is 404 on Ollama, /api/tags returns installed models)
+  if (res.status === 404) {
+    const ollamaTagsRes = await fetch(`${cleanUrl}/api/tags`).catch(() => null);
+    if (ollamaTagsRes && ollamaTagsRes.ok) {
+      const tagsData = (await ollamaTagsRes.json().catch(() => ({}))) as {
+        models?: Array<{name?: string}>;
+      };
+      const installed = (tagsData.models || []).map((m) => m.name).filter((n): n is string => Boolean(n));
+      if (installed.length === 0) {
+        throw new Error('Connected to Ollama, but no models are installed yet (run e.g. `ollama pull qwen2.5-coder:7b`).');
+      }
+      const chosenOllamaModel = installed[0];
+      const pingRes = await fetch(`${cleanUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          model: chosenOllamaModel,
+          messages: [{role: 'user', content: 'Reply with only READY.'}],
+          max_tokens: 16,
+        }),
+      });
+      if (!pingRes.ok) {
+        throw new Error(`Ollama chat test returned HTTP ${pingRes.status}.`);
+      }
+      setLocalBrainMode('ollama');
+      return {
+        ok: true,
+        hasHfToken: false,
+        hasAnyProvider: true,
+        activeProviders: ['ollama-direct'],
+        defaultModel: chosenOllamaModel,
+        inferenceVerified: true,
+        verifiedModel: `ollama/${chosenOllamaModel}`,
+        latencyMs: Math.round(performance.now() - start),
+      };
+    }
+  }
+
   if (!res.ok) {
     throw new Error(`Worker health check returned HTTP ${res.status}.`);
   }
@@ -91,28 +161,42 @@ export async function testBrainConnection(
       'This URL returned a webpage instead of the Mantis AI Brain Worker JSON. In Cloudflare, create a "Hello World" Worker (do not import the GitHub repo), paste the copied Worker Code, and Deploy.',
     );
   }
+
   const data = (await res.json()) as {
     ok?: boolean;
     service?: string;
     hasHfToken?: boolean;
+    hasAnyProvider?: boolean;
+    activeProviders?: string[];
     defaultModel?: string;
   };
   if (data.service !== 'mantis-ai-brain') {
     throw new Error('URL responded, but it is not running the Mantis AI Brain Worker code.');
   }
 
+  setLocalBrainMode('worker');
   const hasHfToken = Boolean(data.hasHfToken);
-  if (!hasHfToken || !accessToken) {
+  const activeProviders = Array.isArray(data.activeProviders)
+    ? data.activeProviders
+    : hasHfToken
+      ? ['huggingface']
+      : [];
+  const hasAnyProvider =
+    typeof data.hasAnyProvider === 'boolean' ? data.hasAnyProvider : activeProviders.length > 0;
+
+  if (!hasAnyProvider || !accessToken) {
     return {
       ok: Boolean(data.ok),
       hasHfToken,
+      hasAnyProvider,
+      activeProviders,
       defaultModel: data.defaultModel || DEFAULT_BRAIN_MODEL,
       inferenceVerified: false,
       latencyMs,
     };
   }
 
-  // Run an actual live Hugging Face inference test via the Worker
+  // Run an actual live inference test via the Worker
   let verifyRes = await fetch(`${cleanUrl}/ai/verify`, {
     method: 'POST',
     headers: {
@@ -122,7 +206,6 @@ export async function testBrainConnection(
     body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
   });
 
-  // Backwards-compatibility if user hasn't re-pasted updated worker.js with /ai/verify yet
   if (verifyRes.status === 404) {
     verifyRes = await fetch(`${cleanUrl}/ai/chat`, {
       method: 'POST',
@@ -155,7 +238,9 @@ export async function testBrainConnection(
 
   return {
     ok: Boolean(data.ok),
-    hasHfToken: true,
+    hasHfToken,
+    hasAnyProvider: true,
+    activeProviders,
     defaultModel: data.defaultModel || DEFAULT_BRAIN_MODEL,
     inferenceVerified: true,
     verifiedModel: verifyPayload.model || preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
@@ -202,6 +287,46 @@ export function parseLearnDirectives(replyText: string): {
   };
 }
 
+async function callDirectOllamaChat(
+  ollamaUrl: string,
+  messages: Array<{role: string; content: string}>,
+  maxTokens = 1400,
+): Promise<{text: string; model: string}> {
+  let chosenModel = 'qwen2.5-coder:7b';
+  try {
+    const tagsRes = await fetch(`${ollamaUrl}/api/tags`);
+    if (tagsRes.ok) {
+      const tagsData = (await tagsRes.json()) as {models?: Array<{name?: string}>};
+      const first = (tagsData.models || []).find((m) => Boolean(m.name))?.name;
+      if (first) chosenModel = first;
+    }
+  } catch {
+    // use fallback model name
+  }
+
+  const res = await fetch(`${ollamaUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      model: chosenModel,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.25,
+    }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as {
+    choices?: Array<{message?: {content?: string}}>;
+    error?: {message?: string} | string;
+  };
+  const text = payload?.choices?.[0]?.message?.content?.trim();
+  if (!res.ok || !text) {
+    const errMsg =
+      typeof payload.error === 'string' ? payload.error : payload.error?.message || `HTTP ${res.status}`;
+    throw new Error(`Ollama inference error: ${errMsg}`);
+  }
+  return {text, model: `ollama/${chosenModel}`};
+}
+
 export async function askAiBrainChat(params: {
   brainUrl: string;
   accessToken: string;
@@ -228,6 +353,42 @@ export async function askAiBrainChat(params: {
     6,
   );
   const repoMatches = retrieveRelevantRepoFiles(params.prompt, params.repoFiles, 4);
+
+  if (getLocalBrainMode() === 'ollama' || cleanUrl.includes('localhost:11434') || cleanUrl.includes('127.0.0.1:11434')) {
+    const systemPrompt = [
+      'You are Mantis, a personal coding AI companion. Ground your answers in the user Knowledge and Repo snippets below.',
+      'If the user teaches a reusable preference, fact, or fix, end with: [LEARN: Short Title | Folder | tag1, tag2 | Concise note]',
+      knowledgeMatches.length > 0
+        ? `KNOWLEDGE:\n${knowledgeMatches
+            .map((m) => `- [${m.folderName}] ${m.entry.title}: ${m.entry.content}`)
+            .join('\n')}`
+        : '',
+      repoMatches.length > 0
+        ? `REPO FILES:\n${repoMatches
+            .map((r) => `--- ${r.file.path} ---\n${r.file.content.slice(0, 2200)}`)
+            .join('\n\n')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const direct = await callDirectOllamaChat(cleanUrl, [
+      {role: 'system', content: systemPrompt},
+      ...params.history.slice(-6).map((m) => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content,
+      })),
+      {role: 'user', content: params.prompt},
+    ]);
+    const {cleanReply, learnedItems} = parseLearnDirectives(direct.text);
+    return {
+      replyText: cleanReply,
+      modelUsed: direct.model,
+      citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
+      citedRepoPaths: repoMatches.map((r) => r.file.path),
+      learnedItems,
+    };
+  }
 
   const res = await fetch(`${cleanUrl}/ai/chat`, {
     method: 'POST',
@@ -289,6 +450,28 @@ export async function distillWithAiBrain(params: {
   sourceType: string;
 }): Promise<{summary: string; entries: DistilledKnowledgeItem[]; model: string}> {
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
+
+  if (getLocalBrainMode() === 'ollama') {
+    const direct = await callDirectOllamaChat(cleanUrl, [
+      {
+        role: 'system',
+        content:
+          'Convert the raw text into JSON: {"summary":"...","entries":[{"title":"...","folder":"Patterns","tags":["..."],"content":"..."}]}.',
+      },
+      {role: 'user', content: `Source: ${params.sourceTitle}\n\n${params.text.slice(0, 12000)}`},
+    ]);
+    const match = direct.text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(match ? match[0] : direct.text) as {
+      summary?: string;
+      entries?: DistilledKnowledgeItem[];
+    };
+    return {
+      summary: parsed.summary || '',
+      entries: Array.isArray(parsed.entries) ? parsed.entries : [],
+      model: direct.model,
+    };
+  }
+
   const res = await fetch(`${cleanUrl}/ai/distill`, {
     method: 'POST',
     headers: {
@@ -335,6 +518,37 @@ export async function suggestCodeWithAiBrain(params: {
     params.folders,
     4,
   );
+
+  if (getLocalBrainMode() === 'ollama') {
+    const direct = await callDirectOllamaChat(
+      cleanUrl,
+      [
+        {
+          role: 'system',
+          content:
+            'Respond strictly with JSON {"title":"...","rationale":"...","proposedContent":"..."} where proposedContent is complete updated file text.',
+        },
+        {
+          role: 'user',
+          content: `File: ${params.filePath}\nGoal: ${params.goal}\n\n${params.originalContent.slice(0, 12000)}`,
+        },
+      ],
+      2200,
+    );
+    const match = direct.text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(match ? match[0] : direct.text) as {
+      title?: string;
+      rationale?: string;
+      proposedContent?: string;
+    };
+    return {
+      title: parsed.title || `Ollama Proposal: ${params.filePath}`,
+      rationale: parsed.rationale || `Generated by ${direct.model}`,
+      proposedContent: parsed.proposedContent || params.originalContent,
+      model: direct.model,
+    };
+  }
+
   const res = await fetch(`${cleanUrl}/ai/suggest`, {
     method: 'POST',
     headers: {

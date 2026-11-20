@@ -2,29 +2,72 @@
  * Mantis AI Brain — Cloudflare Worker Proxy (Free Tier: 100,000 requests/day)
  *
  * Security model:
- * - Your Hugging Face token (HF_TOKEN) is stored ONLY as a Cloudflare Worker Secret.
- * - Never put HF_TOKEN or sb_secret_ into GitHub or frontend code.
- * - Every request must include your signed-in Supabase JWT (Authorization: Bearer <token>),
- *   verified against Supabase Auth before any Hugging Face model call runs.
+ * - Never put API tokens or sb_secret_ into GitHub or frontend code.
+ * - Every AI/extract request must include your signed-in Supabase JWT (Authorization: Bearer <token>),
+ *   verified against Supabase Auth before any model or URL fetch runs.
  *
- * Cloudflare Environment Variables / Secrets to add in Dashboard -> Settings -> Variables:
- * - HF_TOKEN (Secret): your rotated Hugging Face Access Token
- * - ALLOWED_EMAIL (Variable, optional): e.g. studiosmobile092@gmail.com (locks Worker to your account)
- * - HF_MODEL (Variable, optional): e.g. Qwen/Qwen2.5-Coder-32B-Instruct
- * - SUPABASE_URL (Variable, optional): defaults to https://ncbtoawlltxukzzdyvhc.supabase.co
- * - SUPABASE_PUBLISHABLE_KEY (Variable, optional): defaults to Mantis public publishable key
+ * Supported AI Providers (automatic fallback cascade — add ANY one or multiple):
+ * 1) Cloudflare Workers AI (FREE 10,000 Neurons/day, resets daily, NO API key needed!):
+ *    Cloudflare Worker -> Settings -> Bindings -> Add -> Workers AI -> Variable name: AI
+ * 2) Your Own Ollama Server (ZERO cloud limits):
+ *    Add Variable OLLAMA_URL (e.g. https://your-ollama-tunnel.trycloudflare.com) + optional OLLAMA_MODEL
+ * 3) Groq Free API (console.groq.com, generous daily free tier, no credit card):
+ *    Add Secret GROQ_API_KEY
+ * 4) OpenRouter Free Models (openrouter.ai):
+ *    Add Secret OPENROUTER_API_KEY
+ * 5) Hugging Face Router (optional fallback):
+ *    Add Secret HF_TOKEN
+ *
+ * Access Lock (recommended):
+ * - ALLOWED_EMAIL (Variable): e.g. studiosmobile092@gmail.com
  */
 
 const DEFAULT_SUPABASE_URL = 'https://ncbtoawlltxukzzdyvhc.supabase.co';
 const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_wCDq_uAfoddEBuNLYeLcmQ_WqkXHnpx';
 
-const FALLBACK_MODELS = [
+const HF_FALLBACK_MODELS = [
   'Qwen/Qwen2.5-Coder-32B-Instruct',
   'Qwen/Qwen3-Coder-30B-A3B-Instruct',
   'meta-llama/Llama-3.3-70B-Instruct',
   'Qwen/Qwen2.5-72B-Instruct',
   'meta-llama/Llama-3.1-8B-Instruct',
 ];
+
+const GROQ_FALLBACK_MODELS = [
+  'llama-3.3-70b-versatile',
+  'qwen-qwq-32b',
+  'llama-3.1-8b-instant',
+];
+
+const OPENROUTER_FALLBACK_MODELS = [
+  'qwen/qwen-2.5-coder-32b-instruct:free',
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'deepseek/deepseek-chat-v3-0324:free',
+];
+
+function getWorkersAiCandidates(preferredModel) {
+  const pref = String(preferredModel || '').toLowerCase();
+  if (pref.includes('deepseek')) {
+    return [
+      '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b',
+      '@cf/qwen/qwen2.5-coder-32b-instruct',
+      '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+      '@cf/meta/llama-3.1-8b-instruct-fast',
+    ];
+  }
+  if (pref.includes('llama') || pref.includes('72b')) {
+    return [
+      '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+      '@cf/qwen/qwen2.5-coder-32b-instruct',
+      '@cf/meta/llama-3.1-8b-instruct-fast',
+    ];
+  }
+  return [
+    '@cf/qwen/qwen2.5-coder-32b-instruct',
+    '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+    '@cf/meta/llama-3.1-8b-instruct-fast',
+  ];
+}
 
 function corsHeaders(origin) {
   return {
@@ -78,23 +121,74 @@ async function verifySupabaseUser(request, env) {
   return {ok: true, user};
 }
 
-async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 1400, temperature = 0.25) {
-  const hfToken = (env.HF_TOKEN || '').trim();
-  if (!hfToken) {
-    throw new Error('HF_TOKEN secret is not configured in Cloudflare Worker Variables & Secrets.');
+async function tryOllama(env, messages, preferredModel, maxTokens, temperature) {
+  const baseUrl = (env.OLLAMA_URL || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) return null;
+
+  const model = (env.OLLAMA_MODEL || preferredModel || 'qwen2.5-coder:7b').trim();
+  const headers = {'Content-Type': 'application/json'};
+  if ((env.OLLAMA_API_KEY || '').trim()) {
+    headers.Authorization = `Bearer ${env.OLLAMA_API_KEY.trim()}`;
   }
 
-  const candidates = Array.from(
-    new Set([preferredModel, env.HF_MODEL, ...FALLBACK_MODELS].filter(Boolean)),
-  );
+  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model,
+      messages,
+      max_tokens: maxTokens,
+      temperature,
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Ollama (${res.status}): ${errText.slice(0, 180)}`);
+  }
+  const payload = await res.json();
+  const text = (payload?.choices?.[0]?.message?.content || '').trim();
+  if (!text) throw new Error('Ollama returned empty response.');
+  return {text, model: `ollama/${model}`};
+}
 
-  let lastError = 'No model responded.';
-  for (const model of candidates) {
-    const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+async function tryWorkersAi(env, messages, preferredModel, maxTokens, temperature) {
+  if (!env.AI || typeof env.AI.run !== 'function') return null;
+
+  let lastErr = 'Workers AI failed';
+  for (const cfModel of getWorkersAiCandidates(preferredModel)) {
+    try {
+      const result = await env.AI.run(cfModel, {
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+      });
+      const text = (
+        result?.response ||
+        result?.choices?.[0]?.message?.content ||
+        ''
+      ).trim();
+      if (text) {
+        return {text, model: cfModel};
+      }
+    } catch (err) {
+      lastErr = `${cfModel}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  throw new Error(`Cloudflare Workers AI: ${lastErr}`);
+}
+
+async function tryOpenAiCompatible(endpoint, apiKey, models, providerLabel, messages, maxTokens, temperature, extraHeaders = {}) {
+  const key = (apiKey || '').trim();
+  if (!key) return null;
+
+  let lastErr = `${providerLabel} failed`;
+  for (const model of models) {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${hfToken}`,
+        Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json',
+        ...extraHeaders,
       },
       body: JSON.stringify({
         model,
@@ -114,25 +208,111 @@ async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 14
     } else {
       const errText = await res.text();
       if (res.status === 401) {
-        throw new Error(
-          'Hugging Face rejected HF_TOKEN (401 Unauthorized). Create a fresh token at huggingface.co/settings/tokens and update HF_TOKEN in Cloudflare Variables & Secrets.',
-        );
-      }
-      if (res.status === 403) {
-        throw new Error(
-          'Hugging Face token lacks "Make calls to Inference Providers" permission (403 Forbidden). Edit your token permissions at huggingface.co/settings/tokens or create a new Inference token.',
-        );
+        lastErr = `${providerLabel} key rejected (401 Unauthorized)`;
+        break;
       }
       if (res.status === 402) {
-        throw new Error(
-          'Hugging Face monthly free Inference Providers credit limit reached (402 Payment Required).',
-        );
+        lastErr = `${providerLabel} credit limit reached (402 Payment Required)`;
+        break;
       }
-      lastError = `${model} (${res.status}): ${errText.slice(0, 200)}`;
+      if (res.status === 403) {
+        lastErr = `${providerLabel} token lacks Inference permission (403 Forbidden)`;
+        break;
+      }
+      lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
+    }
+  }
+  throw new Error(lastErr);
+}
+
+async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 1400, temperature = 0.25) {
+  const errors = [];
+
+  // 1. User's own Ollama server (0 external limits)
+  if ((env.OLLAMA_URL || '').trim()) {
+    try {
+      const res = await tryOllama(env, messages, preferredModel, maxTokens, temperature);
+      if (res) return res;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
     }
   }
 
-  throw new Error(`Hugging Face inference failed: ${lastError}`);
+  // 2. Cloudflare Workers AI binding (10,000 free Neurons/day, resets daily, no token required!)
+  if (env.AI) {
+    try {
+      const res = await tryWorkersAi(env, messages, preferredModel, maxTokens, temperature);
+      if (res) return res;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // 3. Groq Free API
+  if ((env.GROQ_API_KEY || '').trim()) {
+    try {
+      const res = await tryOpenAiCompatible(
+        'https://api.groq.com/openai/v1/chat/completions',
+        env.GROQ_API_KEY,
+        GROQ_FALLBACK_MODELS,
+        'Groq',
+        messages,
+        maxTokens,
+        temperature,
+      );
+      if (res) return res;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // 4. OpenRouter Free API
+  if ((env.OPENROUTER_API_KEY || '').trim()) {
+    try {
+      const res = await tryOpenAiCompatible(
+        'https://openrouter.ai/api/v1/chat/completions',
+        env.OPENROUTER_API_KEY,
+        OPENROUTER_FALLBACK_MODELS,
+        'OpenRouter',
+        messages,
+        maxTokens,
+        temperature,
+        {'HTTP-Referer': 'https://studiosmobile092-code.github.io/Mantis/', 'X-Title': 'Mantis AI'},
+      );
+      if (res) return res;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // 5. Hugging Face Router fallback
+  if ((env.HF_TOKEN || '').trim()) {
+    const hfModels = Array.from(
+      new Set([preferredModel, env.HF_MODEL, ...HF_FALLBACK_MODELS].filter(Boolean)),
+    );
+    try {
+      const res = await tryOpenAiCompatible(
+        'https://router.huggingface.co/v1/chat/completions',
+        env.HF_TOKEN,
+        hfModels,
+        'Hugging Face',
+        messages,
+        maxTokens,
+        temperature,
+      );
+      if (res) return res;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (errors.length === 0) {
+    throw new Error(
+      'No AI provider configured in Cloudflare. Add the free Workers AI binding named "AI" (10,000 Neurons/day, zero keys needed), or add OLLAMA_URL / GROQ_API_KEY / OPENROUTER_API_KEY.',
+    );
+  }
+
+  throw new Error(errors.join(' | '));
 }
 
 function decodeHtmlEntities(str) {
@@ -328,12 +508,31 @@ export default {
 
     const url = new URL(request.url);
     if (url.pathname === '/' || url.pathname === '/health') {
+      const hasWorkersAi = Boolean(env.AI);
+      const hasOllamaUrl = Boolean((env.OLLAMA_URL || '').trim());
+      const hasGroqKey = Boolean((env.GROQ_API_KEY || '').trim());
+      const hasOpenRouterKey = Boolean((env.OPENROUTER_API_KEY || '').trim());
+      const hasHfToken = Boolean((env.HF_TOKEN || '').trim());
+      const activeProviders = [
+        hasOllamaUrl ? 'ollama' : null,
+        hasWorkersAi ? 'workers-ai' : null,
+        hasGroqKey ? 'groq' : null,
+        hasOpenRouterKey ? 'openrouter' : null,
+        hasHfToken ? 'huggingface' : null,
+      ].filter(Boolean);
+
       return jsonResponse(
         {
           ok: true,
           service: 'mantis-ai-brain',
-          hasHfToken: Boolean((env.HF_TOKEN || '').trim()),
-          defaultModel: env.HF_MODEL || FALLBACK_MODELS[0],
+          hasWorkersAi,
+          hasOllamaUrl,
+          hasGroqKey,
+          hasOpenRouterKey,
+          hasHfToken,
+          hasAnyProvider: activeProviders.length > 0,
+          activeProviders,
+          defaultModel: env.HF_MODEL || HF_FALLBACK_MODELS[0],
         },
         200,
         origin,

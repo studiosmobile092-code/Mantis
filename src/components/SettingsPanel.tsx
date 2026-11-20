@@ -115,20 +115,22 @@ export function SettingsPanel({
         return;
       }
       const health = await testBrainConnection(cleanUrl, accessToken, modelDraft);
-      if (!health.hasHfToken) {
+      if (!health.hasAnyProvider) {
         setBrainStatus('error');
         setBrainMessage(
-          `Worker responded in ${health.latencyMs} ms, but HF_TOKEN secret is not set in Cloudflare yet.`,
+          `Worker responded in ${health.latencyMs} ms, but no AI provider is attached yet. In Cloudflare → Settings → Bindings, add Workers AI named "AI" (free 10k Neurons/day, zero keys needed), or add GROQ_API_KEY / OLLAMA_URL.`,
         );
       } else if (health.inferenceVerified) {
         setBrainStatus('ok');
+        const via =
+          health.activeProviders.length > 0 ? ` via ${health.activeProviders.join(', ')}` : '';
         setBrainMessage(
-          `Verified live AI Brain in ${health.latencyMs} ms (${health.verifiedModel || modelDraft} responded cleanly).`,
+          `Verified live AI Brain in ${health.latencyMs} ms (${health.verifiedModel || modelDraft}${via}).`,
         );
       } else {
         setBrainStatus('ok');
         setBrainMessage(
-          `Connected to Worker in ${health.latencyMs} ms (HF_TOKEN active, default ${health.defaultModel}).`,
+          `Connected to Worker in ${health.latencyMs} ms (providers: ${health.activeProviders.join(', ') || 'configured'}).`,
         );
       }
     } catch (err) {
@@ -164,12 +166,12 @@ export function SettingsPanel({
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-base font-semibold text-slate-100">
               <Cpu className="h-4 w-4 text-emerald-400" />
-              <span>Real AI Brain (Cloudflare Worker + Hugging Face)</span>
+              <span>Real AI Brain (Cloudflare Workers AI · Ollama · Groq · HF)</span>
             </div>
             <p className="text-xs leading-relaxed text-slate-400">
-              Connect your free Cloudflare Worker proxy so Mantis runs real coding LLMs, distills
-              screen/article captures automatically, and extracts YouTube captions — while keeping
-              your Hugging Face token out of GitHub and the browser.
+              Connect your Cloudflare Worker with free daily Workers AI (10,000 Neurons/day, zero
+              keys), Groq, OpenRouter, or your own Ollama URL (http://localhost:11434 or tunnel) —
+              zero secrets ever touch GitHub.
             </p>
           </div>
           <span className="font-mono text-xs text-slate-400">
@@ -180,7 +182,7 @@ export function SettingsPanel({
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
             <label htmlFor="brain-url" className="block text-xs font-medium text-slate-300">
-              Cloudflare Worker URL
+              Cloudflare Worker or Ollama URL
             </label>
             <input
               id="brain-url"
@@ -191,7 +193,7 @@ export function SettingsPanel({
               spellCheck={false}
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
-              placeholder="mantis.garrettwins3.workers.dev or https://..."
+              placeholder="mantis-brain.garrettwins3.workers.dev or http://localhost:11434"
               className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
             />
           </div>
@@ -276,25 +278,32 @@ export function SettingsPanel({
 
           {showWorkerCode && (
             <div className="mt-3 space-y-2.5 text-xs text-slate-300">
-              <ol className="list-inside list-decimal space-y-1 leading-relaxed text-slate-400">
+              <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
                 <li>
-                  Open <code className="font-mono text-slate-200">dash.cloudflare.com</code> →
-                  Workers &amp; Pages → <strong>Create application</strong> →{' '}
-                  <strong>Start with Hello World!</strong> (do <em>not</em> import the GitHub repo)
-                  → name it <code className="font-mono text-slate-200">mantis-brain</code> → Deploy.
+                  <strong>Zero-Limit Option 1 — Cloudflare Workers AI (Recommended, Free Daily):</strong>{' '}
+                  Open <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
+                  <strong>Settings → Bindings → Add → Workers AI</strong> → Variable name:{' '}
+                  <code className="font-mono text-slate-200">AI</code> → Save. (10,000 free Neurons
+                  every day, zero API keys, bypasses Hugging Face&apos;s $0.10/mo cap.)
                 </li>
                 <li>
-                  Tap <strong>Edit code</strong>, replace everything with the copied Worker code
-                  below, and tap <strong>Deploy</strong>.
+                  <strong>Option 2 — Your Own Ollama Hardware (0 Cloud Limits):</strong> Add{' '}
+                  <code className="font-mono text-slate-200">OLLAMA_URL</code> in Cloudflare (or
+                  paste <code className="font-mono text-slate-200">http://localhost:11434</code> or
+                  your <code className="font-mono text-slate-200">trycloudflare.com</code> Ollama URL
+                  above).
                 </li>
                 <li>
-                  Go to Worker <strong>Settings → Variables and Secrets → Add</strong>: add Secret{' '}
-                  <code className="font-mono text-slate-200">HF_TOKEN</code> (your rotated Hugging
-                  Face token) and optional Variable{' '}
-                  <code className="font-mono text-slate-200">ALLOWED_EMAIL</code> ={' '}
-                  <code className="font-mono text-slate-200">{userEmail}</code>.
+                  <strong>Option 3 — Groq Free API:</strong> Add Secret{' '}
+                  <code className="font-mono text-slate-200">GROQ_API_KEY</code> from{' '}
+                  <code className="font-mono text-slate-200">console.groq.com</code> (free tier, no
+                  card) or <code className="font-mono text-slate-200">OPENROUTER_API_KEY</code>.
                 </li>
-                <li>Paste your Worker URL above and tap Save &amp; Test AI Brain.</li>
+                <li>
+                  In <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
+                  <strong>Edit code</strong>, paste the copied Worker Code below and tap{' '}
+                  <strong>Deploy</strong>, then tap <strong>Save &amp; Test AI Brain</strong> above.
+                </li>
               </ol>
               <pre className="max-h-48 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
                 {MANTIS_CLOUDFLARE_WORKER_JS}
