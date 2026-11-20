@@ -223,3 +223,122 @@ export async function fetchGitHubFileContent(
   }
   return await apiRes.text();
 }
+
+function toBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return window.btoa(binary);
+}
+
+/**
+ * Guarded Phase 3 write action:
+ * Never commits directly to the base branch. Creates a separate mantis/* branch and opens a Pull Request.
+ */
+export async function createPullRequestForApprovedSuggestion(params: {
+  owner: string;
+  repo: string;
+  baseBranch: string;
+  filePath: string;
+  title: string;
+  rationale: string;
+  proposedContent: string;
+  suggestionId: string;
+  token: string;
+}): Promise<string> {
+  const token = params.token.trim();
+  if (!token) {
+    throw new Error('A session-only GitHub token with Pull Request permissions is required to open a PR.');
+  }
+
+  const headers = {
+    ...buildHeaders(token),
+    'Content-Type': 'application/json',
+  };
+
+  // 1. Get base branch SHA
+  const refRes = await fetch(
+    `https://api.github.com/repos/${params.owner}/${params.repo}/git/ref/heads/${encodeURIComponent(params.baseBranch)}`,
+    {headers},
+  );
+  if (!refRes.ok) {
+    throw new Error(`Could not read base branch "${params.baseBranch}" (${refRes.status}).`);
+  }
+  const refData = (await refRes.json()) as {object?: {sha?: string}};
+  const baseSha = refData.object?.sha;
+  if (!baseSha) {
+    throw new Error('Missing base branch commit SHA.');
+  }
+
+  // 2. Create a guarded feature branch
+  const branchName = `mantis/suggestion-${params.suggestionId.slice(0, 8)}`;
+  const createBranchRes = await fetch(
+    `https://api.github.com/repos/${params.owner}/${params.repo}/git/refs`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ref: `refs/heads/${branchName}`,
+        sha: baseSha,
+      }),
+    },
+  );
+  if (!createBranchRes.ok && createBranchRes.status !== 422) {
+    throw new Error(`Failed to create branch ${branchName} (${createBranchRes.status}).`);
+  }
+
+  // 3. Check if file already exists on that branch to include its blob SHA
+  const encodedPath = params.filePath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+  let existingFileSha: string | undefined;
+  const existingRes = await fetch(
+    `https://api.github.com/repos/${params.owner}/${params.repo}/contents/${encodedPath}?ref=${encodeURIComponent(branchName)}`,
+    {headers},
+  );
+  if (existingRes.ok) {
+    const existingData = (await existingRes.json()) as {sha?: string};
+    existingFileSha = existingData.sha;
+  }
+
+  // 4. Commit updated file strictly to the new branch
+  const putRes = await fetch(
+    `https://api.github.com/repos/${params.owner}/${params.repo}/contents/${encodedPath}`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        message: `Mantis approved suggestion: ${params.title}`,
+        content: toBase64Utf8(params.proposedContent),
+        branch: branchName,
+        ...(existingFileSha ? {sha: existingFileSha} : {}),
+      }),
+    },
+  );
+  if (!putRes.ok) {
+    throw new Error(`Failed to commit to branch ${branchName} (${putRes.status}). Check token permissions.`);
+  }
+
+  // 5. Open Pull Request for user review/merge
+  const prRes = await fetch(
+    `https://api.github.com/repos/${params.owner}/${params.repo}/pulls`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        title: `[Mantis] ${params.title}`,
+        head: branchName,
+        base: params.baseBranch,
+        body: `Approved inside Mantis Phase 3.\n\n**Rationale:**\n${params.rationale}`,
+      }),
+    },
+  );
+  if (!prRes.ok) {
+    throw new Error(`Branch ${branchName} created, but opening Pull Request failed (${prRes.status}).`);
+  }
+  const prData = (await prRes.json()) as {html_url?: string};
+  return prData.html_url || `https://github.com/${params.owner}/${params.repo}/pulls`;
+}

@@ -6,46 +6,43 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
 
 ---
 
-## Phase 1 — Foundation (Web + Memory) — Verified in Preview
+## Phase 1 — Foundation (Web + Memory) — Verified
 
-- **Step 1.1**: Dark tablet-ready UI shell, secret hygiene (`.gitignore` + `.env.example`), and relative Vite build paths (`base: './'`).
-- **Step 1.2**: Phase 1 Supabase schema (`knowledge_folders`, `knowledge_entries`, `chat_messages`) with explicit `GRANT` privileges and Postgres RLS (`auth.uid() = user_id`).
-- **Step 1.3**: Single-user Supabase Auth gate (Sign In / Create Account).
-- **Step 1.4**: Starter folder seeding, `TeachPanel`, and `KnowledgeBrowser` verified in preview.
-- **Step 1.5**: Memory-retrieval Chat (`ChatWorkspace`) verified in preview.
+- Dark tablet-ready UI shell, secret hygiene (`.gitignore` + `.env.example`), relative Vite build paths (`base: './'`).
+- Phase 1 Supabase schema (`knowledge_folders`, `knowledge_entries`, `chat_messages`) with `GRANT` privileges and Postgres RLS (`auth.uid() = user_id`).
+- Single-user Supabase Auth gate, starter folder seeding, `TeachPanel`, `KnowledgeBrowser`, and memory-retrieval `ChatWorkspace`.
 
 ---
 
 ## Phase 2 — Teaching & GitHub Awareness
 
-### Step 2.1 — Fix GitHub Pages Build Failure
-- **Status**: Completed
-- **Summary**:
-  - Removed `cache: npm` and replaced `npm ci` with conditional `npm ci` / `npm install` in `.github/workflows/deploy.yml` (fixing the GitHub Actions failure caused by the absence of `package-lock.json`).
-  - Retained relative `./` build paths (`VITE_BASE_PATH: ./`) so `studiosmobile092-code.github.io/Mantis/` resolves assets cleanly when GitHub Pages **Source** is set to **GitHub Actions**.
-- **Verification**: `npm run build` and `npm run lint` pass cleanly; GitHub Actions workflow builds without requiring `package-lock.json`.
+- **Step 2.1 (Build Fix — Updated)**: Diagnosed `ERESOLVE` peer conflict between `vite@8.3.8` and `esbuild@^0.25.0` under strict `npm install` + missing `package-lock.json`. Updated `.github/workflows/deploy.yml` to **Node 22** and `npm install --legacy-peer-deps --no-audit --no-fund`.
+- **Step 2.2**: Added `supabase/schema_phase2.sql` (`github_connections`, `repo_files`, `chat_messages.cited_repo_paths`).
+- **Step 2.3**: Added Quick-Teach templates, clickable tag suggestions, and safe folder removal.
+- **Step 2.4**: Added read-only GitHub connector (`src/lib/github.ts`, `GitHubPanel`) and synced async connection inputs cleanly.
+- **Step 2.5**: Added repo-aware Chat retrieval and file citation chips.
 
-### Step 2.2 — Phase 2 Supabase Migration (`github_connections` & `repo_files`)
+---
+
+## Phase 3 — Code Help & Suggestions
+
+### Step 3.1 — Phase 3 Database Schema (`code_suggestions`)
 - **Status**: Ready for User Execution
 - **Summary**:
-  - Created `supabase/schema_phase2.sql` adding `github_connections`, `repo_files`, `chat_messages.cited_repo_paths`, RLS policies, and `authenticated` table `GRANT` privileges.
-- **Verification**: Run `supabase/schema_phase2.sql` (or copy it from the **GitHub** / **Settings** tab) once in your Supabase SQL Editor, then tap **Verify Phase 2 Tables**.
+  - Created `supabase/schema_phase3.sql` for persistent code proposals (`pending`, `approved`, `rejected`), rationale, original/proposed snapshots, user feedback, and PR URL tracking with RLS and `GRANT` permissions.
+- **Verification**: Run `supabase/schema_phase3.sql` (or copy it inside **GitHub → Suggestions** or **Settings**) once in Supabase SQL Editor and tap **Verify Phase 3 Tables**.
 
-### Step 2.3 — Enhanced Teach Flow & Folder Organization
+### Step 3.2 — Line-by-Line Diff Engine & Code Analyzer
 - **Status**: Completed
 - **Summary**:
-  - Added Quick-Teach templates (`Coding Rule`, `Bug Fix`, `Code Snippet`, `Architecture Note`) and clickable tag suggestions in `TeachPanel`.
-  - Added safe folder removal (moving notes to `Uncategorized` without deleting data) in `KnowledgeBrowser`.
-- **Verification**: Open **Teach**, tap a template, save an entry, and verify folder organization in **Knowledge**.
+  - Built `src/lib/diff.ts` (LCS line diff, hunk collapsing, `+`/`-` stats, and unified `.patch` export) and `src/components/DiffViewer.tsx`.
+  - Built `src/lib/suggestions.ts` to inspect indexed repository files against safety/accessibility/TypeScript/SQL/workflow rules and relevant Knowledge entries, or scaffold new code proposals.
+- **Verification**: `npm run build` and `npm run lint` pass cleanly.
 
-### Step 2.4 — Read-Only GitHub Repository Connector & Code Viewer
+### Step 3.3 — Approval-Gated Suggestion Queue & Guarded PR Workflow
 - **Status**: Completed (Awaiting User Verification)
 - **Summary**:
-  - Built `src/lib/github.ts` and `GitHubPanel` supporting `owner/repo` or full GitHub URLs (plus optional session-only token for private repos), indexing up to 40 key source/config files into Supabase `repo_files` with a searchable file viewer and **Save File Note to Teach**.
-- **Verification**: Open **GitHub**, connect `studiosmobile092-code/Mantis`, and inspect indexed source files.
-
-### Step 2.5 — Repo-Aware Chat Retrieval
-- **Status**: Completed (Awaiting User Verification)
-- **Summary**:
-  - Upgraded `src/lib/memory.ts` and `ChatWorkspace` so Mantis searches and cites both your Knowledge notes and indexed GitHub repository files (including `/repo <query>`), with tappable source chips jumping directly to the file viewer.
-- **Verification**: Ask in **Chat / Work** about a file or symbol (e.g., `/repo TopBar` or `How does vite.config.ts set base?`) and confirm Mantis cites the matching repo file.
+  - Built `SuggestionsPanel` inside **GitHub → Suggestions** (plus one-tap **Propose Improvement** from any repo file and `/suggest <file>` in **Chat / Work**).
+  - Enforces explicit **Approve** / **Reject** review before unlocking write/export actions (**Copy Unified Patch**, **Copy Patched File**, or **Open Pull Request** on a new `mantis/*` branch — never committing directly to `main`).
+  - Updated `MemoryReadinessMetrics` to honestly include reviewed and approved suggestions.
+- **Verification**: Open **GitHub → Suggestions**, analyze a file or propose new code, inspect the diff, approve it, and verify write actions unlock.

@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  CodeSuggestion,
   KnowledgeEntry,
   KnowledgeFolder,
   MemoryReadinessMetrics,
@@ -278,7 +279,7 @@ export function buildMemoryReply(
     }
     parts.push(
       '',
-      'Ask any question, use `/search <topic>`, `/repo <filename or symbol>`, or `/teach Title :: Details`.',
+      'Commands: `/search <topic>`, `/repo <file>`, `/teach Title :: Details`, or `/suggest <file_path>`.',
     );
 
     return {
@@ -308,7 +309,7 @@ export function buildMemoryReply(
           repoFiles.length > 0 ? ` and ${repoFiles.length} indexed repo files` : ''
         } for "${searchTerm}", and did not find a match yet.`,
         '',
-        'Save a new rule with `/teach Title :: Details` or index your GitHub repository in the GitHub tab.',
+        'Save a new rule with `/teach Title :: Details` or propose a code change with `/suggest <file_path>`.',
       ].join('\n'),
       citedEntryIds: [],
       citedRepoPaths: [],
@@ -359,6 +360,7 @@ export function computeMemoryReadiness(
   folders: KnowledgeFolder[],
   messages: ChatMessage[],
   repoFiles: RepoFile[] = [],
+  suggestions: CodeSuggestion[] = [],
 ): MemoryReadinessMetrics {
   const entryCount = entries.length;
   const folderCount = folders.length;
@@ -366,13 +368,16 @@ export function computeMemoryReadiness(
   const taggedCount = entries.filter((e) => e.tags.length > 0).length;
   const conversationTurns = messages.filter((m) => m.role === 'user').length;
   const repoFileCount = repoFiles.length;
+  const approvedSuggestions = suggestions.filter((s) => s.status === 'approved').length;
+  const reviewedSuggestions = suggestions.filter((s) => s.status !== 'pending').length;
 
   const usedFolderIds = new Set(entries.map((e) => e.folder_id).filter(Boolean));
-  const entryPoints = Math.min(45, substantiveCount * 2);
-  const folderPoints = Math.min(15, usedFolderIds.size * 4);
-  const tagPoints = Math.min(15, taggedCount);
+  const entryPoints = Math.min(40, substantiveCount * 2);
+  const folderPoints = Math.min(12, usedFolderIds.size * 3);
+  const tagPoints = Math.min(13, taggedCount);
   const chatPoints = Math.min(10, conversationTurns);
   const repoPoints = Math.min(15, Math.floor(repoFileCount / 2));
+  const suggestionPoints = Math.min(10, approvedSuggestions * 3 + Math.min(4, reviewedSuggestions));
 
   return {
     entryCount,
@@ -381,7 +386,11 @@ export function computeMemoryReadiness(
     taggedCount,
     conversationTurns,
     repoFileCount,
-    readinessScore: Math.round(entryPoints + folderPoints + tagPoints + chatPoints + repoPoints),
+    approvedSuggestions,
+    reviewedSuggestions,
+    readinessScore: Math.round(
+      entryPoints + folderPoints + tagPoints + chatPoints + repoPoints + suggestionPoints,
+    ),
   };
 }
 

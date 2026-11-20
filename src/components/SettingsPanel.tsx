@@ -1,6 +1,10 @@
 import {Check, Copy, Database, GitBranch, LogOut, ShieldCheck, Wifi} from 'lucide-react';
 import {useState} from 'react';
-import {MANTIS_PHASE1_SCHEMA_SQL, MANTIS_PHASE2_SCHEMA_SQL} from '../lib/schemaText';
+import {
+  MANTIS_PHASE1_SCHEMA_SQL,
+  MANTIS_PHASE2_SCHEMA_SQL,
+  MANTIS_PHASE3_SCHEMA_SQL,
+} from '../lib/schemaText';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from '../lib/supabase';
 import type {GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
 
@@ -9,6 +13,7 @@ interface SettingsPanelProps {
   metrics: MemoryReadinessMetrics;
   schemaMissing: boolean;
   phase2SchemaMissing: boolean;
+  phase3SchemaMissing: boolean;
   connection: GitHubConnection | null;
   onSignOut: () => Promise<void>;
 }
@@ -18,13 +23,13 @@ export function SettingsPanel({
   metrics,
   schemaMissing,
   phase2SchemaMissing,
+  phase3SchemaMissing,
   connection,
   onSignOut,
 }: SettingsPanelProps) {
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [pingMessage, setPingMessage] = useState<string | null>(null);
-  const [copiedPhase1, setCopiedPhase1] = useState(false);
-  const [copiedPhase2, setCopiedPhase2] = useState(false);
+  const [copiedWhich, setCopiedWhich] = useState<1 | 2 | 3 | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const maskedKey = `${SUPABASE_PUBLISHABLE_KEY.slice(0, 18)}...${SUPABASE_PUBLISHABLE_KEY.slice(-6)}`;
@@ -49,16 +54,11 @@ export function SettingsPanel({
     }
   }
 
-  async function handleCopySql(sql: string, which: 1 | 2) {
+  async function handleCopySql(sql: string, which: 1 | 2 | 3) {
     try {
       await navigator.clipboard.writeText(sql);
-      if (which === 1) {
-        setCopiedPhase1(true);
-        window.setTimeout(() => setCopiedPhase1(false), 2500);
-      } else {
-        setCopiedPhase2(true);
-        window.setTimeout(() => setCopiedPhase2(false), 2500);
-      }
+      setCopiedWhich(which);
+      window.setTimeout(() => setCopiedWhich(null), 2500);
     } catch {
       // ignore clipboard errors
     }
@@ -78,18 +78,20 @@ export function SettingsPanel({
       <div className="space-y-1 border-b border-slate-800 pb-4">
         <h1 className="text-xl font-semibold tracking-tight text-slate-100">Settings &amp; Status</h1>
         <p className="text-sm text-slate-400">
-          Supabase connection details, Phase 2 readiness breakdown, and GitHub Pages build setup.
+          Supabase connection details, Phase 1–3 readiness breakdown, and GitHub Pages deploy setup.
         </p>
       </div>
 
-      {/* Honest Memory & GitHub Readiness Breakdown */}
+      {/* Honest Memory, Repo & Suggestion Readiness Breakdown */}
       <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <h2 className="text-base font-semibold text-slate-100">Memory &amp; Repo Readiness</h2>
+            <h2 className="text-base font-semibold text-slate-100">
+              Memory &amp; Code Help Readiness
+            </h2>
             <p className="text-xs text-slate-400">
-              Measured strictly from saved entries, organized folders, tags, chat turns, and
-              indexed repository files.
+              Measured strictly from saved entries, folders, tags, repo files, chat turns, and
+              reviewed suggestions.
             </p>
           </div>
           <div className="font-mono text-2xl font-bold tabular-nums text-emerald-400">
@@ -97,7 +99,7 @@ export function SettingsPanel({
           </div>
         </div>
 
-        <div className="grid gap-3 border-t border-slate-800 pt-4 sm:grid-cols-5">
+        <div className="grid gap-3 border-t border-slate-800 pt-4 sm:grid-cols-3 lg:grid-cols-6">
           <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
             <div className="text-xs text-slate-400">Knowledge</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
@@ -135,6 +137,16 @@ export function SettingsPanel({
           </div>
 
           <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
+            <div className="text-xs text-slate-400">Suggestions</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+              {metrics.approvedSuggestions}
+            </div>
+            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
+              {metrics.reviewedSuggestions} reviewed
+            </div>
+          </div>
+
+          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
             <div className="text-xs text-slate-400">Chat Turns</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
               {metrics.conversationTurns}
@@ -151,13 +163,14 @@ export function SettingsPanel({
           <span>GitHub Pages Static Deployment Note</span>
         </div>
         <p className="text-xs leading-relaxed text-slate-300">
-          Always set your GitHub repository&apos;s <strong>Settings → Pages → Source</strong> to{' '}
+          Set your GitHub repository&apos;s <strong>Settings → Pages → Source</strong> to{' '}
           <strong>GitHub Actions</strong> (never <em>Deploy from a branch</em> on{' '}
           <code className="font-mono text-slate-100">main</code>, which serves raw unbuilt{' '}
-          <code className="font-mono text-slate-100">.tsx</code> files and renders a blank white
-          screen). The included workflow uses <code className="font-mono text-slate-100">npm install</code>{' '}
-          and builds with relative <code className="font-mono text-slate-100">./</code> paths so it
-          works under <code className="font-mono text-slate-100">/Mantis/</code> or any repo name.
+          <code className="font-mono text-slate-100">.tsx</code> files and renders a white screen).
+          The workflow uses Node 22 and{' '}
+          <code className="font-mono text-slate-100">npm install --legacy-peer-deps</code> with
+          relative <code className="font-mono text-slate-100">./</code> asset paths so{' '}
+          <code className="font-mono text-slate-100">/Mantis/</code> builds cleanly.
         </p>
       </section>
 
@@ -214,9 +227,33 @@ export function SettingsPanel({
         </div>
       </section>
 
-      {/* Phase 2 & Phase 1 SQL References */}
+      {/* Phase 1–3 SQL References */}
       <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Database className="h-4 w-4 text-slate-400" />
+            <h2 className="text-sm font-semibold text-slate-100">
+              Phase 3 SQL Migration ({phase3SchemaMissing ? 'Setup Required' : 'Active'})
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleCopySql(MANTIS_PHASE3_SCHEMA_SQL, 3)}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+          >
+            {copiedWhich === 3 ? (
+              <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            <span>{copiedWhich === 3 ? 'Phase 3 SQL Copied' : 'Copy Phase 3 SQL'}</span>
+          </button>
+        </div>
+        <pre className="max-h-40 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+          {MANTIS_PHASE3_SCHEMA_SQL}
+        </pre>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
           <div className="flex items-center gap-2">
             <Database className="h-4 w-4 text-slate-400" />
             <h2 className="text-sm font-semibold text-slate-100">
@@ -228,17 +265,14 @@ export function SettingsPanel({
             onClick={() => void handleCopySql(MANTIS_PHASE2_SCHEMA_SQL, 2)}
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
           >
-            {copiedPhase2 ? (
+            {copiedWhich === 2 ? (
               <Check className="h-3.5 w-3.5 text-emerald-400" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
-            <span>{copiedPhase2 ? 'Phase 2 SQL Copied' : 'Copy Phase 2 SQL'}</span>
+            <span>{copiedWhich === 2 ? 'Phase 2 SQL Copied' : 'Copy Phase 2 SQL'}</span>
           </button>
         </div>
-        <pre className="max-h-40 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-          {MANTIS_PHASE2_SCHEMA_SQL}
-        </pre>
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
           <div className="flex items-center gap-2">
@@ -252,12 +286,12 @@ export function SettingsPanel({
             onClick={() => void handleCopySql(MANTIS_PHASE1_SCHEMA_SQL, 1)}
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
           >
-            {copiedPhase1 ? (
+            {copiedWhich === 1 ? (
               <Check className="h-3.5 w-3.5 text-emerald-400" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
-            <span>{copiedPhase1 ? 'Phase 1 SQL Copied' : 'Copy Phase 1 SQL'}</span>
+            <span>{copiedWhich === 1 ? 'Phase 1 SQL Copied' : 'Copy Phase 1 SQL'}</span>
           </button>
         </div>
       </section>

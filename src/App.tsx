@@ -14,14 +14,21 @@ import {
   fetchGitHubTreeFiles,
 } from './lib/github';
 import {STARTER_FOLDERS, buildMemoryReply, computeMemoryReadiness} from './lib/memory';
+import {
+  generateImprovementSuggestion,
+  generateNewCodeSuggestion,
+  type GeneratedSuggestionDraft,
+} from './lib/suggestions';
 import {isMissingTableError, supabase} from './lib/supabase';
 import type {
   AreaId,
   ChatMessage,
+  CodeSuggestion,
   GitHubConnection,
   KnowledgeEntry,
   KnowledgeFolder,
   RepoFile,
+  SuggestionStatus,
 } from './types/mantis';
 
 export default function App() {
@@ -29,11 +36,14 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
 
   const [activeArea, setActiveArea] = useState<AreaId>('chat');
+  const [githubSubTab, setGithubSubTab] = useState<'files' | 'suggestions'>('files');
+
   const [folders, setFolders] = useState<KnowledgeFolder[]>([]);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [repoFiles, setRepoFiles] = useState<RepoFile[]>([]);
+  const [suggestions, setSuggestions] = useState<CodeSuggestion[]>([]);
 
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [isSendingChat, setIsSendingChat] = useState(false);
@@ -42,6 +52,7 @@ export default function App() {
 
   const [schemaMissing, setSchemaMissing] = useState(false);
   const [phase2SchemaMissing, setPhase2SchemaMissing] = useState(false);
+  const [phase3SchemaMissing, setPhase3SchemaMissing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
@@ -79,17 +90,19 @@ export default function App() {
     setErrorBanner(null);
 
     try {
-      const [foldersRes, entriesRes, messagesRes, connRes, filesRes] = await Promise.all([
-        supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
-        supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
-        supabase.from('chat_messages').select('*').order('created_at', {ascending: true}),
-        supabase
-          .from('github_connections')
-          .select('*')
-          .order('updated_at', {ascending: false})
-          .limit(1),
-        supabase.from('repo_files').select('*').order('path', {ascending: true}),
-      ]);
+      const [foldersRes, entriesRes, messagesRes, connRes, filesRes, suggestionsRes] =
+        await Promise.all([
+          supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
+          supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
+          supabase.from('chat_messages').select('*').order('created_at', {ascending: true}),
+          supabase
+            .from('github_connections')
+            .select('*')
+            .order('updated_at', {ascending: false})
+            .limit(1),
+          supabase.from('repo_files').select('*').order('path', {ascending: true}),
+          supabase.from('code_suggestions').select('*').order('created_at', {ascending: false}),
+        ]);
 
       if (
         isMissingTableError(foldersRes.error) ||
@@ -148,6 +161,17 @@ export default function App() {
           activeConn ? allFiles.filter((f) => f.connection_id === activeConn.id) : [],
         );
       }
+
+      if (isMissingTableError(suggestionsRes.error)) {
+        setPhase3SchemaMissing(true);
+        setSuggestions([]);
+      } else if (suggestionsRes.error) {
+        setPhase3SchemaMissing(false);
+        setErrorBanner(suggestionsRes.error.message);
+      } else {
+        setPhase3SchemaMissing(false);
+        setSuggestions((suggestionsRes.data as CodeSuggestion[]) || []);
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Unable to reach Supabase');
     } finally {
@@ -164,15 +188,17 @@ export default function App() {
       setMessages([]);
       setConnection(null);
       setRepoFiles([]);
+      setSuggestions([]);
       setSchemaMissing(false);
       setPhase2SchemaMissing(false);
+      setPhase3SchemaMissing(false);
       setErrorBanner(null);
     }
   }, [session, loadWorkspaceData]);
 
   const metrics = useMemo(
-    () => computeMemoryReadiness(entries, folders, messages, repoFiles),
-    [entries, folders, messages, repoFiles],
+    () => computeMemoryReadiness(entries, folders, messages, repoFiles, suggestions),
+    [entries, folders, messages, repoFiles, suggestions],
   );
 
   async function handleCreateFolder(
@@ -292,6 +318,120 @@ export default function App() {
     return true;
   }
 
+  async function persistSuggestionDraft(
+    draft: GeneratedSuggestionDraft,
+  ): Promise<CodeSuggestion | null> {
+    if (!session) return null;
+    setErrorBanner(null);
+    const {data, error} = await supabase
+      .from('code_suggestions')
+      .insert({
+        user_id: session.user.id,
+        connection_id: connection?.id || null,
+        file_path: draft.filePath,
+        title: draft.title,
+        rationale: draft.rationale,
+        original_content: draft.originalContent,
+        proposed_content: draft.proposedContent,
+        status: 'pending',
+        user_feedback: '',
+        pr_url: '',
+      })
+      .select('*')
+      .single();
+
+    if (error) {
+      if (isMissingTableError(error)) {
+        setPhase3SchemaMissing(true);
+      } else {
+        setErrorBanner(error.message);
+      }
+      return null;
+    }
+
+    const saved = data as CodeSuggestion;
+    setSuggestions((prev) => [saved, ...prev]);
+    return saved;
+  }
+
+  async function handleGenerateFromFile(file: RepoFile, goal: string) {
+    const draft = generateImprovementSuggestion(file, goal, entries, folders);
+    await persistSuggestionDraft(draft);
+  }
+
+  async function handleGenerateNewFile(targetPath: string, goal: string) {
+    const draft = generateNewCodeSuggestion(targetPath, goal, entries, folders);
+    await persistSuggestionDraft(draft);
+  }
+
+  async function handleUpdateProposedContent(
+    id: string,
+    proposedContent: string,
+  ): Promise<boolean> {
+    if (!session) return false;
+    setErrorBanner(null);
+    const {data, error} = await supabase
+      .from('code_suggestions')
+      .update({proposed_content: proposedContent})
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) {
+      setErrorBanner(error.message);
+      return false;
+    }
+
+    const updated = data as CodeSuggestion;
+    setSuggestions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+    return true;
+  }
+
+  async function handleReviewSuggestion(
+    id: string,
+    status: SuggestionStatus,
+    feedback: string,
+    prUrl?: string,
+  ): Promise<boolean> {
+    if (!session) return false;
+    setErrorBanner(null);
+    const patch: Record<string, unknown> = {
+      status,
+      user_feedback: feedback,
+    };
+    if (prUrl !== undefined) {
+      patch.pr_url = prUrl;
+    }
+
+    const {data, error} = await supabase
+      .from('code_suggestions')
+      .update(patch)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) {
+      setErrorBanner(error.message);
+      return false;
+    }
+
+    const updated = data as CodeSuggestion;
+    setSuggestions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+    return true;
+  }
+
+  async function handleDeleteSuggestion(id: string): Promise<boolean> {
+    if (!session) return false;
+    setErrorBanner(null);
+    const {error} = await supabase.from('code_suggestions').delete().eq('id', id);
+    if (error) {
+      setErrorBanner(error.message);
+      return false;
+    }
+    setSuggestions((prev) => prev.filter((s) => s.id !== id));
+    return true;
+  }
+
   async function handleConnectGitHubRepo(
     owner: string,
     repo: string,
@@ -346,7 +486,6 @@ export default function App() {
 
       setSyncProgressText('Saving repository index to Supabase...');
 
-      // Remove existing connections for this user so one active repo stays clean
       await supabase.from('github_connections').delete().eq('user_id', session.user.id);
 
       const {data: newConn, error: connErr} = await supabase
@@ -503,6 +642,38 @@ export default function App() {
             }. I will retrieve and cite this entry when relevant.`;
           }
         }
+      } else if (prompt.toLowerCase().startsWith('/suggest ')) {
+        const targetQuery = prompt.slice(9).trim();
+        if (phase3SchemaMissing) {
+          replyText =
+            'Phase 3 SQL migration is required before saving code suggestions. Open GitHub → Suggestions or Settings to copy and run `supabase/schema_phase3.sql`.';
+        } else {
+          const matchedFile = repoFiles.find((f) =>
+            f.path.toLowerCase().includes(targetQuery.toLowerCase()),
+          );
+          const draft = matchedFile
+            ? generateImprovementSuggestion(matchedFile, '', entries, folders)
+            : generateNewCodeSuggestion(
+                targetQuery.includes('.') ? targetQuery : 'src/lib/proposedHelper.ts',
+                targetQuery,
+                entries,
+                folders,
+              );
+          const created = await persistSuggestionDraft(draft);
+          if (created) {
+            if (matchedFile) {
+              citedRepoPaths = [matchedFile.path];
+            }
+            replyText = [
+              `Created code suggestion "${created.title}" (status: pending review).`,
+              `Rationale: ${created.rationale}`,
+              '',
+              'Open GitHub → Suggestions to inspect the line-by-line diff and explicitly Approve or Reject it before any write actions unlock.',
+            ].join('\n');
+          } else {
+            replyText = 'Could not save code suggestion to Supabase. Check Settings for schema status.';
+          }
+        }
       } else {
         const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
         const result = buildMemoryReply(prompt, entries, folders, repoFiles, repoLabel);
@@ -627,6 +798,7 @@ export default function App() {
             }}
             onInspectRepoFile={(repoPath) => {
               setSelectedRepoPath(repoPath);
+              setGithubSubTab('files');
               setActiveArea('github');
             }}
             onSaveTextToTeach={(suggestedTitle, content) => {
@@ -674,12 +846,16 @@ export default function App() {
           <GitHubPanel
             connection={connection}
             repoFiles={repoFiles}
+            suggestions={suggestions}
+            activeSubTab={githubSubTab}
+            onChangeSubTab={setGithubSubTab}
             phase2SchemaMissing={phase2SchemaMissing}
+            phase3SchemaMissing={phase3SchemaMissing}
             isSyncingRepo={isSyncingRepo}
             syncProgressText={syncProgressText}
             selectedFilePath={selectedRepoPath}
             onSelectFilePath={setSelectedRepoPath}
-            onVerifyPhase2Tables={() => void loadWorkspaceData(session)}
+            onVerifyTables={() => void loadWorkspaceData(session)}
             onConnectRepo={handleConnectGitHubRepo}
             onResyncRepo={handleResyncGitHubRepo}
             onDisconnectRepo={handleDisconnectGitHubRepo}
@@ -696,6 +872,11 @@ export default function App() {
               });
               setActiveArea('teach');
             }}
+            onGenerateFromFile={handleGenerateFromFile}
+            onGenerateNewFile={handleGenerateNewFile}
+            onUpdateProposedContent={handleUpdateProposedContent}
+            onReviewSuggestion={handleReviewSuggestion}
+            onDeleteSuggestion={handleDeleteSuggestion}
           />
         )}
 
@@ -705,6 +886,7 @@ export default function App() {
             metrics={metrics}
             schemaMissing={schemaMissing}
             phase2SchemaMissing={phase2SchemaMissing}
+            phase3SchemaMissing={phase3SchemaMissing}
             connection={connection}
             onSignOut={handleSignOut}
           />

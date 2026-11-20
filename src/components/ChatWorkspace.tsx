@@ -45,6 +45,7 @@ export function ChatWorkspace({
     ];
     if (connection) {
       base.push('/repo App.tsx');
+      base.push('/suggest App.tsx');
     }
     return base;
   }, [connection]);
@@ -53,12 +54,16 @@ export function ChatWorkspace({
     scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
   }, [messages.length]);
 
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
+  async function submitPrompt() {
     const trimmed = input.trim();
     if (!trimmed || isSending) return;
     setInput('');
     await onSendMessage(trimmed);
+  }
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    await submitPrompt();
   }
 
   async function handleQuickPrompt(prompt: string) {
@@ -88,7 +93,8 @@ export function ChatWorkspace({
           <p className="text-sm text-slate-400">
             Searches your Knowledge folders{connection ? ` and ${connection.owner}/${connection.repo}` : ''}.
             Use <code className="font-mono text-xs text-slate-200">/search</code>,{' '}
-            <code className="font-mono text-xs text-slate-200">/repo</code>, or{' '}
+            <code className="font-mono text-xs text-slate-200">/repo</code>,{' '}
+            <code className="font-mono text-xs text-slate-200">/suggest</code>, or{' '}
             <code className="font-mono text-xs text-slate-200">/teach Title :: Note</code>.
           </p>
         </div>
@@ -261,7 +267,7 @@ export function ChatWorkspace({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
-              void handleSubmit(e);
+              void submitPrompt();
             }
           }}
           placeholder="Ask about your Knowledge notes or connected GitHub repo..."

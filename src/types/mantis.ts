@@ -54,6 +54,31 @@ export interface RepoFile {
   updated_at: string;
 }
 
+export type SuggestionStatus = 'pending' | 'approved' | 'rejected';
+
+export interface CodeSuggestion {
+  id: string;
+  user_id: string;
+  connection_id: string | null;
+  file_path: string;
+  title: string;
+  rationale: string;
+  original_content: string;
+  proposed_content: string;
+  status: SuggestionStatus;
+  user_feedback: string;
+  pr_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiffLine {
+  type: 'context' | 'add' | 'remove';
+  oldLineNo: number | null;
+  newLineNo: number | null;
+  text: string;
+}
+
 export interface RetrievalMatch {
   entry: KnowledgeEntry;
   folderName: string;
@@ -74,5 +99,7 @@ export interface MemoryReadinessMetrics {
   taggedCount: number;
   conversationTurns: number;
   repoFileCount: number;
+  approvedSuggestions: number;
+  reviewedSuggestions: number;
   readinessScore: number;
 }
