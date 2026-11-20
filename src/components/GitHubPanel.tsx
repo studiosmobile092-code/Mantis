@@ -22,20 +22,29 @@ import type {
   CodeSuggestion,
   GitHubConnection,
   RepoFile,
+  SelfAuditFinding,
+  SelfAuditReport,
+  SelfAuditRun,
   SuggestionStatus,
 } from '../types/mantis';
+import {SelfImprovePanel} from './SelfImprovePanel';
 import {SuggestionsPanel} from './SuggestionsPanel';
 
 interface GitHubPanelProps {
   connection: GitHubConnection | null;
   repoFiles: RepoFile[];
   suggestions: CodeSuggestion[];
-  activeSubTab: 'files' | 'suggestions';
-  onChangeSubTab: (tab: 'files' | 'suggestions') => void;
+  auditRuns: SelfAuditRun[];
+  latestAuditReport: SelfAuditReport | null;
+  activeSubTab: 'files' | 'suggestions' | 'self-improve';
+  onChangeSubTab: (tab: 'files' | 'suggestions' | 'self-improve') => void;
   phase2SchemaMissing: boolean;
   phase3SchemaMissing: boolean;
+  phase4SchemaMissing: boolean;
   isSyncingRepo: boolean;
   syncProgressText: string | null;
+  isAuditingSelf: boolean;
+  auditProgressText: string | null;
   selectedFilePath: string | null;
   onSelectFilePath: (path: string | null) => void;
   onVerifyTables: () => void;
@@ -43,6 +52,7 @@ interface GitHubPanelProps {
   onResyncRepo: (token?: string) => Promise<void>;
   onDisconnectRepo: () => Promise<void>;
   onSaveFileToTeach: (file: RepoFile) => void;
+  onSaveLessonToTeach: (title: string, content: string, tags: string) => void;
   onGenerateFromFile: (file: RepoFile, goal: string) => Promise<void>;
   onGenerateNewFile: (targetPath: string, goal: string) => Promise<void>;
   onUpdateProposedContent: (id: string, proposedContent: string) => Promise<boolean>;
@@ -53,18 +63,25 @@ interface GitHubPanelProps {
     prUrl?: string,
   ) => Promise<boolean>;
   onDeleteSuggestion: (id: string) => Promise<boolean>;
+  onRunSelfAudit: (repoInput: string) => Promise<void>;
+  onStageAuditFinding: (finding: SelfAuditFinding) => Promise<void>;
 }
 
 export function GitHubPanel({
   connection,
   repoFiles,
   suggestions,
+  auditRuns,
+  latestAuditReport,
   activeSubTab,
   onChangeSubTab,
   phase2SchemaMissing,
   phase3SchemaMissing,
+  phase4SchemaMissing,
   isSyncingRepo,
   syncProgressText,
+  isAuditingSelf,
+  auditProgressText,
   selectedFilePath,
   onSelectFilePath,
   onVerifyTables,
@@ -72,11 +89,14 @@ export function GitHubPanel({
   onResyncRepo,
   onDisconnectRepo,
   onSaveFileToTeach,
+  onSaveLessonToTeach,
   onGenerateFromFile,
   onGenerateNewFile,
   onUpdateProposedContent,
   onReviewSuggestion,
   onDeleteSuggestion,
+  onRunSelfAudit,
+  onStageAuditFinding,
 }: GitHubPanelProps) {
   const [repoInput, setRepoInput] = useState(
     connection ? `${connection.owner}/${connection.repo}` : 'studiosmobile092-code/Mantis',
@@ -175,12 +195,13 @@ export function GitHubPanel({
             GitHub &amp; Code Suggestions
           </h1>
           <p className="text-sm text-slate-400">
-            Read-only repository awareness (Phase 2) and approval-gated code diffs (Phase 3).
+            Read-only repository awareness (Phase 2), approval-gated diffs (Phase 3), and guarded
+            self-improvement (Phase 4).
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1 rounded-md border border-slate-800 bg-slate-900 p-1">
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-800 bg-slate-900 p-1">
             <button
               type="button"
               onClick={() => onChangeSubTab('files')}
@@ -203,11 +224,36 @@ export function GitHubPanel({
             >
               Suggestions ({pendingSuggestionsCount} pending)
             </button>
+            <button
+              type="button"
+              onClick={() => onChangeSubTab('self-improve')}
+              className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+                activeSubTab === 'self-improve'
+                  ? 'bg-slate-800 text-slate-100'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Self-Improve
+            </button>
           </div>
         </div>
       </div>
 
-      {activeSubTab === 'suggestions' ? (
+      {activeSubTab === 'self-improve' ? (
+        <SelfImprovePanel
+          connection={connection}
+          suggestions={suggestions}
+          auditRuns={auditRuns}
+          latestReport={latestAuditReport}
+          phase4SchemaMissing={phase4SchemaMissing}
+          isAuditing={isAuditingSelf}
+          auditProgressText={auditProgressText}
+          onVerifyPhase4Tables={onVerifyTables}
+          onRunSelfAudit={onRunSelfAudit}
+          onStageFinding={onStageAuditFinding}
+          onOpenSuggestionsQueue={() => onChangeSubTab('suggestions')}
+        />
+      ) : activeSubTab === 'suggestions' ? (
         <SuggestionsPanel
           connection={connection}
           repoFiles={repoFiles}
@@ -219,6 +265,7 @@ export function GitHubPanel({
           onUpdateProposedContent={onUpdateProposedContent}
           onReviewSuggestion={onReviewSuggestion}
           onDeleteSuggestion={onDeleteSuggestion}
+          onSaveLessonToTeach={onSaveLessonToTeach}
         />
       ) : phase2SchemaMissing ? (
         <section className="rounded-lg border border-amber-500/40 bg-slate-900 p-5">
@@ -380,6 +427,10 @@ export function GitHubPanel({
                   <span>branch: {connection.branch}</span>
                   <span aria-hidden="true">·</span>
                   <span className="tabular-nums">{repoFiles.length} files indexed</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="tabular-nums text-slate-400">
+                    Synced {new Date(connection.last_synced_at).toLocaleString()}
+                  </span>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">

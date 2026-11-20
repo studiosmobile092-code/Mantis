@@ -47,6 +47,7 @@ export function ChatWorkspace({
       base.push('/repo App.tsx');
       base.push('/suggest App.tsx');
     }
+    base.push('/self-audit');
     return base;
   }, [connection]);
 
@@ -94,7 +95,8 @@ export function ChatWorkspace({
             Searches your Knowledge folders{connection ? ` and ${connection.owner}/${connection.repo}` : ''}.
             Use <code className="font-mono text-xs text-slate-200">/search</code>,{' '}
             <code className="font-mono text-xs text-slate-200">/repo</code>,{' '}
-            <code className="font-mono text-xs text-slate-200">/suggest</code>, or{' '}
+            <code className="font-mono text-xs text-slate-200">/suggest</code>,{' '}
+            <code className="font-mono text-xs text-slate-200">/self-audit</code>, or{' '}
             <code className="font-mono text-xs text-slate-200">/teach Title :: Note</code>.
           </p>
         </div>

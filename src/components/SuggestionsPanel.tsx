@@ -1,4 +1,5 @@
 import {
+  BookmarkPlus,
   Check,
   CheckCircle2,
   Copy,
@@ -44,6 +45,7 @@ interface SuggestionsPanelProps {
     prUrl?: string,
   ) => Promise<boolean>;
   onDeleteSuggestion: (id: string) => Promise<boolean>;
+  onSaveLessonToTeach?: (title: string, content: string, tags: string) => void;
 }
 
 export function SuggestionsPanel({
@@ -57,6 +59,7 @@ export function SuggestionsPanel({
   onUpdateProposedContent,
   onReviewSuggestion,
   onDeleteSuggestion,
+  onSaveLessonToTeach,
 }: SuggestionsPanelProps) {
   const [mode, setMode] = useState<'improve' | 'new'>(repoFiles.length > 0 ? 'improve' : 'new');
   const [selectedFilePath, setSelectedFilePath] = useState<string>(repoFiles[0]?.path || '');
@@ -383,6 +386,13 @@ export function SuggestionsPanel({
                     <h3 className="text-base font-semibold text-slate-100">{s.title}</h3>
                     <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-slate-400">
                       <span className={statusColor}>{statusText}</span>
+                      {(s.suggestion_kind === 'self_improvement' ||
+                        s.title.startsWith('[Self-Audit]')) && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-sky-300">Self-Improvement</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span>{s.file_path}</span>
                       <span aria-hidden="true">·</span>
@@ -505,6 +515,31 @@ export function SuggestionsPanel({
                         <XCircle className="h-4 w-4" />
                         <span>{s.status === 'rejected' ? 'Rejected' : 'Reject'}</span>
                       </button>
+
+                      {s.status !== 'pending' && onSaveLessonToTeach && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const fb = (feedbackDrafts[s.id] ?? s.user_feedback).trim();
+                            onSaveLessonToTeach(
+                              `Rule from ${s.file_path}`,
+                              [
+                                `Suggestion (${s.status}): ${s.title}`,
+                                `File: ${s.file_path}`,
+                                `Rationale: ${s.rationale}`,
+                                fb ? `My Review Feedback: ${fb}` : '',
+                              ]
+                                .filter(Boolean)
+                                .join('\n\n'),
+                              `review, ${s.status}`,
+                            );
+                          }}
+                          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-slate-100"
+                        >
+                          <BookmarkPlus className="h-3.5 w-3.5" />
+                          <span>Save Lesson</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 

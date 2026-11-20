@@ -4,6 +4,7 @@ import {
   MANTIS_PHASE1_SCHEMA_SQL,
   MANTIS_PHASE2_SCHEMA_SQL,
   MANTIS_PHASE3_SCHEMA_SQL,
+  MANTIS_PHASE4_SCHEMA_SQL,
 } from '../lib/schemaText';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from '../lib/supabase';
 import type {GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
@@ -14,6 +15,7 @@ interface SettingsPanelProps {
   schemaMissing: boolean;
   phase2SchemaMissing: boolean;
   phase3SchemaMissing: boolean;
+  phase4SchemaMissing: boolean;
   connection: GitHubConnection | null;
   onSignOut: () => Promise<void>;
 }
@@ -24,12 +26,13 @@ export function SettingsPanel({
   schemaMissing,
   phase2SchemaMissing,
   phase3SchemaMissing,
+  phase4SchemaMissing,
   connection,
   onSignOut,
 }: SettingsPanelProps) {
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [pingMessage, setPingMessage] = useState<string | null>(null);
-  const [copiedWhich, setCopiedWhich] = useState<1 | 2 | 3 | null>(null);
+  const [copiedWhich, setCopiedWhich] = useState<1 | 2 | 3 | 4 | null>(null);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const maskedKey = `${SUPABASE_PUBLISHABLE_KEY.slice(0, 18)}...${SUPABASE_PUBLISHABLE_KEY.slice(-6)}`;
@@ -54,7 +57,7 @@ export function SettingsPanel({
     }
   }
 
-  async function handleCopySql(sql: string, which: 1 | 2 | 3) {
+  async function handleCopySql(sql: string, which: 1 | 2 | 3 | 4) {
     try {
       await navigator.clipboard.writeText(sql);
       setCopiedWhich(which);
@@ -147,11 +150,13 @@ export function SettingsPanel({
           </div>
 
           <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Chat Turns</div>
+            <div className="text-xs text-slate-400">Self-Audits</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
-              {metrics.conversationTurns}
+              {metrics.selfAuditCount}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] text-slate-500">Saved history</div>
+            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
+              {metrics.conversationTurns} chat turns
+            </div>
           </div>
         </div>
       </section>
@@ -227,9 +232,33 @@ export function SettingsPanel({
         </div>
       </section>
 
-      {/* Phase 1–3 SQL References */}
+      {/* Phase 1–4 SQL References */}
       <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Database className="h-4 w-4 text-slate-400" />
+            <h2 className="text-sm font-semibold text-slate-100">
+              Phase 4 SQL Migration ({phase4SchemaMissing ? 'Setup Required' : 'Active'})
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleCopySql(MANTIS_PHASE4_SCHEMA_SQL, 4)}
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+          >
+            {copiedWhich === 4 ? (
+              <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            <span>{copiedWhich === 4 ? 'Phase 4 SQL Copied' : 'Copy Phase 4 SQL'}</span>
+          </button>
+        </div>
+        <pre className="max-h-40 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+          {MANTIS_PHASE4_SCHEMA_SQL}
+        </pre>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
           <div className="flex items-center gap-2">
             <Database className="h-4 w-4 text-slate-400" />
             <h2 className="text-sm font-semibold text-slate-100">
@@ -249,9 +278,6 @@ export function SettingsPanel({
             <span>{copiedWhich === 3 ? 'Phase 3 SQL Copied' : 'Copy Phase 3 SQL'}</span>
           </button>
         </div>
-        <pre className="max-h-40 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-          {MANTIS_PHASE3_SCHEMA_SQL}
-        </pre>
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
           <div className="flex items-center gap-2">

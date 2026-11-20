@@ -42,6 +42,7 @@ export function KnowledgeBrowser({
   onOpenTeach,
 }: KnowledgeBrowserProps) {
   const [selectedFolderId, setSelectedFolderId] = useState<string>('all');
+  const [selectedTag, setSelectedTag] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewFolderForm, setShowNewFolderForm] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -62,6 +63,7 @@ export function KnowledgeBrowser({
   useEffect(() => {
     if (highlightedEntryId) {
       setSelectedFolderId('all');
+      setSelectedTag('all');
       setSearchQuery('');
     }
   }, [highlightedEntryId]);
@@ -84,6 +86,16 @@ export function KnowledgeBrowser({
     return {counts, uncategorized};
   }, [entries, folderMap]);
 
+  const allTags = useMemo(() => {
+    const tagSet = new Set<string>();
+    for (const entry of entries) {
+      for (const tag of entry.tags) {
+        tagSet.add(tag);
+      }
+    }
+    return Array.from(tagSet).sort((a, b) => a.localeCompare(b));
+  }, [entries]);
+
   const filteredEntries = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return entries.filter((entry) => {
@@ -92,6 +104,9 @@ export function KnowledgeBrowser({
       } else if (selectedFolderId !== 'all') {
         if (entry.folder_id !== selectedFolderId) return false;
       }
+      if (selectedTag !== 'all' && !entry.tags.includes(selectedTag)) {
+        return false;
+      }
       if (!q) return true;
       return (
         entry.title.toLowerCase().includes(q) ||
@@ -99,7 +114,7 @@ export function KnowledgeBrowser({
         entry.tags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [entries, selectedFolderId, searchQuery, folderMap]);
+  }, [entries, selectedFolderId, selectedTag, searchQuery, folderMap]);
 
   async function handleCreateFolder(event: FormEvent) {
     event.preventDefault();
@@ -335,15 +350,33 @@ export function KnowledgeBrowser({
 
         {/* Entries List Column */}
         <div className="space-y-4">
-          <div className="relative">
-            <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search titles, tags, or snippets..."
-              className="min-h-[44px] w-full rounded-md border border-slate-800 bg-slate-900 py-2 pr-4 pl-10 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
-            />
+          <div className={`grid gap-2.5 ${allTags.length > 0 ? 'sm:grid-cols-[1fr_180px]' : ''}`}>
+            <div className="relative">
+              <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search titles, tags, or snippets..."
+                className="min-h-[44px] w-full rounded-md border border-slate-800 bg-slate-900 py-2 pr-4 pl-10 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+
+            {allTags.length > 0 && (
+              <select
+                aria-label="Filter by tag"
+                value={selectedTag}
+                onChange={(e) => setSelectedTag(e.target.value)}
+                className="min-h-[44px] rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="all">All Tags ({allTags.length})</option>
+                {allTags.map((tag) => (
+                  <option key={tag} value={tag}>
+                    #{tag}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {isLoading ? (
@@ -380,6 +413,7 @@ export function KnowledgeBrowser({
                     type="button"
                     onClick={() => {
                       setSelectedFolderId('all');
+                      setSelectedTag('all');
                       setSearchQuery('');
                     }}
                     className="inline-flex min-h-[42px] items-center rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700"

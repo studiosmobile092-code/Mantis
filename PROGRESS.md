@@ -40,9 +40,32 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
 - **Verification**: `npm run build` and `npm run lint` pass cleanly.
 
 ### Step 3.3 — Approval-Gated Suggestion Queue & Guarded PR Workflow
-- **Status**: Completed (Awaiting User Verification)
+- **Status**: Completed & Verified by User
 - **Summary**:
   - Built `SuggestionsPanel` inside **GitHub → Suggestions** (plus one-tap **Propose Improvement** from any repo file and `/suggest <file>` in **Chat / Work**).
   - Enforces explicit **Approve** / **Reject** review before unlocking write/export actions (**Copy Unified Patch**, **Copy Patched File**, or **Open Pull Request** on a new `mantis/*` branch — never committing directly to `main`).
   - Updated `MemoryReadinessMetrics` to honestly include reviewed and approved suggestions.
-- **Verification**: Open **GitHub → Suggestions**, analyze a file or propose new code, inspect the diff, approve it, and verify write actions unlock.
+
+---
+
+## Phase 4 — Guarded Self-Improvement
+
+### Step 4.1 — Phase 4 Database Schema (`self_audit_runs` + `suggestion_kind`)
+- **Status**: Ready for User Execution
+- **Summary**:
+  - Created `supabase/schema_phase4.sql` to track self-audit runs (`repo_label`, `branch`, `files_scanned`, `findings_count`, `health_score`, `summary`) and tag `code_suggestions` with `suggestion_kind` (`code_help` vs `self_improvement`) under Postgres `GRANT`s and `auth.uid() = user_id` RLS.
+- **Verification**: Run `supabase/schema_phase4.sql` (copyable from **GitHub → Self-Improve** or **Settings**) once in Supabase SQL Editor and tap **Verify Phase 4 Tables**.
+
+### Step 4.2 — Read-Only Self-Audit Engine (`src/lib/selfImprove.ts`)
+- **Status**: Completed
+- **Summary**:
+  - Audits Mantis's own codebase (using indexed files when connected to `studiosmobile092-code/Mantis`, or fetching a read-only GitHub snapshot on demand) for security, tablet accessibility, workflow/SQL reliability, bundle chunking, and Knowledge rule alignment.
+  - Marks sensitive infrastructure files (`.github/workflows/*`, `supabase/*`, `vite.config.ts`, `package.json`) as `HIGH-GUARD`.
+
+### Step 4.3 — Guarded Self-Improve Panel & Prior-Phase Polish
+- **Status**: Completed (Awaiting User Verification)
+- **Summary**:
+  - Built `SelfImprovePanel` under **GitHub → Self-Improve** plus `/self-audit` command in **Chat / Work**.
+  - Enforces strict no-unrestricted-self-modification policy: read-only scan → staged diff in `Suggestions` → explicit user **Approve** → patch export or `mantis/*` Pull Request only.
+  - Added tag filtering in **Knowledge**, last-synced timestamp in **GitHub → Repository**, and **Save Lesson** from reviewed suggestions back into **Teach Mantis**.
+- **Verification**: Run **GitHub → Self-Improve → Run Mantis Self-Audit** (or `/self-audit` in Chat), tap **Stage Diff for Review** on a finding, and verify it lands in **Suggestions** as `Pending Review`.

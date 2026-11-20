@@ -12,8 +12,17 @@ import {
   fetchGitHubFileContent,
   fetchGitHubRepoMetadata,
   fetchGitHubTreeFiles,
+  getSessionGitHubToken,
+  parseGitHubRepoInput,
 } from './lib/github';
 import {STARTER_FOLDERS, buildMemoryReply, computeMemoryReadiness} from './lib/memory';
+import {
+  DEFAULT_MANTIS_REPO,
+  buildSelfImprovementDraft,
+  fetchMantisSelfSnapshot,
+  looksLikeMantisRepo,
+  runMantisSelfAudit,
+} from './lib/selfImprove';
 import {
   generateImprovementSuggestion,
   generateNewCodeSuggestion,
@@ -28,6 +37,10 @@ import type {
   KnowledgeEntry,
   KnowledgeFolder,
   RepoFile,
+  SelfAuditFinding,
+  SelfAuditReport,
+  SelfAuditRun,
+  SuggestionKind,
   SuggestionStatus,
 } from './types/mantis';
 
@@ -36,7 +49,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
 
   const [activeArea, setActiveArea] = useState<AreaId>('chat');
-  const [githubSubTab, setGithubSubTab] = useState<'files' | 'suggestions'>('files');
+  const [githubSubTab, setGithubSubTab] = useState<'files' | 'suggestions' | 'self-improve'>('files');
 
   const [folders, setFolders] = useState<KnowledgeFolder[]>([]);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
@@ -44,15 +57,20 @@ export default function App() {
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
   const [repoFiles, setRepoFiles] = useState<RepoFile[]>([]);
   const [suggestions, setSuggestions] = useState<CodeSuggestion[]>([]);
+  const [auditRuns, setAuditRuns] = useState<SelfAuditRun[]>([]);
+  const [latestAuditReport, setLatestAuditReport] = useState<SelfAuditReport | null>(null);
 
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [isSyncingRepo, setIsSyncingRepo] = useState(false);
   const [syncProgressText, setSyncProgressText] = useState<string | null>(null);
+  const [isAuditingSelf, setIsAuditingSelf] = useState(false);
+  const [auditProgressText, setAuditProgressText] = useState<string | null>(null);
 
   const [schemaMissing, setSchemaMissing] = useState(false);
   const [phase2SchemaMissing, setPhase2SchemaMissing] = useState(false);
   const [phase3SchemaMissing, setPhase3SchemaMissing] = useState(false);
+  const [phase4SchemaMissing, setPhase4SchemaMissing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
@@ -90,7 +108,7 @@ export default function App() {
     setErrorBanner(null);
 
     try {
-      const [foldersRes, entriesRes, messagesRes, connRes, filesRes, suggestionsRes] =
+      const [foldersRes, entriesRes, messagesRes, connRes, filesRes, suggestionsRes, auditRunsRes] =
         await Promise.all([
           supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
           supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
@@ -102,6 +120,7 @@ export default function App() {
             .limit(1),
           supabase.from('repo_files').select('*').order('path', {ascending: true}),
           supabase.from('code_suggestions').select('*').order('created_at', {ascending: false}),
+          supabase.from('self_audit_runs').select('*').order('created_at', {ascending: false}),
         ]);
 
       if (
@@ -172,6 +191,17 @@ export default function App() {
         setPhase3SchemaMissing(false);
         setSuggestions((suggestionsRes.data as CodeSuggestion[]) || []);
       }
+
+      if (isMissingTableError(auditRunsRes.error)) {
+        setPhase4SchemaMissing(true);
+        setAuditRuns([]);
+      } else if (auditRunsRes.error) {
+        setPhase4SchemaMissing(false);
+        setErrorBanner(auditRunsRes.error.message);
+      } else {
+        setPhase4SchemaMissing(false);
+        setAuditRuns((auditRunsRes.data as SelfAuditRun[]) || []);
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Unable to reach Supabase');
     } finally {
@@ -189,16 +219,27 @@ export default function App() {
       setConnection(null);
       setRepoFiles([]);
       setSuggestions([]);
+      setAuditRuns([]);
+      setLatestAuditReport(null);
       setSchemaMissing(false);
       setPhase2SchemaMissing(false);
       setPhase3SchemaMissing(false);
+      setPhase4SchemaMissing(false);
       setErrorBanner(null);
     }
   }, [session, loadWorkspaceData]);
 
   const metrics = useMemo(
-    () => computeMemoryReadiness(entries, folders, messages, repoFiles, suggestions),
-    [entries, folders, messages, repoFiles, suggestions],
+    () =>
+      computeMemoryReadiness(
+        entries,
+        folders,
+        messages,
+        repoFiles,
+        suggestions,
+        auditRuns.length,
+      ),
+    [entries, folders, messages, repoFiles, suggestions, auditRuns.length],
   );
 
   async function handleCreateFolder(
@@ -320,23 +361,29 @@ export default function App() {
 
   async function persistSuggestionDraft(
     draft: GeneratedSuggestionDraft,
+    kind: SuggestionKind = 'code_help',
   ): Promise<CodeSuggestion | null> {
     if (!session) return null;
     setErrorBanner(null);
+    const insertPayload: Record<string, unknown> = {
+      user_id: session.user.id,
+      connection_id: connection?.id || null,
+      file_path: draft.filePath,
+      title: draft.title,
+      rationale: draft.rationale,
+      original_content: draft.originalContent,
+      proposed_content: draft.proposedContent,
+      status: 'pending',
+      user_feedback: '',
+      pr_url: '',
+    };
+    if (!phase4SchemaMissing) {
+      insertPayload.suggestion_kind = kind;
+    }
+
     const {data, error} = await supabase
       .from('code_suggestions')
-      .insert({
-        user_id: session.user.id,
-        connection_id: connection?.id || null,
-        file_path: draft.filePath,
-        title: draft.title,
-        rationale: draft.rationale,
-        original_content: draft.originalContent,
-        proposed_content: draft.proposedContent,
-        status: 'pending',
-        user_feedback: '',
-        pr_url: '',
-      })
+      .insert(insertPayload)
       .select('*')
       .single();
 
@@ -356,12 +403,97 @@ export default function App() {
 
   async function handleGenerateFromFile(file: RepoFile, goal: string) {
     const draft = generateImprovementSuggestion(file, goal, entries, folders);
-    await persistSuggestionDraft(draft);
+    await persistSuggestionDraft(draft, 'code_help');
   }
 
   async function handleGenerateNewFile(targetPath: string, goal: string) {
     const draft = generateNewCodeSuggestion(targetPath, goal, entries, folders);
-    await persistSuggestionDraft(draft);
+    await persistSuggestionDraft(draft, 'code_help');
+  }
+
+  async function handleRunSelfAudit(repoInput?: string): Promise<SelfAuditReport> {
+    const parsed = parseGitHubRepoInput(repoInput || DEFAULT_MANTIS_REPO);
+    if (!parsed) {
+      throw new Error(
+        'Enter a valid GitHub repository as owner/repo (e.g. studiosmobile092-code/Mantis).',
+      );
+    }
+
+    setIsAuditingSelf(true);
+    setAuditProgressText(`Starting guarded inspection of ${parsed.owner}/${parsed.repo}...`);
+    setErrorBanner(null);
+
+    try {
+      const canUseIndexedFiles =
+        connection &&
+        connection.owner.toLowerCase() === parsed.owner.toLowerCase() &&
+        connection.repo.toLowerCase() === parsed.repo.toLowerCase() &&
+        repoFiles.length > 0 &&
+        looksLikeMantisRepo(repoFiles);
+
+      let targetRepoLabel = `${parsed.owner}/${parsed.repo}`;
+      let targetBranch = connection?.branch || 'main';
+      let targetFiles = repoFiles;
+
+      if (!canUseIndexedFiles) {
+        const snapshot = await fetchMantisSelfSnapshot(
+          parsed.owner,
+          parsed.repo,
+          undefined,
+          getSessionGitHubToken() || undefined,
+          setAuditProgressText,
+        );
+        targetRepoLabel = snapshot.repoLabel;
+        targetBranch = snapshot.branch;
+        targetFiles = snapshot.files;
+      }
+
+      setAuditProgressText(`Scanning ${targetFiles.length} project files against safety & UX rules...`);
+      const report = runMantisSelfAudit(
+        targetFiles,
+        targetRepoLabel,
+        targetBranch,
+        entries,
+        folders,
+      );
+      setLatestAuditReport(report);
+
+      if (session && !phase4SchemaMissing) {
+        const summary =
+          report.findings.length === 0
+            ? 'Clean scan — 0 issues detected.'
+            : `${report.findings.length} guarded findings (${report.findings.filter((f) => f.severity === 'high').length} high).`;
+        const {data: savedRun, error: runErr} = await supabase
+          .from('self_audit_runs')
+          .insert({
+            user_id: session.user.id,
+            repo_label: report.repoLabel,
+            branch: report.branch,
+            files_scanned: report.filesScanned,
+            findings_count: report.findings.length,
+            health_score: report.healthScore,
+            summary,
+          })
+          .select('*')
+          .single();
+
+        if (!runErr && savedRun) {
+          setAuditRuns((prev) => [savedRun as SelfAuditRun, ...prev]);
+        }
+      }
+
+      setAuditProgressText(
+        `Audit complete: ${report.filesScanned} files scanned, ${report.findings.length} findings, Health ${report.healthScore}/100.`,
+      );
+      return report;
+    } finally {
+      setIsAuditingSelf(false);
+    }
+  }
+
+  async function handleStageAuditFinding(finding: SelfAuditFinding) {
+    const draft = buildSelfImprovementDraft(finding, entries, folders);
+    await persistSuggestionDraft(draft, 'self_improvement');
   }
 
   async function handleUpdateProposedContent(
@@ -674,6 +806,32 @@ export default function App() {
             replyText = 'Could not save code suggestion to Supabase. Check Settings for schema status.';
           }
         }
+      } else if (prompt.toLowerCase().trim() === '/self-audit' || prompt.toLowerCase().startsWith('/self-audit ')) {
+        const targetRepo =
+          prompt.trim().slice(11).trim() ||
+          (connection && looksLikeMantisRepo(repoFiles)
+            ? `${connection.owner}/${connection.repo}`
+            : DEFAULT_MANTIS_REPO);
+        try {
+          const report = await handleRunSelfAudit(targetRepo);
+          const topFindings = report.findings
+            .slice(0, 4)
+            .map((f, idx) => `${idx + 1}. [${f.severity.toUpperCase()}] ${f.filePath} — ${f.title}`);
+          replyText = [
+            `Guarded Self-Audit complete for ${report.repoLabel} (${report.branch}):`,
+            `- Files scanned: ${report.filesScanned}`,
+            `- Code Health Score: ${report.healthScore} / 100`,
+            `- Findings: ${report.findings.length}`,
+            ...(topFindings.length > 0 ? ['', 'Top findings:', ...topFindings] : []),
+            '',
+            'Open GitHub → Self-Improve to inspect findings and stage diffs for your approval. No files are ever modified automatically.',
+          ].join('\n');
+          citedRepoPaths = report.findings.slice(0, 3).map((f) => f.filePath);
+        } catch (err) {
+          replyText = `Self-Audit could not complete: ${
+            err instanceof Error ? err.message : 'Unable to fetch repository'
+          }`;
+        }
       } else {
         const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
         const result = buildMemoryReply(prompt, entries, folders, repoFiles, repoLabel);
@@ -847,12 +1005,17 @@ export default function App() {
             connection={connection}
             repoFiles={repoFiles}
             suggestions={suggestions}
+            auditRuns={auditRuns}
+            latestAuditReport={latestAuditReport}
             activeSubTab={githubSubTab}
             onChangeSubTab={setGithubSubTab}
             phase2SchemaMissing={phase2SchemaMissing}
             phase3SchemaMissing={phase3SchemaMissing}
+            phase4SchemaMissing={phase4SchemaMissing}
             isSyncingRepo={isSyncingRepo}
             syncProgressText={syncProgressText}
+            isAuditingSelf={isAuditingSelf}
+            auditProgressText={auditProgressText}
             selectedFilePath={selectedRepoPath}
             onSelectFilePath={setSelectedRepoPath}
             onVerifyTables={() => void loadWorkspaceData(session)}
@@ -872,11 +1035,24 @@ export default function App() {
               });
               setActiveArea('teach');
             }}
+            onSaveLessonToTeach={(title, content, tags) => {
+              setTeachPrefill({
+                key: Date.now(),
+                title,
+                content,
+                tags,
+              });
+              setActiveArea('teach');
+            }}
             onGenerateFromFile={handleGenerateFromFile}
             onGenerateNewFile={handleGenerateNewFile}
             onUpdateProposedContent={handleUpdateProposedContent}
             onReviewSuggestion={handleReviewSuggestion}
             onDeleteSuggestion={handleDeleteSuggestion}
+            onRunSelfAudit={async (repoInput) => {
+              await handleRunSelfAudit(repoInput);
+            }}
+            onStageAuditFinding={handleStageAuditFinding}
           />
         )}
 
@@ -887,6 +1063,7 @@ export default function App() {
             schemaMissing={schemaMissing}
             phase2SchemaMissing={phase2SchemaMissing}
             phase3SchemaMissing={phase3SchemaMissing}
+            phase4SchemaMissing={phase4SchemaMissing}
             connection={connection}
             onSignOut={handleSignOut}
           />

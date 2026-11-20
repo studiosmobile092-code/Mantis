@@ -279,7 +279,7 @@ export function buildMemoryReply(
     }
     parts.push(
       '',
-      'Commands: `/search <topic>`, `/repo <file>`, `/teach Title :: Details`, or `/suggest <file_path>`.',
+      'Commands: `/search <topic>`, `/repo <file>`, `/teach Title :: Details`, `/suggest <file_path>`, or `/self-audit`.',
     );
 
     return {
@@ -309,7 +309,7 @@ export function buildMemoryReply(
           repoFiles.length > 0 ? ` and ${repoFiles.length} indexed repo files` : ''
         } for "${searchTerm}", and did not find a match yet.`,
         '',
-        'Save a new rule with `/teach Title :: Details` or propose a code change with `/suggest <file_path>`.',
+        'Save a new rule with `/teach Title :: Details`, propose code with `/suggest <file_path>`, or run `/self-audit`.',
       ].join('\n'),
       citedEntryIds: [],
       citedRepoPaths: [],
@@ -361,6 +361,7 @@ export function computeMemoryReadiness(
   messages: ChatMessage[],
   repoFiles: RepoFile[] = [],
   suggestions: CodeSuggestion[] = [],
+  selfAuditCount = 0,
 ): MemoryReadinessMetrics {
   const entryCount = entries.length;
   const folderCount = folders.length;
@@ -372,12 +373,13 @@ export function computeMemoryReadiness(
   const reviewedSuggestions = suggestions.filter((s) => s.status !== 'pending').length;
 
   const usedFolderIds = new Set(entries.map((e) => e.folder_id).filter(Boolean));
-  const entryPoints = Math.min(40, substantiveCount * 2);
+  const entryPoints = Math.min(38, substantiveCount * 2);
   const folderPoints = Math.min(12, usedFolderIds.size * 3);
-  const tagPoints = Math.min(13, taggedCount);
+  const tagPoints = Math.min(12, taggedCount);
   const chatPoints = Math.min(10, conversationTurns);
-  const repoPoints = Math.min(15, Math.floor(repoFileCount / 2));
+  const repoPoints = Math.min(14, Math.floor(repoFileCount / 2));
   const suggestionPoints = Math.min(10, approvedSuggestions * 3 + Math.min(4, reviewedSuggestions));
+  const selfAuditPoints = Math.min(4, selfAuditCount * 2);
 
   return {
     entryCount,
@@ -388,8 +390,15 @@ export function computeMemoryReadiness(
     repoFileCount,
     approvedSuggestions,
     reviewedSuggestions,
+    selfAuditCount,
     readinessScore: Math.round(
-      entryPoints + folderPoints + tagPoints + chatPoints + repoPoints + suggestionPoints,
+      entryPoints +
+        folderPoints +
+        tagPoints +
+        chatPoints +
+        repoPoints +
+        suggestionPoints +
+        selfAuditPoints,
     ),
   };
 }
