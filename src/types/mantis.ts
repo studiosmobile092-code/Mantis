@@ -1,4 +1,4 @@
-export type AreaId = 'chat' | 'knowledge' | 'teach' | 'github' | 'settings';
+export type AreaId = 'chat' | 'knowledge' | 'capture' | 'teach' | 'github' | 'settings';
 
 export interface KnowledgeFolder {
   id: string;
@@ -16,7 +16,18 @@ export interface KnowledgeEntry {
   content: string;
   tags: string[];
   source: string;
+  recall_count?: number;
+  confidence_score?: number;
   created_at: string;
+  updated_at: string;
+}
+
+export interface UserPreferences {
+  user_id: string;
+  brain_url: string;
+  preferred_model: string;
+  auto_learn_from_chat: boolean;
+  capture_interval_ms: number;
   updated_at: string;
 }
 

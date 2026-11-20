@@ -1,4 +1,4 @@
-import {ArrowUpRight, BookmarkPlus, FileCode2, Send, Trash2} from 'lucide-react';
+import {ArrowUpRight, BookmarkPlus, Cpu, FileCode2, Send, ThumbsUp, Trash2} from 'lucide-react';
 import {type FormEvent, useEffect, useMemo, useRef, useState} from 'react';
 import type {ChatMessage, GitHubConnection, KnowledgeEntry} from '../types/mantis';
 
@@ -6,6 +6,8 @@ interface ChatWorkspaceProps {
   messages: ChatMessage[];
   entries: KnowledgeEntry[];
   connection: GitHubConnection | null;
+  brainConnected: boolean;
+  brainModel: string;
   isLoading: boolean;
   isSending: boolean;
   onSendMessage: (prompt: string) => Promise<void>;
@@ -13,12 +15,16 @@ interface ChatWorkspaceProps {
   onInspectEntry: (entryId: string) => void;
   onInspectRepoFile: (filePath: string) => void;
   onSaveTextToTeach: (suggestedTitle: string, content: string) => void;
+  onReinforceEntries: (entryIds: string[]) => Promise<void>;
+  onOpenSettings: () => void;
 }
 
 export function ChatWorkspace({
   messages,
   entries,
   connection,
+  brainConnected,
+  brainModel,
   isLoading,
   isSending,
   onSendMessage,
@@ -26,10 +32,13 @@ export function ChatWorkspace({
   onInspectEntry,
   onInspectRepoFile,
   onSaveTextToTeach,
+  onReinforceEntries,
+  onOpenSettings,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState('');
   const [confirmClear, setConfirmClear] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [reinforcedMsgIds, setReinforcedMsgIds] = useState<Record<string, boolean>>({});
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
 
   const entryMap = useMemo(
@@ -90,7 +99,24 @@ export function ChatWorkspace({
     <div className="mx-auto flex max-w-4xl flex-col gap-4">
       <div className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-800 pb-4">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold tracking-tight text-slate-100">Chat / Work</h1>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-xl font-semibold tracking-tight text-slate-100">Chat / Work</h1>
+            {brainConnected ? (
+              <span className="inline-flex items-center gap-1.5 font-mono text-xs text-emerald-400">
+                <Cpu className="h-3.5 w-3.5" />
+                <span>{brainModel.split('/').pop()}</span>
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="inline-flex items-center gap-1.5 font-mono text-xs text-amber-300 underline underline-offset-2 hover:text-amber-200"
+              >
+                <Cpu className="h-3.5 w-3.5" />
+                <span>Memory Mode (Connect AI Brain in Settings)</span>
+              </button>
+            )}
+          </div>
           <p className="text-sm text-slate-400">
             Searches your Knowledge folders{connection ? ` and ${connection.owner}/${connection.repo}` : ''}.
             Use <code className="font-mono text-xs text-slate-200">/search</code>,{' '}
@@ -215,6 +241,37 @@ export function ChatWorkspace({
                         <BookmarkPlus className="h-3.5 w-3.5" />
                         <span>Save as Knowledge</span>
                       </button>
+                    )}
+
+                    {!isUser && (
+                      <div className="flex items-center gap-1.5">
+                        {citedEntries.length > 0 && (
+                          <button
+                            type="button"
+                            disabled={Boolean(reinforcedMsgIds[msg.id])}
+                            onClick={async () => {
+                              setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
+                              await onReinforceEntries(citedEntries.map((e) => e.id));
+                            }}
+                            className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
+                              reinforcedMsgIds[msg.id]
+                                ? 'text-emerald-400'
+                                : 'text-slate-400 hover:bg-slate-800 hover:text-emerald-300'
+                            }`}
+                          >
+                            <ThumbsUp className="h-3.5 w-3.5" />
+                            <span>{reinforcedMsgIds[msg.id] ? 'Reinforced' : 'Helpful'}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => onSaveTextToTeach('Learned from Mantis Chat', msg.content)}
+                          className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                        >
+                          <BookmarkPlus className="h-3.5 w-3.5" />
+                          <span>Remember</span>
+                        </button>
+                      </div>
                     )}
                   </div>
 

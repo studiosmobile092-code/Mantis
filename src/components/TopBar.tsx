@@ -1,10 +1,19 @@
-import {BookOpen, GitBranch, MessageSquare, PlusCircle, RefreshCw, Settings} from 'lucide-react';
+import {
+  BookOpen,
+  GitBranch,
+  MessageSquare,
+  PlusCircle,
+  RefreshCw,
+  ScanText,
+  Settings,
+} from 'lucide-react';
 import type {AreaId} from '../types/mantis';
 
 interface TopBarProps {
   activeArea: AreaId;
   onSelectArea: (area: AreaId) => void;
   statusLabel: string;
+  brainConnected: boolean;
   knowledgeCount: number;
   repoFileCount: number;
   readinessScore: number;
@@ -15,6 +24,7 @@ interface TopBarProps {
 const NAV_ITEMS: Array<{id: AreaId; label: string; icon: typeof MessageSquare}> = [
   {id: 'chat', label: 'Chat', icon: MessageSquare},
   {id: 'knowledge', label: 'Knowledge', icon: BookOpen},
+  {id: 'capture', label: 'Capture', icon: ScanText},
   {id: 'teach', label: 'Teach', icon: PlusCircle},
   {id: 'github', label: 'GitHub', icon: GitBranch},
   {id: 'settings', label: 'Settings', icon: Settings},
@@ -24,6 +34,7 @@ export function TopBar({
   activeArea,
   onSelectArea,
   statusLabel,
+  brainConnected,
   knowledgeCount,
   repoFileCount,
   readinessScore,
@@ -70,7 +81,9 @@ export function TopBar({
           {/* Zone 3: Quiet unboxed status + 1 primary action */}
           <div className="flex shrink-0 items-center gap-4">
             <div className="hidden items-center gap-2 font-mono text-xs text-slate-400 sm:flex">
-              <span className="text-slate-200">{statusLabel}</span>
+              <span className={brainConnected ? 'text-emerald-400' : 'text-slate-200'}>
+                {brainConnected ? 'AI Brain' : statusLabel}
+              </span>
               <span aria-hidden="true">/</span>
               <span className="tabular-nums">{knowledgeCount} notes</span>
               {repoFileCount > 0 && (
@@ -99,7 +112,7 @@ export function TopBar({
       {/* Tablet / mobile navigation bar with >= 44px touch targets */}
       <nav
         aria-label="Mobile navigation"
-        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-slate-800 bg-[#0B1120] md:hidden"
+        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-slate-800 bg-[#0B1120] md:hidden"
       >
         {NAV_ITEMS.map((item) => {
           const Icon = item.icon;

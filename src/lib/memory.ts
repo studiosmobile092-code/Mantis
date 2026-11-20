@@ -26,6 +26,10 @@ export const STARTER_FOLDERS: Array<{name: string; description: string}> = [
     name: 'Preferences',
     description: 'Your personal coding style, naming, and UI defaults',
   },
+  {
+    name: 'Captured Learning',
+    description: 'Auto-distilled knowledge from screen captures, YouTube captions, and articles',
+  },
 ];
 
 const STOPWORDS = new Set([
@@ -78,6 +82,25 @@ export function tokenizeQuery(input: string): string[] {
   return Array.from(new Set(raw));
 }
 
+function buildTrigrams(text: string): Set<string> {
+  const padded = `  ${text.toLowerCase().replace(/[^a-z0-9]/g, ' ')}  `;
+  const grams = new Set<string>();
+  for (let i = 0; i <= padded.length - 3; i += 1) {
+    const g = padded.slice(i, i + 3);
+    if (g.trim().length >= 2) grams.add(g);
+  }
+  return grams;
+}
+
+function trigramSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const g of a) {
+    if (b.has(g)) shared += 1;
+  }
+  return shared / Math.max(1, Math.min(a.size, b.size));
+}
+
 export function retrieveRelevantKnowledge(
   query: string,
   entries: KnowledgeEntry[],
@@ -87,6 +110,7 @@ export function retrieveRelevantKnowledge(
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
   const normalizedQuery = query.trim().toLowerCase();
   const tokens = tokenizeQuery(query);
+  const queryGrams = buildTrigrams(normalizedQuery);
 
   if (!normalizedQuery || entries.length === 0) {
     return [];
@@ -132,6 +156,21 @@ export function retrieveRelevantKnowledge(
         score += 1.5;
         matchedContentTokens.push(token);
       }
+    }
+
+    // Fuzzy trigram similarity fallback so partial or slightly misspelled terms match
+    if (tokens.length > 0 && score < 3) {
+      const sim = trigramSimilarity(queryGrams, buildTrigrams(`${titleLower} ${tagsLower.join(' ')}`));
+      if (sim >= 0.42) {
+        score += sim * 4;
+        reasons.push('Fuzzy similarity');
+      }
+    }
+
+    // Apply reinforcement boost from user-verified confidence score
+    if (score > 0) {
+      const confidence = Math.max(1, entry.confidence_score || 1);
+      score += Math.min(3, (confidence - 1) * 0.6);
     }
 
     if (matchedTitleTokens.length > 0) {

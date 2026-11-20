@@ -69,3 +69,35 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   - Enforces strict no-unrestricted-self-modification policy: read-only scan → staged diff in `Suggestions` → explicit user **Approve** → patch export or `mantis/*` Pull Request only.
   - Added tag filtering in **Knowledge**, last-synced timestamp in **GitHub → Repository**, and **Save Lesson** from reviewed suggestions back into **Teach Mantis**.
 - **Verification**: Run **GitHub → Self-Improve → Run Mantis Self-Audit** (or `/self-audit` in Chat), tap **Stage Diff for Review** on a finding, and verify it lands in **Suggestions** as `Pending Review`.
+
+---
+
+## Phase 5 — Real AI Brain, Live Capture & Trainable Memory
+
+### Step 5.1 — Zero-Secret Cloudflare Worker AI Proxy (`cloudflare/worker.js`)
+- **Status**: Completed (Awaiting User Cloudflare Deployment)
+- **Summary**:
+  - Built `cloudflare/worker.js` (plus optional `supabase/functions/mantis-brain/index.ts` mirror) to proxy Hugging Face coding/reasoning models (`Qwen/Qwen2.5-Coder-32B-Instruct`, `Qwen/Qwen2.5-72B-Instruct`, `meta-llama/Llama-3.3-70B-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B`) with automatic model fallback.
+  - Verifies the signed-in user's Supabase JWT + optional `ALLOWED_EMAIL` on every call so neither `HF_TOKEN` nor Supabase Secret keys ever appear in frontend code or GitHub.
+  - Exposes `/health`, `/ai/chat` (with `[LEARN: ...]` auto-learning directives), `/ai/distill`, `/ai/suggest`, and `/extract-url` (YouTube captions + clean web article text).
+  - Embedded one-click **Copy Worker Code** and connection tester inside **Settings**.
+- **Verification**: Deploy `cloudflare/worker.js` to Cloudflare Workers, set `HF_TOKEN` Secret and `ALLOWED_EMAIL` Variable, paste Worker URL into **Settings**, and tap **Save & Test AI Brain**.
+
+### Step 5.2 — Live Screen/Caption OCR, YouTube/Article & Voice Capture (`Capture` Tab)
+- **Status**: Completed (Awaiting User Verification)
+- **Summary**:
+  - Built `src/components/CapturePanel.tsx`, `src/lib/ocrCapture.ts` (`tesseract.js` local Web Worker with `bottom_captions` / `center_article` / `full` frame cropping + contrast enhancement), and `src/lib/textDistiller.ts` (rolling YouTube caption deduplicator + offline fallback distiller).
+  - **Chromebook / Desktop**: Supports live `getDisplayMedia` screen/tab recording with real-time rolling caption deduplication.
+  - **Galaxy Tab A9+ (Android Chrome)**: Automatically provides Android-compatible workarounds: **YouTube / Article URL** extraction via the Worker, **Screenshot / Camera / Clipboard (`Ctrl+V`) OCR**, **Live Mic** Web Speech transcription, and bulk transcript paste.
+  - Auto-distills captured text into structured Knowledge entries and saves them directly to Supabase.
+- **Verification**: Open the **Capture** tab, test **YouTube / Article URL** or **Screenshots & Live Mic**, and verify new entries appear under **Knowledge → Captured Learning**.
+
+### Step 5.3 — Trainable Memory Reinforcement, Synced Preferences & Bundle Split
+- **Status**: Completed (Awaiting User Verification)
+- **Summary**:
+  - Created `supabase/schema_phase5.sql` adding `recall_count` and `confidence_score` to `knowledge_entries` and creating `user_preferences` (syncing AI Brain URL, model, and capture interval across devices with RLS + `GRANT`s).
+  - Upgraded `src/lib/memory.ts` with character-trigram fuzzy matching and confidence-score weighting, plus **Helpful** feedback reinforcement and `[LEARN:]` auto-save in `ChatWorkspace`.
+  - Upgraded **GitHub → Suggestions** to use `/ai/suggest` when connected to the Cloudflare AI Brain (with deterministic static fallback offline).
+  - Configured `vite.config.ts` vendor chunk splitting (`vendor-supabase`, `vendor-icons`, `vendor-ocr`, `vendor-react`) and replaced `__dirname` for clean ESM builds.
+- **Verification**: Run `supabase/schema_phase5.sql` in Supabase SQL Editor, test **Chat / Work** with AI Brain connected, tap **Helpful** on an answer, and confirm GitHub Pages workflow deploys cleanly.
+

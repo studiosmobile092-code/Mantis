@@ -1,6 +1,7 @@
 import type {Session} from '@supabase/supabase-js';
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {AuthGate} from './components/AuthGate';
+import {CapturePanel} from './components/CapturePanel';
 import {ChatWorkspace} from './components/ChatWorkspace';
 import {GitHubPanel} from './components/GitHubPanel';
 import {KnowledgeBrowser} from './components/KnowledgeBrowser';
@@ -8,6 +9,14 @@ import {SchemaSetupBanner} from './components/SchemaSetupBanner';
 import {SettingsPanel} from './components/SettingsPanel';
 import {TeachPanel} from './components/TeachPanel';
 import {TopBar} from './components/TopBar';
+import {
+  DEFAULT_BRAIN_MODEL,
+  askAiBrainChat,
+  getLocalBrainConfig,
+  setLocalBrainConfig,
+  suggestCodeWithAiBrain,
+  type DistilledKnowledgeItem,
+} from './lib/aiBrain';
 import {
   fetchGitHubFileContent,
   fetchGitHubRepoMetadata,
@@ -42,6 +51,7 @@ import type {
   SelfAuditRun,
   SuggestionKind,
   SuggestionStatus,
+  UserPreferences,
 } from './types/mantis';
 
 export default function App() {
@@ -71,7 +81,13 @@ export default function App() {
   const [phase2SchemaMissing, setPhase2SchemaMissing] = useState(false);
   const [phase3SchemaMissing, setPhase3SchemaMissing] = useState(false);
   const [phase4SchemaMissing, setPhase4SchemaMissing] = useState(false);
+  const [phase5SchemaMissing, setPhase5SchemaMissing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+
+  const initialLocalBrain = useMemo(() => getLocalBrainConfig(), []);
+  const [brainUrl, setBrainUrl] = useState(initialLocalBrain.brainUrl);
+  const [brainModel, setBrainModel] = useState(initialLocalBrain.model || DEFAULT_BRAIN_MODEL);
+  const [autoLearnFromChat, setAutoLearnFromChat] = useState(true);
 
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
   const [selectedRepoPath, setSelectedRepoPath] = useState<string | null>(null);
@@ -108,20 +124,29 @@ export default function App() {
     setErrorBanner(null);
 
     try {
-      const [foldersRes, entriesRes, messagesRes, connRes, filesRes, suggestionsRes, auditRunsRes] =
-        await Promise.all([
-          supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
-          supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
-          supabase.from('chat_messages').select('*').order('created_at', {ascending: true}),
-          supabase
-            .from('github_connections')
-            .select('*')
-            .order('updated_at', {ascending: false})
-            .limit(1),
-          supabase.from('repo_files').select('*').order('path', {ascending: true}),
-          supabase.from('code_suggestions').select('*').order('created_at', {ascending: false}),
-          supabase.from('self_audit_runs').select('*').order('created_at', {ascending: false}),
-        ]);
+      const [
+        foldersRes,
+        entriesRes,
+        messagesRes,
+        connRes,
+        filesRes,
+        suggestionsRes,
+        auditRunsRes,
+        prefsRes,
+      ] = await Promise.all([
+        supabase.from('knowledge_folders').select('*').order('created_at', {ascending: true}),
+        supabase.from('knowledge_entries').select('*').order('updated_at', {ascending: false}),
+        supabase.from('chat_messages').select('*').order('created_at', {ascending: true}),
+        supabase
+          .from('github_connections')
+          .select('*')
+          .order('updated_at', {ascending: false})
+          .limit(1),
+        supabase.from('repo_files').select('*').order('path', {ascending: true}),
+        supabase.from('code_suggestions').select('*').order('created_at', {ascending: false}),
+        supabase.from('self_audit_runs').select('*').order('created_at', {ascending: false}),
+        supabase.from('user_preferences').select('*').limit(1),
+      ]);
 
       if (
         isMissingTableError(foldersRes.error) ||
@@ -202,6 +227,24 @@ export default function App() {
         setPhase4SchemaMissing(false);
         setAuditRuns((auditRunsRes.data as SelfAuditRun[]) || []);
       }
+
+      if (isMissingTableError(prefsRes.error)) {
+        setPhase5SchemaMissing(true);
+      } else if (!prefsRes.error) {
+        setPhase5SchemaMissing(false);
+        const prefRow = ((prefsRes.data as UserPreferences[]) || [])[0];
+        if (prefRow) {
+          if (prefRow.brain_url) {
+            setBrainUrl(prefRow.brain_url);
+            setBrainModel(prefRow.preferred_model || DEFAULT_BRAIN_MODEL);
+            setLocalBrainConfig(
+              prefRow.brain_url,
+              prefRow.preferred_model || DEFAULT_BRAIN_MODEL,
+            );
+          }
+          setAutoLearnFromChat(prefRow.auto_learn_from_chat);
+        }
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Unable to reach Supabase');
     } finally {
@@ -225,6 +268,7 @@ export default function App() {
       setPhase2SchemaMissing(false);
       setPhase3SchemaMissing(false);
       setPhase4SchemaMissing(false);
+      setPhase5SchemaMissing(false);
       setErrorBanner(null);
     }
   }, [session, loadWorkspaceData]);
@@ -401,13 +445,168 @@ export default function App() {
     return saved;
   }
 
+  async function handleSaveBrainConfig(url: string, model: string, autoLearn: boolean) {
+    setBrainUrl(url);
+    setBrainModel(model);
+    setAutoLearnFromChat(autoLearn);
+    setLocalBrainConfig(url, model);
+    if (!session || phase5SchemaMissing) return;
+    await supabase.from('user_preferences').upsert({
+      user_id: session.user.id,
+      brain_url: url,
+      preferred_model: model,
+      auto_learn_from_chat: autoLearn,
+    });
+  }
+
+  async function handleSaveCapturedEntries(
+    items: DistilledKnowledgeItem[],
+    sourceType: string,
+  ): Promise<number> {
+    if (!session || items.length === 0) return 0;
+    setErrorBanner(null);
+
+    let activeFolders = [...folders];
+    let captureFolder =
+      activeFolders.find((f) => f.name.toLowerCase() === 'captured learning') || null;
+
+    if (!captureFolder) {
+      const created = await handleCreateFolder(
+        'Captured Learning',
+        'Auto-distilled knowledge from screen captures, YouTube captions, and articles',
+      );
+      if (created) {
+        captureFolder = created;
+        activeFolders = [...activeFolders, created];
+      }
+    }
+
+    const existingSignatures = new Set(
+      entries.map((e) => `${e.title.trim().toLowerCase()}::${e.content.slice(0, 60).trim().toLowerCase()}`),
+    );
+
+    const rowsToInsert = items
+      .filter((item) => {
+        const sig = `${item.title.trim().toLowerCase()}::${item.content.slice(0, 60).trim().toLowerCase()}`;
+        return item.title.trim() && item.content.trim() && !existingSignatures.has(sig);
+      })
+      .map((item) => {
+        const matchedFolder =
+          activeFolders.find((f) => f.name.toLowerCase() === item.folder.toLowerCase()) ||
+          captureFolder ||
+          activeFolders[0] ||
+          null;
+        return {
+          user_id: session.user.id,
+          folder_id: matchedFolder?.id || null,
+          title: item.title.trim().slice(0, 120),
+          content: item.content.trim(),
+          tags: Array.from(new Set(item.tags.map((t) => t.trim().toLowerCase()).filter(Boolean))),
+          source: sourceType,
+        };
+      });
+
+    if (rowsToInsert.length === 0) return 0;
+
+    const {data, error} = await supabase
+      .from('knowledge_entries')
+      .insert(rowsToInsert)
+      .select('*');
+
+    if (error) {
+      setErrorBanner(error.message);
+      return 0;
+    }
+
+    const saved = (data as KnowledgeEntry[]) || [];
+    setEntries((prev) => [...saved, ...prev]);
+    return saved.length;
+  }
+
+  async function handleReinforceEntries(entryIds: string[]) {
+    if (!session || entryIds.length === 0) return;
+    setEntries((prev) =>
+      prev.map((e) =>
+        entryIds.includes(e.id)
+          ? {
+              ...e,
+              recall_count: (e.recall_count || 0) + 1,
+              confidence_score: (e.confidence_score || 1) + 1,
+            }
+          : e,
+      ),
+    );
+    if (phase5SchemaMissing) return;
+    await Promise.all(
+      entryIds.map(async (id) => {
+        const current = entries.find((e) => e.id === id);
+        if (!current) return;
+        await supabase
+          .from('knowledge_entries')
+          .update({
+            recall_count: (current.recall_count || 0) + 1,
+            confidence_score: (current.confidence_score || 1) + 1,
+          })
+          .eq('id', id);
+      }),
+    );
+  }
+
   async function handleGenerateFromFile(file: RepoFile, goal: string) {
-    const draft = generateImprovementSuggestion(file, goal, entries, folders);
+    let draft = generateImprovementSuggestion(file, goal, entries, folders);
+    if (brainUrl.trim() && session?.access_token) {
+      try {
+        const aiDraft = await suggestCodeWithAiBrain({
+          brainUrl,
+          accessToken: session.access_token,
+          model: brainModel,
+          filePath: file.path,
+          originalContent: file.content,
+          goal: goal || 'Improve code safety, reliability, tablet UX, and clarity',
+          entries,
+          folders,
+        });
+        if (aiDraft.proposedContent.trim()) {
+          draft = {
+            ...draft,
+            title: aiDraft.title,
+            rationale: `${aiDraft.rationale} (AI Model: ${aiDraft.model})`,
+            proposedContent: aiDraft.proposedContent,
+          };
+        }
+      } catch {
+        // Fallback smoothly to deterministic static analyzer
+      }
+    }
     await persistSuggestionDraft(draft, 'code_help');
   }
 
   async function handleGenerateNewFile(targetPath: string, goal: string) {
-    const draft = generateNewCodeSuggestion(targetPath, goal, entries, folders);
+    let draft = generateNewCodeSuggestion(targetPath, goal, entries, folders);
+    if (brainUrl.trim() && session?.access_token) {
+      try {
+        const aiDraft = await suggestCodeWithAiBrain({
+          brainUrl,
+          accessToken: session.access_token,
+          model: brainModel,
+          filePath: targetPath,
+          originalContent: '',
+          goal: goal || 'Create a clean, well-typed module following user Knowledge rules',
+          entries,
+          folders,
+        });
+        if (aiDraft.proposedContent.trim()) {
+          draft = {
+            ...draft,
+            title: aiDraft.title,
+            rationale: `${aiDraft.rationale} (AI Model: ${aiDraft.model})`,
+            proposedContent: aiDraft.proposedContent,
+          };
+        }
+      } catch {
+        // Fallback smoothly to deterministic scaffold
+      }
+    }
     await persistSuggestionDraft(draft, 'code_help');
   }
 
@@ -832,6 +1031,47 @@ export default function App() {
             err instanceof Error ? err.message : 'Unable to fetch repository'
           }`;
         }
+      } else if (brainUrl.trim() && session.access_token) {
+        try {
+          const aiRes = await askAiBrainChat({
+            brainUrl,
+            accessToken: session.access_token,
+            model: brainModel,
+            prompt,
+            entries,
+            folders,
+            repoFiles,
+            history: messages,
+          });
+          replyText = aiRes.replyText;
+          citedEntryIds = aiRes.citedEntryIds;
+          citedRepoPaths = aiRes.citedRepoPaths;
+
+          if (autoLearnFromChat && aiRes.learnedItems.length > 0) {
+            const count = await handleSaveCapturedEntries(
+              aiRes.learnedItems.map((l) => ({
+                title: l.title,
+                folder: l.folderName,
+                tags: l.tags,
+                content: l.content,
+              })),
+              'ai_chat',
+            );
+            if (count > 0) {
+              replyText = `${replyText}\n\n[Auto-Learned ${count} new Knowledge ${
+                count === 1 ? 'entry' : 'entries'
+              } into Supabase]`;
+            }
+          }
+        } catch (aiErr) {
+          const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
+          const fallback = buildMemoryReply(prompt, entries, folders, repoFiles, repoLabel);
+          replyText = `(AI Brain fallback — ${
+            aiErr instanceof Error ? aiErr.message : 'Worker unreachable'
+          })\n\n${fallback.replyText}`;
+          citedEntryIds = fallback.citedEntryIds;
+          citedRepoPaths = fallback.citedRepoPaths;
+        }
       } else {
         const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
         const result = buildMemoryReply(prompt, entries, folders, repoFiles, repoLabel);
@@ -910,6 +1150,7 @@ export default function App() {
         activeArea={activeArea}
         onSelectArea={setActiveArea}
         statusLabel={statusLabel}
+        brainConnected={Boolean(brainUrl.trim())}
         knowledgeCount={entries.length}
         repoFileCount={repoFiles.length}
         readinessScore={metrics.readinessScore}
@@ -946,6 +1187,8 @@ export default function App() {
             messages={messages}
             entries={entries}
             connection={connection}
+            brainConnected={Boolean(brainUrl.trim())}
+            brainModel={brainModel}
             isLoading={isLoadingData}
             isSending={isSendingChat}
             onSendMessage={handleSendChatMessage}
@@ -968,6 +1211,8 @@ export default function App() {
               });
               setActiveArea('teach');
             }}
+            onReinforceEntries={handleReinforceEntries}
+            onOpenSettings={() => setActiveArea('settings')}
           />
         )}
 
@@ -983,6 +1228,16 @@ export default function App() {
             onUpdateEntry={handleUpdateEntry}
             onDeleteEntry={handleDeleteEntry}
             onOpenTeach={() => setActiveArea('teach')}
+          />
+        )}
+
+        {activeArea === 'capture' && (
+          <CapturePanel
+            brainUrl={brainUrl}
+            brainModel={brainModel}
+            accessToken={session.access_token}
+            onSaveCapturedEntries={handleSaveCapturedEntries}
+            onOpenKnowledge={() => setActiveArea('knowledge')}
           />
         )}
 
@@ -1064,7 +1319,12 @@ export default function App() {
             phase2SchemaMissing={phase2SchemaMissing}
             phase3SchemaMissing={phase3SchemaMissing}
             phase4SchemaMissing={phase4SchemaMissing}
+            phase5SchemaMissing={phase5SchemaMissing}
+            brainUrl={brainUrl}
+            brainModel={brainModel}
+            autoLearnFromChat={autoLearnFromChat}
             connection={connection}
+            onSaveBrainConfig={handleSaveBrainConfig}
             onSignOut={handleSignOut}
           />
         )}
