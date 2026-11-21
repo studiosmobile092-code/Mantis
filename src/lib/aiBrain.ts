@@ -7,7 +7,7 @@ import type {
   RepoFile,
 } from '../types/mantis';
 import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles} from './memory';
-import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL} from './supabase';
+import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from './supabase';
 
 export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
 export const DEFAULT_BACKUP_EDGE_URL = `${SUPABASE_URL.replace(/\/+$/, '')}/functions/v1/mantis-brain`;
@@ -150,11 +150,40 @@ function isSupabaseEdgeUrl(url: string): boolean {
   return url.toLowerCase().includes('.supabase.co/functions/v1/');
 }
 
+async function resolveFreshAccessToken(
+  fallbackToken?: string,
+  forceRefresh = false,
+): Promise<string> {
+  try {
+    if (forceRefresh) {
+      const {data} = await supabase.auth.refreshSession();
+      if (data.session?.access_token) return data.session.access_token;
+    }
+    const {data} = await supabase.auth.getSession();
+    const session = data.session;
+    if (session?.access_token) {
+      const expiresAtMs = (session.expires_at ?? 0) * 1000;
+      if (expiresAtMs > 0 && expiresAtMs - Date.now() < 60_000) {
+        const refreshed = await supabase.auth.refreshSession();
+        if (refreshed.data.session?.access_token) {
+          return refreshed.data.session.access_token;
+        }
+      }
+      return session.access_token;
+    }
+  } catch {
+    // fall back to caller-supplied token
+  }
+  return fallbackToken || '';
+}
+
 function buildEndpointHeaders(endpointUrl: string, accessToken?: string): Record<string, string> {
   const headers: Record<string, string> = {'Content-Type': 'application/json'};
   if (isSupabaseEdgeUrl(endpointUrl)) {
     headers.apikey = SUPABASE_PUBLISHABLE_KEY;
-    headers.Authorization = `Bearer ${accessToken || SUPABASE_PUBLISHABLE_KEY}`;
+    if (accessToken) {
+      headers.Authorization = `Bearer ${accessToken}`;
+    }
   } else if (accessToken) {
     headers.Authorization = `Bearer ${accessToken}`;
   }
@@ -211,12 +240,8 @@ export async function testBrainConnection(
   const start = performance.now();
   let res: Response;
   try {
-    const healthHeaders: Record<string, string> = {};
-    if (isSupabaseEdgeUrl(cleanUrl)) {
-      healthHeaders.apikey = SUPABASE_PUBLISHABLE_KEY;
-      healthHeaders.Authorization = `Bearer ${accessToken || SUPABASE_PUBLISHABLE_KEY}`;
-    }
-    res = await fetchWithTimeout(`${cleanUrl}/health`, {headers: healthHeaders}, 6500);
+    // Keep /health headerless (matching a direct browser GET) so expired JWTs or apikey headers never trigger gateway 401s.
+    res = await fetchWithTimeout(`${cleanUrl}/health`, {}, 6500);
   } catch (networkErr) {
     const reason =
       networkErr instanceof Error && networkErr.name === 'AbortError'
@@ -274,7 +299,12 @@ export async function testBrainConnection(
   }
 
   if (!res.ok) {
-    throw new Error(`Health check returned HTTP ${res.status}.`);
+    const errText = await res.text().catch(() => '');
+    throw new Error(
+      errText
+        ? `Health check returned HTTP ${res.status}: ${errText.slice(0, 140)}`
+        : `Health check returned HTTP ${res.status}.`,
+    );
   }
   if (!contentType.includes('application/json')) {
     throw new Error(
@@ -305,7 +335,8 @@ export async function testBrainConnection(
     typeof data.hasAnyProvider === 'boolean' ? data.hasAnyProvider : activeProviders.length > 0;
   const resolvedKind: BrainRouteKind = isBackup ? 'backup-supabase' : 'primary-worker';
 
-  if (!hasAnyProvider || !accessToken) {
+  let liveToken = await resolveFreshAccessToken(accessToken);
+  if (!hasAnyProvider || !liveToken) {
     return {
       ok: Boolean(data.ok),
       endpointUrl: cleanUrl,
@@ -323,18 +354,31 @@ export async function testBrainConnection(
     `${cleanUrl}/ai/verify`,
     {
       method: 'POST',
-      headers: buildEndpointHeaders(cleanUrl, accessToken),
+      headers: buildEndpointHeaders(cleanUrl, liveToken),
       body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
     },
     14000,
   );
+
+  if (verifyRes.status === 401) {
+    liveToken = await resolveFreshAccessToken(liveToken, true);
+    verifyRes = await fetchWithTimeout(
+      `${cleanUrl}/ai/verify`,
+      {
+        method: 'POST',
+        headers: buildEndpointHeaders(cleanUrl, liveToken),
+        body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
+      },
+      14000,
+    );
+  }
 
   if (verifyRes.status === 404) {
     verifyRes = await fetchWithTimeout(
       `${cleanUrl}/ai/chat`,
       {
         method: 'POST',
-        headers: buildEndpointHeaders(cleanUrl, accessToken),
+        headers: buildEndpointHeaders(cleanUrl, liveToken),
         body: JSON.stringify({
           prompt: 'Reply with only the word READY.',
           model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
@@ -502,24 +546,38 @@ async function postBrainEndpointWithFailover<T>(params: {
     throw new Error('No Cloud Assist endpoint configured. Add Worker or Supabase Backup URL in Settings.');
   }
 
+  let liveToken = await resolveFreshAccessToken(params.accessToken);
   let lastError = 'Cloud endpoint unreachable';
   for (let i = 0; i < candidates.length; i += 1) {
     const endpoint = candidates[i];
     const start = performance.now();
     try {
-      const res = await fetchWithTimeout(
+      let res = await fetchWithTimeout(
         `${endpoint}${params.path}`,
         {
           method: 'POST',
-          headers: buildEndpointHeaders(endpoint, params.accessToken),
+          headers: buildEndpointHeaders(endpoint, liveToken),
           body: JSON.stringify(params.body),
         },
         params.timeoutMs ?? 20000,
       );
 
-      const json = (await res.json().catch(() => ({}))) as T & {error?: string};
+      if (res.status === 401) {
+        liveToken = await resolveFreshAccessToken(liveToken, true);
+        res = await fetchWithTimeout(
+          `${endpoint}${params.path}`,
+          {
+            method: 'POST',
+            headers: buildEndpointHeaders(endpoint, liveToken),
+            body: JSON.stringify(params.body),
+          },
+          params.timeoutMs ?? 20000,
+        );
+      }
+
+      const json = (await res.json().catch(() => ({}))) as T & {error?: string; message?: string};
       if (!res.ok) {
-        lastError = json.error || `HTTP ${res.status} from ${endpoint}`;
+        lastError = json.error || json.message || `HTTP ${res.status} from ${endpoint}`;
         continue;
       }
 

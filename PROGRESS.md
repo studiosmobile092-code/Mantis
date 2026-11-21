@@ -110,9 +110,10 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   - **YouTube/Article URL & Mic/OCR Reliability**: Added YouTube InnerTube `/youtubei/v1/player` + balanced `captionTracks` + oEmbed metadata fallback and `r.jina.ai` article fallback to both backends and browser client fallback; rebuilt continuous `SpeechRecognition` with `interimResults = true` + Android auto-restart loop + live Web Audio `AnalyserNode` 16-bar mic meter; added grayscale luminance frame-diff gating + live crop thumbnail preview in `ocrCapture.ts` and `CapturePanel.tsx`.
 - **Verification**: Run `npm run lint`, `npm run build`, and secret scan across `src/`, `cloudflare/`, and `supabase/`. In Supabase SQL Editor, run updated `supabase/schema_phase5.sql` once, and optionally deploy `supabase/functions/mantis-brain/index.ts` via Supabase Dashboard Edge Functions Editor to unlock AI Assist & URL ingestion on `.dev`-blocked Chromebooks.
 
-### Step 5.5 — Tablet-Safe Edge Function Split (`helpers.ts`, `providers.ts`, `routes.ts`, 3-line `index.ts`)
+### Step 5.5 — Tablet-Safe Edge Function Split & Backup Route 401 Fix
 - **Status**: Completed
 - **Summary**:
   - Split `supabase/functions/mantis-brain` into four tiny modules (`helpers.ts` ~10.5 KB, `providers.ts` ~4.3 KB, `routes.ts` ~5.6 KB, and a 3-line `index.ts` without remote `jsr:` imports) so Supabase's web editor on Android tablet Chrome never stalls or crashes when replacing `index.ts`.
   - Updated `src/lib/schemaText.ts` and `src/components/SettingsPanel.tsx` with dedicated 1-tap copy buttons for all four files.
-- **Verification**: Run `npm run lint` and `npm run build`, add `helpers.ts`, `providers.ts`, and `routes.ts` via **+ Add File**, replace `index.ts` with 3 lines, and deploy `mantis-brain`.
+  - Fixed `src/lib/aiBrain.ts` so `/health` probes run headerless (preventing Supabase gateway HTTP 401s on `apikey` / `Bearer` headers), never pass `sb_publishable_...` inside `Authorization: Bearer`, and automatically refresh expiring Supabase JWTs via `supabase.auth.getSession()` / `refreshSession()` on 401.
+- **Verification**: Run `npm run lint` and `npm run build`, then tap **Save & Test Both Routes** in Mantis **Settings** on the Chromebook.
