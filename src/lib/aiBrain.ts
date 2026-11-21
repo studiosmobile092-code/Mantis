@@ -6,7 +6,13 @@ import type {
   KnowledgeFolder,
   RepoFile,
 } from '../types/mantis';
+import {inferFolderDeterministically, normalizeFolderName} from './autoFolders';
 import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles} from './memory';
+import {
+  extractSpeakerLabels,
+  formatTranscriptLocally,
+  type SpeechTurnSegment,
+} from './speechEngine';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from './supabase';
 
 export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
@@ -1234,4 +1240,319 @@ export async function extractUrlViaBrain(params: {
   throw new Error(
     'Could not fetch that link directly from the browser. Add your Chromebook Supabase Backup URL in Settings (non-.dev) so Mantis can extract YouTube transcripts & protected articles.',
   );
+}
+
+function parseJsonObjectFromAiReply<T>(raw: string): T | null {
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function runLightweightAiJsonPrompt(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  prompt: string;
+  knowledgeContext?: Array<{title: string; folder: string; content: string}>;
+  timeoutMs?: number;
+}): Promise<{text: string; modelUsed: string}> {
+  const cleanUrl = normalizeBrainUrl(params.brainUrl);
+  if (
+    getLocalBrainMode() === 'ollama' ||
+    cleanUrl.includes('localhost:11434') ||
+    cleanUrl.includes('127.0.0.1:11434')
+  ) {
+    const direct = await callDirectOllamaChat(
+      cleanUrl,
+      [
+        {
+          role: 'system',
+          content:
+            'You are Mantis Studio structured JSON engine. Return ONLY valid raw JSON with no markdown commentary.',
+        },
+        {role: 'user', content: params.prompt},
+      ],
+      1100,
+    );
+    return {text: direct.text, modelUsed: direct.model};
+  }
+
+  const {payload} = await postBrainEndpointWithFailover<{
+    reply?: string;
+    model?: string;
+    error?: string;
+  }>({
+    brainUrl: params.brainUrl,
+    backupBrainUrl: params.backupBrainUrl,
+    accessToken: params.accessToken,
+    path: '/ai/chat',
+    body: {
+      prompt: params.prompt,
+      model: params.model,
+      knowledgeContext: params.knowledgeContext || [],
+      repoContext: [],
+      history: [],
+    },
+    timeoutMs: params.timeoutMs ?? 9500,
+  });
+
+  if (!payload.reply) {
+    throw new Error(payload.error || 'AI helper returned empty response.');
+  }
+  return {text: payload.reply, modelUsed: payload.model || params.model};
+}
+
+export interface SpeechEnhancementResult {
+  cleanedTranscript: string;
+  detectedSpeakers: string[];
+  speakerCount: number;
+  suggestedTitle: string;
+  suggestedFolder: string;
+  folderDescription: string;
+  tags: string[];
+  aiEnhanced: boolean;
+  modelUsed: string;
+}
+
+/**
+ * Cleans rapid live speech, fixes STT homophones using user knowledge context,
+ * segments multiple speakers using acoustic hints + conversational turn shifts,
+ * and suggests a semantic Auto-Folder (e.g. Food, Greetings, Debugging).
+ */
+export async function enhanceSpeechTranscriptWithAi(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  turns: SpeechTurnSegment[];
+  rawLines: string[];
+  entries: KnowledgeEntry[];
+  existingFolders: KnowledgeFolder[];
+}): Promise<SpeechEnhancementResult> {
+  const localFormatted = formatTranscriptLocally(params.turns, params.rawLines);
+  const rawCombined = localFormatted.cleanedTranscript || params.rawLines.join('\n').trim();
+  const deterministicFolder = inferFolderDeterministically(
+    '',
+    rawCombined,
+    params.existingFolders,
+  );
+
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  if (candidates.length === 0 || !rawCombined) {
+    return {
+      cleanedTranscript: rawCombined,
+      detectedSpeakers: localFormatted.detectedSpeakers,
+      speakerCount: Math.max(1, localFormatted.detectedSpeakers.length),
+      suggestedTitle: localFormatted.suggestedTitle,
+      suggestedFolder: deterministicFolder.folderName,
+      folderDescription: deterministicFolder.description,
+      tags: ['voice', 'conversation', ...deterministicFolder.suggestedTags].slice(0, 5),
+      aiEnhanced: false,
+      modelUsed: 'built-in-speech',
+    };
+  }
+
+  const folderNames = params.existingFolders.map((f) => f.name).join(', ') || 'Captured Learning';
+  const relevantKnowledge = retrieveRelevantKnowledge(
+    rawCombined.slice(0, 400),
+    params.entries,
+    params.existingFolders,
+    4,
+  );
+
+  const acousticTimeline =
+    params.turns.length > 0
+      ? params.turns
+          .slice(0, 60)
+          .map(
+            (t, idx) =>
+              `${idx + 1}. [${t.acousticSpeaker} | ${t.centroidHz}Hz | pause=${t.pauseBeforeMs}ms] ${t.rawText}`,
+          )
+          .join('\n')
+      : rawCombined;
+
+  const prompt = [
+    'Clean and format this live speech transcript into valid JSON ONLY.',
+    'Tasks:',
+    '1. Fix broken fast-speech fragments, run-on sentences, punctuation, and obvious speech-to-text homophones without inventing facts.',
+    '2. Detect whether 1 person or 2+ different speakers are talking using BOTH acoustic speaker hints and conversational switches (questions/answers, topic handoffs, greetings/replies).',
+    '3. If 2+ speakers exist, prefix each turn cleanly with "Speaker 1:", "Speaker 2:", etc. (or real speaker names if explicitly spoken in the conversation). If clearly only 1 speaker, keep clean paragraphs or prefix with "Speaker 1:".',
+    '4. Suggest a concise topic folder name (1-2 words Title Case, e.g. "Food", "Greetings", "Architecture", "Debugging", "Language & Speech", or pick an existing folder if it fits well) and a 1-sentence folder description.',
+    `Existing folders: ${folderNames}`,
+    '',
+    'Return strictly this JSON schema (no markdown fences):',
+    '{"cleanedTranscript":"...","detectedSpeakers":["Speaker 1"],"suggestedTitle":"...","suggestedFolder":"...","folderDescription":"...","tags":["tag1","tag2"]}',
+    '',
+    'Acoustic & Speech Timeline:',
+    acousticTimeline.slice(0, 7000),
+  ].join('\n');
+
+  try {
+    const aiRes = await runLightweightAiJsonPrompt({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt,
+      knowledgeContext: relevantKnowledge.map((m) => ({
+        title: m.entry.title,
+        folder: m.folderName,
+        content: m.entry.content.slice(0, 450),
+      })),
+      timeoutMs: 9500,
+    });
+
+    const parsed = parseJsonObjectFromAiReply<{
+      cleanedTranscript?: string;
+      detectedSpeakers?: string[];
+      suggestedTitle?: string;
+      suggestedFolder?: string;
+      folderDescription?: string;
+      tags?: string[];
+    }>(aiRes.text);
+
+    if (parsed?.cleanedTranscript && parsed.cleanedTranscript.trim().length > 2) {
+      const cleanedTranscript = parsed.cleanedTranscript.trim();
+      const extractedLabels = extractSpeakerLabels(cleanedTranscript);
+      const detectedSpeakers =
+        extractedLabels.length > 0
+          ? extractedLabels
+          : Array.isArray(parsed.detectedSpeakers) && parsed.detectedSpeakers.length > 0
+            ? parsed.detectedSpeakers.map((s) => String(s).trim()).filter(Boolean)
+            : localFormatted.detectedSpeakers;
+
+      const folderGuess = inferFolderDeterministically(
+        parsed.suggestedTitle || '',
+        cleanedTranscript,
+        params.existingFolders,
+        parsed.suggestedFolder,
+      );
+
+      return {
+        cleanedTranscript,
+        detectedSpeakers,
+        speakerCount: Math.max(1, detectedSpeakers.length),
+        suggestedTitle: (parsed.suggestedTitle || '').trim(),
+        suggestedFolder: normalizeFolderName(folderGuess.folderName) || deterministicFolder.folderName,
+        folderDescription:
+          (parsed.folderDescription || '').trim() || folderGuess.description,
+        tags: Array.isArray(parsed.tags)
+          ? parsed.tags
+              .map((t) => String(t).trim().toLowerCase())
+              .filter(Boolean)
+              .slice(0, 5)
+          : ['voice', 'conversation'],
+        aiEnhanced: true,
+        modelUsed: aiRes.modelUsed,
+      };
+    }
+  } catch {
+    // Graceful fallback to local acoustic + punctuation formatter
+  }
+
+  return {
+    cleanedTranscript: rawCombined,
+    detectedSpeakers: localFormatted.detectedSpeakers,
+    speakerCount: Math.max(1, localFormatted.detectedSpeakers.length),
+    suggestedTitle: localFormatted.suggestedTitle,
+    suggestedFolder: deterministicFolder.folderName,
+    folderDescription: deterministicFolder.description,
+    tags: ['voice', 'conversation', ...deterministicFolder.suggestedTags].slice(0, 5),
+    aiEnhanced: false,
+    modelUsed: 'built-in-speech',
+  };
+}
+
+export async function suggestSemanticFolderWithAi(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  title: string;
+  content: string;
+  existingFolders: KnowledgeFolder[];
+}): Promise<{
+  folderName: string;
+  description: string;
+  tags: string[];
+  usedAi: boolean;
+}> {
+  const deterministic = inferFolderDeterministically(
+    params.title,
+    params.content,
+    params.existingFolders,
+  );
+
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  if (candidates.length === 0 || !params.content.trim()) {
+    return {
+      folderName: deterministic.folderName,
+      description: deterministic.description,
+      tags: deterministic.suggestedTags,
+      usedAi: false,
+    };
+  }
+
+  const existingList = params.existingFolders.map((f) => f.name).join(', ') || 'None yet';
+  const prompt = [
+    'Classify this knowledge note into the clearest 1-2 word semantic folder name in Title Case.',
+    'Examples: "Definition of turkey" -> "Food", "How to say hello formally" -> "Greetings", "React hook race condition" -> "Patterns" or "Debugging".',
+    'Reuse one of the existing folders if it is a clean topic fit; otherwise invent a clear concise topic folder name.',
+    `Existing folders: ${existingList}`,
+    'Return ONLY JSON: {"folderName":"...","description":"...","tags":["..."]}',
+    `Title: ${params.title}`,
+    `Content: ${params.content.slice(0, 2200)}`,
+  ].join('\n');
+
+  try {
+    const res = await runLightweightAiJsonPrompt({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt,
+      timeoutMs: 6500,
+    });
+    const parsed = parseJsonObjectFromAiReply<{
+      folderName?: string;
+      description?: string;
+      tags?: string[];
+    }>(res.text);
+
+    const candidateFolder = normalizeFolderName(parsed?.folderName || '');
+    if (candidateFolder) {
+      const resolved = inferFolderDeterministically(
+        params.title,
+        params.content,
+        params.existingFolders,
+        candidateFolder,
+      );
+      return {
+        folderName: resolved.folderName,
+        description: (parsed?.description || '').trim() || resolved.description,
+        tags: Array.isArray(parsed?.tags)
+          ? parsed.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean).slice(0, 4)
+          : resolved.suggestedTags,
+        usedAi: true,
+      };
+    }
+  } catch {
+    // Fall back to deterministic semantic classifier
+  }
+
+  return {
+    folderName: deterministic.folderName,
+    description: deterministic.description,
+    tags: deterministic.suggestedTags,
+    usedAi: false,
+  };
 }

@@ -1,11 +1,33 @@
-import {CheckCircle2, FolderPlus, Loader2, PlusCircle, RefreshCw, Sparkles} from 'lucide-react';
+import {
+  CheckCircle2,
+  FolderPlus,
+  Loader2,
+  PlusCircle,
+  RefreshCw,
+  Sparkles,
+} from 'lucide-react';
 import {type FormEvent, useMemo, useState} from 'react';
+import {suggestSemanticFolderWithAi} from '../lib/aiBrain';
+import {
+  AUTO_FOLDER_OPTION,
+  ensureAutoFolderExists,
+  inferFolderDeterministically,
+} from '../lib/autoFolders';
 import {parseTagsInput} from '../lib/memory';
-import type {KnowledgeEntry, KnowledgeFolder, KnowledgeStatus, SaveFeedbackInfo} from '../types/mantis';
+import type {
+  KnowledgeEntry,
+  KnowledgeFolder,
+  KnowledgeStatus,
+  SaveFeedbackInfo,
+} from '../types/mantis';
 
 interface TeachPanelProps {
   folders: KnowledgeFolder[];
   entries: KnowledgeEntry[];
+  brainUrl?: string;
+  backupBrainUrl?: string;
+  brainModel?: string;
+  accessToken?: string;
   initialTitle?: string;
   initialContent?: string;
   initialTags?: string;
@@ -45,11 +67,11 @@ const TEACH_TEMPLATES: Array<{
     body: 'Symptom:\n\nRoot Cause:\n\nWorking Fix:\n',
   },
   {
-    label: 'Code Snippet',
-    folderHint: 'Patterns',
-    tags: 'snippet, pattern',
-    titlePrefix: 'Snippet: ',
-    body: '// Purpose:\n\n',
+    label: 'Word / Definition',
+    folderHint: AUTO_FOLDER_OPTION,
+    tags: 'definition, vocabulary',
+    titlePrefix: 'Definition: ',
+    body: 'Meaning:\n\nHow to use in speech:\n\nExample sentence:\n',
   },
   {
     label: 'Architecture Note',
@@ -63,6 +85,10 @@ const TEACH_TEMPLATES: Array<{
 export function TeachPanel({
   folders,
   entries,
+  brainUrl = '',
+  backupBrainUrl = '',
+  brainModel = '',
+  accessToken = '',
   initialTitle = '',
   initialContent = '',
   initialTags = '',
@@ -73,10 +99,13 @@ export function TeachPanel({
   onOpenKnowledge,
 }: TeachPanelProps) {
   const [title, setTitle] = useState(initialTitle);
-  const [folderId, setFolderId] = useState<string>(folders[0]?.id || '');
+  const [folderId, setFolderId] = useState<string>(AUTO_FOLDER_OPTION);
   const [tagsRaw, setTagsRaw] = useState(initialTags);
   const [content, setContent] = useState(initialContent);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSuggestingFolder, setIsSuggestingFolder] = useState(false);
+  const [suggestedFolderHint, setSuggestedFolderHint] = useState<string>('');
+  const [suggestedFolderDesc, setSuggestedFolderDesc] = useState<string>('');
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
 
@@ -97,12 +126,32 @@ export function TeachPanel({
       .map(([tag]) => tag);
   }, [entries]);
 
+  const liveFolderPreview = useMemo(() => {
+    if (folderId !== AUTO_FOLDER_OPTION) return null;
+    if (suggestedFolderHint) {
+      const existing = folders.find(
+        (f) => f.name.toLowerCase() === suggestedFolderHint.toLowerCase(),
+      );
+      return {
+        name: existing ? existing.name : suggestedFolderHint,
+        isNew: !existing,
+      };
+    }
+    if (!title.trim() && !content.trim()) return null;
+    const guess = inferFolderDeterministically(title, content, folders);
+    return {name: guess.folderName, isNew: guess.isNew};
+  }, [folderId, suggestedFolderHint, title, content, folders]);
+
   function applyTemplate(tpl: (typeof TEACH_TEMPLATES)[number]) {
-    const matchedFolder = folders.find(
-      (f) => f.name.toLowerCase() === tpl.folderHint.toLowerCase(),
-    );
-    if (matchedFolder) {
-      setFolderId(matchedFolder.id);
+    if (tpl.folderHint === AUTO_FOLDER_OPTION) {
+      setFolderId(AUTO_FOLDER_OPTION);
+    } else {
+      const matchedFolder = folders.find(
+        (f) => f.name.toLowerCase() === tpl.folderHint.toLowerCase(),
+      );
+      if (matchedFolder) {
+        setFolderId(matchedFolder.id);
+      }
     }
     if (!title.trim()) {
       setTitle(tpl.titlePrefix);
@@ -121,6 +170,33 @@ export function TeachPanel({
     setTagsRaw(current.length > 0 ? `${current.join(', ')}, ${tag}` : tag);
   }
 
+  async function handleAiSuggestFolder() {
+    if (!title.trim() && !content.trim()) return;
+    setIsSuggestingFolder(true);
+    try {
+      const result = await suggestSemanticFolderWithAi({
+        brainUrl,
+        backupBrainUrl,
+        accessToken,
+        model: brainModel,
+        title: title.trim(),
+        content: content.trim(),
+        existingFolders: folders,
+      });
+      setFolderId(AUTO_FOLDER_OPTION);
+      setSuggestedFolderHint(result.folderName);
+      setSuggestedFolderDesc(result.description);
+      const mergedTags = Array.from(
+        new Set([...parseTagsInput(tagsRaw), ...result.tags]),
+      );
+      if (mergedTags.length > 0) {
+        setTagsRaw(mergedTags.join(', '));
+      }
+    } finally {
+      setIsSuggestingFolder(false);
+    }
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     setErrorNotice(null);
@@ -135,19 +211,59 @@ export function TeachPanel({
 
     setIsSaving(true);
     try {
+      let resolvedFolderId: string | null = folderId || folders[0]?.id || null;
+      let folderResultLabel = '';
+
+      if (folderId === AUTO_FOLDER_OPTION) {
+        let targetName = suggestedFolderHint;
+        let targetDesc = suggestedFolderDesc;
+
+        if (!targetName) {
+          const classified = await suggestSemanticFolderWithAi({
+            brainUrl,
+            backupBrainUrl,
+            accessToken,
+            model: brainModel,
+            title: trimmedTitle,
+            content: trimmedContent,
+            existingFolders: folders,
+          }).catch(() => {
+            const local = inferFolderDeterministically(trimmedTitle, trimmedContent, folders);
+            return {folderName: local.folderName, description: local.description, tags: local.suggestedTags};
+          });
+          targetName = classified.folderName;
+          targetDesc = classified.description;
+        }
+
+        const ensured = await ensureAutoFolderExists(
+          targetName,
+          targetDesc,
+          folders,
+          onCreateFolder,
+        );
+        resolvedFolderId = ensured.folder?.id || folders[0]?.id || null;
+        if (ensured.folder) {
+          folderResultLabel = ensured.createdNew
+            ? ` into auto-created "${ensured.folder.name}" folder`
+            : ` into "${ensured.folder.name}"`;
+        }
+      }
+
       const ok = await onSaveEntry({
         title: trimmedTitle,
         content: trimmedContent,
-        folderId: folderId || folders[0]?.id || null,
+        folderId: resolvedFolderId,
         tags: parseTagsInput(tagsRaw),
         source: 'teach',
         status: 'trusted',
       });
       if (ok) {
-        setSavedNotice(`Saved "${trimmedTitle}" as Trusted.`);
+        setSavedNotice(`Saved "${trimmedTitle}" as Trusted${folderResultLabel}.`);
         setTitle('');
         setTagsRaw('');
         setContent('');
+        setSuggestedFolderHint('');
+        setSuggestedFolderDesc('');
       } else {
         setErrorNotice('Save failed — tap Retry below to try again.');
       }
@@ -173,19 +289,18 @@ export function TeachPanel({
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div className="space-y-1 border-b border-slate-800 pb-4">
-        <h1 className="text-xl font-semibold tracking-tight text-slate-100">Teach Mantis</h1>
-        <p className="text-sm text-slate-400">
-          Store coding patterns, preferences, debugging fixes, or architecture notes in Supabase.
-          Mantis retrieves and cites these entries in Chat / Work.
+    <div className="mantis-fade-in mx-auto max-w-3xl space-y-6">
+      <div className="space-y-1 border-b border-line pb-4">
+        <h1 className="text-xl font-semibold tracking-tight text-ink">Teach Mantis</h1>
+        <p className="text-sm text-ink-muted">
+          Store coding patterns, preferences, word definitions, or facts into Supabase. Auto-Folder files topics cleanly for you.
         </p>
       </div>
 
-      {/* Phase 2 Quick-Teach Templates */}
+      {/* Quick-Teach Templates */}
       <div className="space-y-2">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
-          <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+        <div className="flex items-center gap-1.5 text-xs font-medium text-ink-muted">
+          <Sparkles className="h-3.5 w-3.5 text-accent-text" />
           <span>Quick-Teach Templates (optional starter structure)</span>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -194,7 +309,7 @@ export function TeachPanel({
               key={tpl.label}
               type="button"
               onClick={() => applyTemplate(tpl)}
-              className="min-h-[40px] rounded-md border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-emerald-500/50 hover:bg-slate-800"
+              className="min-h-[42px] rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:border-accent-border hover:bg-elevated"
             >
               {tpl.label}
             </button>
@@ -204,11 +319,11 @@ export function TeachPanel({
 
       <form
         onSubmit={handleSubmit}
-        className="space-y-5 rounded-lg border border-slate-800 bg-slate-900 p-5 sm:p-6"
+        className="space-y-5 rounded-lg border border-line bg-surface p-5 sm:p-6"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <label htmlFor="teach-title" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="teach-title" className="block text-xs font-medium text-ink-muted">
               Title
             </label>
             <input
@@ -216,25 +331,39 @@ export function TeachPanel({
               type="text"
               required
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Supabase Publishable Key Header Rule"
-              className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              onChange={(e) => {
+                setTitle(e.target.value);
+                setSuggestedFolderHint('');
+              }}
+              placeholder="e.g. Definition of Turkey or Auth Key Rule"
+              className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
           </div>
 
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label htmlFor="teach-folder" className="block text-xs font-medium text-slate-300">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="teach-folder" className="block text-xs font-medium text-ink-muted">
                 Folder
               </label>
-              <button
-                type="button"
-                onClick={() => setShowNewFolder((v) => !v)}
-                className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 hover:text-emerald-300"
-              >
-                <FolderPlus className="h-3.5 w-3.5" />
-                <span>{showNewFolder ? 'Cancel' : 'New Folder'}</span>
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={isSuggestingFolder || (!title.trim() && !content.trim())}
+                  onClick={() => void handleAiSuggestFolder()}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-accent-text hover:underline disabled:opacity-50"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>{isSuggestingFolder ? 'Detecting…' : 'AI Detect'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowNewFolder((v) => !v)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-ink-muted hover:text-ink"
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  <span>{showNewFolder ? 'Cancel' : 'New Folder'}</span>
+                </button>
+              </div>
             </div>
 
             {showNewFolder ? (
@@ -244,40 +373,48 @@ export function TeachPanel({
                   value={newFolderName}
                   onChange={(e) => setNewFolderName(e.target.value)}
                   placeholder="Folder name"
-                  className="min-h-[44px] flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                  className="min-h-[44px] flex-1 rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                 />
                 <button
                   type="button"
                   onClick={handleQuickCreateFolder}
                   disabled={isCreatingFolder || !newFolderName.trim()}
-                  className="min-h-[44px] rounded-md bg-slate-800 px-3.5 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-50"
+                  className="min-h-[44px] rounded-md bg-elevated px-3.5 text-xs font-semibold text-ink hover:opacity-90 disabled:opacity-50"
                 >
-                  {isCreatingFolder ? 'Adding...' : 'Add'}
+                  {isCreatingFolder ? 'Adding…' : 'Add'}
                 </button>
               </div>
             ) : (
               <select
                 id="teach-folder"
-                value={folderId || folders[0]?.id || ''}
+                value={folderId}
                 onChange={(e) => setFolderId(e.target.value)}
-                className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
               >
-                {folders.length === 0 ? (
-                  <option value="">Uncategorized</option>
-                ) : (
-                  folders.map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {folder.name}
-                    </option>
-                  ))
-                )}
+                <option value={AUTO_FOLDER_OPTION}>
+                  Auto-Create Topic Folder (AI)
+                  {liveFolderPreview ? ` → ${liveFolderPreview.name}` : ''}
+                </option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
               </select>
+            )}
+
+            {liveFolderPreview && !showNewFolder && (
+              <div className="font-mono text-[11px] text-accent-text">
+                {liveFolderPreview.isNew
+                  ? `Will auto-create folder "${liveFolderPreview.name}"`
+                  : `Files into existing "${liveFolderPreview.name}"`}
+              </div>
             )}
           </div>
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="teach-tags" className="block text-xs font-medium text-slate-300">
+          <label htmlFor="teach-tags" className="block text-xs font-medium text-ink-muted">
             Tags (comma-separated, optional)
           </label>
           <input
@@ -285,18 +422,18 @@ export function TeachPanel({
             type="text"
             value={tagsRaw}
             onChange={(e) => setTagsRaw(e.target.value)}
-            placeholder="e.g. supabase, auth, typescript, pattern"
-            className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+            placeholder="e.g. food, greetings, supabase, pattern"
+            className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
           />
           {existingTags.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-ink-muted">
               <span>Quick tags:</span>
               {existingTags.map((tag) => (
                 <button
                   key={tag}
                   type="button"
                   onClick={() => addSuggestedTag(tag)}
-                  className="rounded border border-slate-800 bg-[#0B1120] px-2 py-1 font-mono text-[11px] text-slate-300 hover:border-slate-700 hover:text-emerald-300"
+                  className="min-h-[34px] rounded border border-line bg-inset px-2.5 py-1 font-mono text-[11px] text-ink-muted hover:border-line-strong hover:text-accent-text"
                 >
                   +{tag}
                 </button>
@@ -306,24 +443,27 @@ export function TeachPanel({
         </div>
 
         <div className="space-y-1.5">
-          <label htmlFor="teach-content" className="block text-xs font-medium text-slate-300">
-            Knowledge / Code Snippet / Rule
+          <label htmlFor="teach-content" className="block text-xs font-medium text-ink-muted">
+            Knowledge / Code Snippet / Definition
           </label>
           <textarea
             id="teach-content"
             required
             rows={7}
             value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder="Write the pattern, fact, or code example you want Mantis to remember..."
-            className="w-full rounded-md border border-slate-700 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+            onChange={(e) => {
+              setContent(e.target.value);
+              setSuggestedFolderHint('');
+            }}
+            placeholder="Write the pattern, fact, definition, or code example you want Mantis to remember..."
+            className="w-full rounded-md border border-line-strong bg-inset p-3.5 font-mono text-xs leading-relaxed text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
           />
         </div>
 
         {errorNotice && (
           <div
             role="alert"
-            className="rounded-md border border-red-500/40 bg-red-950/30 px-3.5 py-2.5 text-xs text-red-200"
+            className="rounded-md border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400"
           >
             {errorNotice}
           </div>
@@ -332,32 +472,32 @@ export function TeachPanel({
         {savedNotice && (
           <div
             role="status"
-            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-500/40 bg-emerald-950/30 px-3.5 py-2.5 text-xs text-emerald-200"
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent-border bg-accent-soft px-3.5 py-2.5 text-xs text-ink"
           >
             <span className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-accent-text" />
               <span>{savedNotice}</span>
             </span>
             <button
               type="button"
               onClick={onOpenKnowledge}
-              className="font-semibold text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
+              className="font-semibold text-accent-text underline underline-offset-2 hover:opacity-90"
             >
               Browse in Knowledge
             </button>
           </div>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
           <div className="flex items-center gap-2 text-xs">
             {saveFeedback && saveFeedback.state !== 'idle' && (
               <span
                 className={`inline-flex items-center gap-1.5 font-mono ${
                   saveFeedback.state === 'failed'
-                    ? 'text-red-300'
+                    ? 'text-red-400'
                     : saveFeedback.state === 'saved'
-                      ? 'text-emerald-400'
-                      : 'text-slate-300'
+                      ? 'text-accent-text'
+                      : 'text-ink-muted'
                 }`}
               >
                 {saveFeedback.state === 'saving' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -368,7 +508,7 @@ export function TeachPanel({
               <button
                 type="button"
                 onClick={onRetrySave}
-                className="inline-flex min-h-[36px] items-center gap-1 rounded border border-red-500/40 bg-red-950/40 px-2.5 py-1 text-xs font-semibold text-red-200 hover:bg-red-900/50"
+                className="inline-flex min-h-[38px] items-center gap-1 rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-xs font-semibold text-red-400 hover:opacity-90"
               >
                 <RefreshCw className="h-3 w-3" />
                 <span>Retry</span>
@@ -379,7 +519,7 @@ export function TeachPanel({
           <button
             type="submit"
             disabled={isSaving}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-60"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
           >
             <PlusCircle className="h-4 w-4" />
             <span>{isSaving ? 'Saving…' : 'Save to Knowledge'}</span>

@@ -1,4 +1,14 @@
-import {Check, Copy, Cpu, Database, GitBranch, LogOut, ShieldCheck, Wifi} from 'lucide-react';
+import {
+  Check,
+  Copy,
+  Cpu,
+  Database,
+  GitBranch,
+  LogOut,
+  Palette,
+  ShieldCheck,
+  Wifi,
+} from 'lucide-react';
 import {type FormEvent, useEffect, useState} from 'react';
 import {
   BRAIN_MODEL_OPTIONS,
@@ -6,6 +16,7 @@ import {
   normalizeBrainUrl,
   probeActiveBrainRoute,
 } from '../lib/aiBrain';
+import {supportsDisplayCapture, supportsSpeechRecognition} from '../lib/ocrCapture';
 import {
   MANTIS_CLOUDFLARE_WORKER_JS,
   MANTIS_PHASE1_SCHEMA_SQL,
@@ -20,12 +31,22 @@ import {
   MANTIS_SUPABASE_EDGE_ROUTES_TS,
 } from '../lib/schemaText';
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from '../lib/supabase';
-import type {BrainRouteStatus, GitHubConnection, MemoryReadinessMetrics} from '../types/mantis';
+import {ACCENT_OPTIONS, THEME_OPTIONS} from '../lib/theme';
+import type {
+  AccentColor,
+  BrainRouteStatus,
+  GitHubConnection,
+  MemoryReadinessMetrics,
+  ThemeMode,
+} from '../types/mantis';
 
 interface SettingsPanelProps {
   userEmail: string;
   metrics: MemoryReadinessMetrics;
   routeStatus: BrainRouteStatus;
+  theme: ThemeMode;
+  accentColor: AccentColor;
+  onSelectAppearance: (theme: ThemeMode, accent: AccentColor) => Promise<void>;
   schemaMissing: boolean;
   phase2SchemaMissing: boolean;
   phase3SchemaMissing: boolean;
@@ -55,6 +76,9 @@ export function SettingsPanel({
   userEmail,
   metrics,
   routeStatus,
+  theme,
+  accentColor,
+  onSelectAppearance,
   schemaMissing,
   phase2SchemaMissing,
   phase3SchemaMissing,
@@ -123,6 +147,8 @@ export function SettingsPanel({
   }, [preferBuiltInFirst]);
 
   const maskedKey = `${SUPABASE_PUBLISHABLE_KEY.slice(0, 18)}...${SUPABASE_PUBLISHABLE_KEY.slice(-6)}`;
+  const hasSpeechApi = supportsSpeechRecognition();
+  const hasScreenApi = supportsDisplayCapture();
 
   async function handleTestConnection() {
     setPingStatus('testing');
@@ -237,41 +263,167 @@ export function SettingsPanel({
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
-      <div className="space-y-1 border-b border-slate-800 pb-4">
-        <h1 className="text-xl font-semibold tracking-tight text-slate-100">
-          Studio Engine &amp; Chromebook Failover Settings
+    <div className="mantis-fade-in mx-auto max-w-4xl space-y-6">
+      <div className="space-y-1 border-b border-line pb-4">
+        <h1 className="text-xl font-semibold tracking-tight text-ink">
+          Studio Appearance, Engine &amp; Chromebook Failover
         </h1>
-        <p className="text-sm text-slate-400">
-          Configure Built-in AI priority, dual-route Cloudflare + Chromebook Supabase failover, and database schemas.
+        <p className="text-sm text-ink-muted">
+          Customize your synced workspace palette, Built-in AI routing, dual-route Cloudflare + Chromebook failover, and schemas.
         </p>
       </div>
+
+      {/* Theme & Accent Personalization */}
+      <section className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2 text-base font-semibold text-ink">
+              <Palette className="h-4 w-4 text-accent-text" />
+              <span>Workspace Theme &amp; Accent</span>
+            </div>
+            <p className="text-xs text-ink-muted">
+              Loads instantly with zero flash and syncs across your tablet and Chromebook.
+            </p>
+          </div>
+          <span className="font-mono text-xs text-accent-text">
+            {theme} · {accentColor}
+          </span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-3">
+          {THEME_OPTIONS.map((opt) => {
+            const active = theme === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => void onSelectAppearance(opt.id, accentColor)}
+                className={`flex min-h-[60px] items-center gap-3 rounded-md border p-3 text-left transition-colors ${
+                  active
+                    ? 'border-accent bg-accent-soft'
+                    : 'border-line-strong bg-inset hover:border-ink-subtle'
+                }`}
+              >
+                <div
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-line-strong"
+                  style={{backgroundColor: opt.swatchBg}}
+                >
+                  <div
+                    className="h-4 w-4 rounded-xs"
+                    style={{backgroundColor: opt.swatchSurface}}
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-ink">{opt.label}</div>
+                  <div className="truncate text-[11px] text-ink-muted">{opt.description}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="space-y-2 border-t border-line pt-3">
+          <div className="text-xs font-medium text-ink-muted">Accent Color</div>
+          <div className="flex flex-wrap gap-2">
+            {ACCENT_OPTIONS.map((opt) => {
+              const active = accentColor === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => void onSelectAppearance(theme, opt.id)}
+                  className={`inline-flex min-h-[42px] items-center gap-2 rounded-md border px-3.5 py-2 text-xs font-semibold transition-colors ${
+                    active
+                      ? 'border-accent bg-accent-soft text-ink'
+                      : 'border-line-strong bg-inset text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  <span
+                    className="h-3 w-3 rounded-full"
+                    style={{backgroundColor: opt.hex}}
+                    aria-hidden="true"
+                  />
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* System Connection Matrix */}
+      <section className="space-y-3 rounded-lg border border-line bg-surface p-5 sm:p-6">
+        <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <Wifi className="h-4 w-4 text-accent-text" />
+          <span>System Connection Matrix</span>
+        </div>
+
+        <div className="grid gap-2.5 font-mono text-xs sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-md border border-line bg-inset p-3">
+            <div className="text-[11px] text-ink-muted">Supabase DB</div>
+            <div className="mt-1 font-semibold text-accent-text">
+              {schemaMissing ? 'Schema Needed' : 'Connected · RLS'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-ink-subtle">
+              Queue: {offlineQueueCount} pending
+            </div>
+          </div>
+
+          <div className="rounded-md border border-line bg-inset p-3">
+            <div className="text-[11px] text-ink-muted">Active AI Route</div>
+            <div className="mt-1 font-semibold text-ink">{routeStatus.activeKind}</div>
+            <div className="mt-0.5 tabular-nums text-[11px] text-ink-subtle">
+              {routeStatus.latencyMs !== null ? `${routeStatus.latencyMs} ms` : 'Local instant'}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-line bg-inset p-3">
+            <div className="text-[11px] text-ink-muted">Speech &amp; Multi-Voice</div>
+            <div className="mt-1 font-semibold text-ink">
+              {hasSpeechApi ? 'Web Speech + Acoustic' : 'Unavailable'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-ink-subtle">
+              AI Transcript Polish ready
+            </div>
+          </div>
+
+          <div className="rounded-md border border-line bg-inset p-3">
+            <div className="text-[11px] text-ink-muted">Screen &amp; OCR</div>
+            <div className="mt-1 font-semibold text-ink">
+              {hasScreenApi ? 'Image + Live Screen' : 'Image OCR Ready'}
+            </div>
+            <div className="mt-0.5 text-[11px] text-ink-subtle">
+              Preview-gated + ROI crop
+            </div>
+          </div>
+        </div>
+      </section>
 
       {/* Dual-Route AI Engine Config */}
       <form
         onSubmit={handleSaveAndTestBrain}
-        className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6"
+        className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-base font-semibold text-slate-100">
-              <Cpu className="h-4 w-4 text-emerald-400" />
+            <div className="flex items-center gap-2 text-base font-semibold text-ink">
+              <Cpu className="h-4 w-4 text-accent-text" />
               <span>AI Engine Routing &amp; Chromebook Failover</span>
             </div>
-            <p className="text-xs leading-relaxed text-slate-400">
+            <p className="text-xs leading-relaxed text-ink-muted">
               Your Built-in AI runs instantly in-browser. Cloud Assist connects via your Cloudflare
               Worker (Tablet) and fails over automatically to your non-.dev Supabase Edge Function
               whenever your Chromebook organization blocks <code className="font-mono">.dev</code> sites.
             </p>
           </div>
-          <span className="font-mono text-xs text-emerald-400">
+          <span className="font-mono text-xs text-accent-text">
             Route: {routeStatus.activeKind}
           </span>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
-            <label htmlFor="brain-url" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="brain-url" className="block text-xs font-medium text-ink-muted">
               Primary Endpoint (Cloudflare Worker or Ollama)
             </label>
             <input
@@ -284,19 +436,19 @@ export function SettingsPanel({
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}
               placeholder="mantis-brain.garrettwins3.workers.dev"
-              className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
           </div>
 
           <div className="space-y-1">
             <div className="flex items-center justify-between gap-2">
-              <label htmlFor="backup-brain-url" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="backup-brain-url" className="block text-xs font-medium text-ink-muted">
                 Chromebook Backup URL (Non-.dev Supabase)
               </label>
               <button
                 type="button"
                 onClick={() => setBackupUrlDraft(DEFAULT_BACKUP_EDGE_URL)}
-                className="font-mono text-[11px] font-medium text-emerald-400 hover:text-emerald-300"
+                className="font-mono text-[11px] font-medium text-accent-text hover:underline"
               >
                 Use Supabase URL
               </button>
@@ -311,21 +463,21 @@ export function SettingsPanel({
               value={backupUrlDraft}
               onChange={(e) => setBackupUrlDraft(e.target.value)}
               placeholder={DEFAULT_BACKUP_EDGE_URL}
-              className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
           </div>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
-            <label htmlFor="brain-model" className="block text-xs font-medium text-slate-300">
+            <label htmlFor="brain-model" className="block text-xs font-medium text-ink-muted">
               Cloud Assist Model Preference
             </label>
             <select
               id="brain-model"
               value={modelDraft}
               onChange={(e) => setModelDraft(e.target.value)}
-              className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 font-mono text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+              className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
             >
               {BRAIN_MODEL_OPTIONS.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -336,7 +488,7 @@ export function SettingsPanel({
           </div>
 
           <div className="flex flex-col justify-end gap-2">
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-200">
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-ink">
               <input
                 type="checkbox"
                 checked={preferBuiltInDraft}
@@ -345,7 +497,7 @@ export function SettingsPanel({
               />
               <span>Built-in AI leads every turn (Cloud Brain distills &amp; assists)</span>
             </label>
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-muted">
               <input
                 type="checkbox"
                 checked={autoLearnDraft}
@@ -357,14 +509,14 @@ export function SettingsPanel({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-3">
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line pt-3">
           <button
             type="button"
             onClick={() => void handleCopyText(MANTIS_CLOUDFLARE_WORKER_JS, 'worker')}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-2 text-xs font-medium text-ink hover:bg-elevated"
           >
             {copiedWhich === 'worker' ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
+              <Check className="h-3.5 w-3.5 text-accent-text" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
@@ -374,7 +526,7 @@ export function SettingsPanel({
           <button
             type="button"
             onClick={() => setShowEdgeCode((v) => !v)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-2 text-xs font-medium text-ink hover:bg-elevated"
           >
             <Copy className="h-3.5 w-3.5" />
             <span>
@@ -385,9 +537,9 @@ export function SettingsPanel({
           <button
             type="submit"
             disabled={brainStatus === 'testing'}
-            className="inline-flex min-h-[40px] items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+            className="inline-flex min-h-[42px] items-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-60"
           >
-            <span>{brainStatus === 'testing' ? 'Testing Routes...' : 'Save & Test Both Routes'}</span>
+            <span>{brainStatus === 'testing' ? 'Testing Routes…' : 'Save & Test Both Routes'}</span>
           </button>
         </div>
 
@@ -396,8 +548,8 @@ export function SettingsPanel({
             role="status"
             className={`rounded-md border px-3.5 py-2.5 font-mono text-xs ${
               brainStatus === 'ok'
-                ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
-                : 'border-red-500/40 bg-red-950/30 text-red-200'
+                ? 'border-accent-border bg-accent-soft text-ink'
+                : 'border-red-500/40 bg-red-500/10 text-red-400'
             }`}
           >
             {brainMessage}
@@ -405,11 +557,11 @@ export function SettingsPanel({
         )}
 
         {/* Zero-CLI Guides */}
-        <div className="flex flex-wrap gap-4 border-t border-slate-800 pt-3">
+        <div className="flex flex-wrap gap-4 border-t border-line pt-3">
           <button
             type="button"
             onClick={() => setShowEdgeCode((v) => !v)}
-            className="text-xs font-medium text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
+            className="text-xs font-medium text-accent-text underline underline-offset-2 hover:opacity-90"
           >
             {showEdgeCode
               ? 'Hide Chromebook .supabase.co Edge Function setup'
@@ -418,7 +570,7 @@ export function SettingsPanel({
           <button
             type="button"
             onClick={() => setShowWorkerCode((v) => !v)}
-            className="text-xs font-medium text-slate-300 underline underline-offset-2 hover:text-slate-100"
+            className="text-xs font-medium text-ink-muted underline underline-offset-2 hover:text-ink"
           >
             {showWorkerCode
               ? 'Hide Cloudflare Worker setup & code'
@@ -427,8 +579,8 @@ export function SettingsPanel({
         </div>
 
         {showEdgeCode && (
-          <div className="space-y-3 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
-            <div className="font-semibold text-emerald-300">
+          <div className="space-y-3 rounded-md border border-line bg-inset p-4 text-xs text-ink-muted">
+            <div className="font-semibold text-accent-text">
               Bypass Chromebook `.dev` Block via Supabase Edge Function (4 Tiny Tablet-Safe Files)
             </div>
             <div className="flex flex-wrap gap-2">
@@ -442,10 +594,10 @@ export function SettingsPanel({
                   key={item.id}
                   type="button"
                   onClick={() => void handleCopyText(item.code, item.id)}
-                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink hover:bg-elevated"
                 >
                   {copiedWhich === item.id ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <Check className="h-3.5 w-3.5 text-accent-text" />
                   ) : (
                     <Copy className="h-3.5 w-3.5" />
                   )}
@@ -453,28 +605,28 @@ export function SettingsPanel({
                 </button>
               ))}
             </div>
-            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
+            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed">
               <li>
                 Open{' '}
-                <code className="font-mono text-slate-200">
+                <code className="font-mono text-ink">
                   supabase.com/dashboard/project/ncbtoawlltxukzzdyvhc/functions
                 </code>{' '}
                 and click <strong>Deploy a new function → Via Editor</strong>.
               </li>
               <li>
-                Use <strong>+ Add File</strong> to create <code className="font-mono text-slate-200">helpers.ts</code>,{' '}
-                <code className="font-mono text-slate-200">providers.ts</code>, and{' '}
-                <code className="font-mono text-slate-200">routes.ts</code>, pasting each file above.
+                Use <strong>+ Add File</strong> to create <code className="font-mono text-ink">helpers.ts</code>,{' '}
+                <code className="font-mono text-ink">providers.ts</code>, and{' '}
+                <code className="font-mono text-ink">routes.ts</code>, pasting each file above.
               </li>
               <li>
-                Open <code className="font-mono text-slate-200">index.ts</code>, delete all 26 starter
-                lines, and paste the 3-line <code className="font-mono text-slate-200">index.ts</code>.
-                Name the function <code className="font-mono text-slate-200">mantis-brain</code> and deploy.
+                Open <code className="font-mono text-ink">index.ts</code>, delete all 26 starter
+                lines, and paste the 3-line <code className="font-mono text-ink">index.ts</code>.
+                Name the function <code className="font-mono text-ink">mantis-brain</code> and deploy.
               </li>
               <li>
-                In <strong>Details</strong> for <code className="font-mono text-slate-200">mantis-brain</code>,
+                In <strong>Details</strong> for <code className="font-mono text-ink">mantis-brain</code>,
                 turn OFF <strong>Enforce JWT Verification</strong>, and add{' '}
-                <code className="font-mono text-slate-200">GROQ_API_KEY</code> under{' '}
+                <code className="font-mono text-ink">GROQ_API_KEY</code> under{' '}
                 <strong>Edge Functions → Secrets</strong>.
               </li>
               <li>
@@ -486,19 +638,19 @@ export function SettingsPanel({
         )}
 
         {showWorkerCode && (
-          <div className="space-y-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-4 text-xs text-slate-300">
-            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed text-slate-400">
+          <div className="space-y-2.5 rounded-md border border-line bg-inset p-4 text-xs text-ink-muted">
+            <ol className="list-inside list-decimal space-y-1.5 leading-relaxed">
               <li>
-                Open Cloudflare <code className="font-mono text-slate-200">mantis-brain</code> →{' '}
+                Open Cloudflare <code className="font-mono text-ink">mantis-brain</code> →{' '}
                 <strong>Settings → Bindings → Add → Workers AI</strong> → Variable name:{' '}
-                <code className="font-mono text-slate-200">AI</code> (10,000 free Neurons/day).
+                <code className="font-mono text-ink">AI</code> (10,000 free Neurons/day).
               </li>
               <li>
                 Tap <strong>Edit code</strong>, paste the copied Worker Code, and click{' '}
                 <strong>Deploy</strong>.
               </li>
             </ol>
-            <pre className="max-h-44 overflow-auto rounded border border-slate-800 bg-[#0F172A] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+            <pre className="max-h-44 overflow-auto rounded border border-line bg-surface p-3 font-mono text-[11px] leading-relaxed text-ink">
               {MANTIS_CLOUDFLARE_WORKER_JS}
             </pre>
           </div>
@@ -506,75 +658,75 @@ export function SettingsPanel({
       </form>
 
       {/* Honest Memory, Repo & Suggestion Readiness Breakdown */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <h2 className="text-base font-semibold text-slate-100">
+            <h2 className="text-base font-semibold text-ink">
               Memory &amp; Code Help Readiness
             </h2>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-ink-muted">
               Measured strictly from saved entries, folders, tags, repo files, chat turns, and
               reviewed suggestions.
             </p>
           </div>
-          <div className="font-mono text-2xl font-bold tabular-nums text-emerald-400">
+          <div className="font-mono text-2xl font-bold tabular-nums text-accent-text">
             {metrics.readinessScore} / 100
           </div>
         </div>
 
-        <div className="grid gap-3 border-t border-slate-800 pt-4 sm:grid-cols-3 lg:grid-cols-6">
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Knowledge</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+        <div className="grid gap-3 border-t border-line pt-4 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Knowledge</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.entryCount}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
+            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-ink-subtle">
               {metrics.substantiveCount} substantive
             </div>
           </div>
 
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Folders</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Folders</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.folderCount}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] text-slate-500">Categories</div>
+            <div className="mt-0.5 font-mono text-[11px] text-ink-subtle">Categories</div>
           </div>
 
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Tagged</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Tagged</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.taggedCount}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] text-slate-500">Indexed notes</div>
+            <div className="mt-0.5 font-mono text-[11px] text-ink-subtle">Indexed notes</div>
           </div>
 
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Repo Files</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Repo Files</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.repoFileCount}
             </div>
-            <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
+            <div className="mt-0.5 truncate font-mono text-[11px] text-ink-subtle">
               {connection ? `${connection.owner}/${connection.repo}` : 'Not connected'}
             </div>
           </div>
 
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Suggestions</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Suggestions</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.approvedSuggestions}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
+            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-ink-subtle">
               {metrics.reviewedSuggestions} reviewed
             </div>
           </div>
 
-          <div className="rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-xs text-slate-400">Self-Audits</div>
-            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-100">
+          <div className="rounded-md border border-line bg-inset p-3.5">
+            <div className="text-xs text-ink-muted">Self-Audits</div>
+            <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-ink">
               {metrics.selfAuditCount}
             </div>
-            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-slate-500">
+            <div className="mt-0.5 font-mono text-[11px] tabular-nums text-ink-subtle">
               {metrics.conversationTurns} turns
             </div>
           </div>
@@ -582,24 +734,24 @@ export function SettingsPanel({
       </section>
 
       {/* GitHub Pages Deployment Checklist */}
-      <section className="space-y-2.5 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
-        <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-          <GitBranch className="h-4 w-4 text-emerald-400" />
+      <section className="space-y-2.5 rounded-lg border border-line bg-surface p-5 sm:p-6">
+        <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <GitBranch className="h-4 w-4 text-accent-text" />
           <span>GitHub Pages Static Deployment Note</span>
         </div>
-        <p className="text-xs leading-relaxed text-slate-300">
+        <p className="text-xs leading-relaxed text-ink-muted">
           Ensure GitHub repository <strong>Settings → Pages → Source</strong> is set to{' '}
-          <strong>GitHub Actions</strong> with relative <code className="font-mono">./</code> asset
-          paths so <code className="font-mono">/Mantis/</code> deploys cleanly.
+          <strong>GitHub Actions</strong> with relative <code className="font-mono text-ink">./</code> asset
+          paths so <code className="font-mono text-ink">/Mantis/</code> deploys cleanly.
         </p>
       </section>
 
       {/* Supabase Connection & Security */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-semibold text-slate-100">Supabase Connection</h2>
-            <p className="text-xs text-slate-400">
+            <h2 className="text-base font-semibold text-ink">Supabase Connection</h2>
+            <p className="text-xs text-ink-muted">
               Frontend uses the Publishable key only with authenticated RLS sessions.
             </p>
           </div>
@@ -607,21 +759,21 @@ export function SettingsPanel({
             type="button"
             onClick={handleTestConnection}
             disabled={pingStatus === 'testing'}
-            className="inline-flex min-h-[42px] items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700 disabled:opacity-60"
+            className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-line-strong bg-inset px-4 py-2 text-xs font-medium text-ink hover:bg-elevated disabled:opacity-60"
           >
             <Wifi className="h-4 w-4" />
-            <span>{pingStatus === 'testing' ? 'Testing...' : 'Test Connection'}</span>
+            <span>{pingStatus === 'testing' ? 'Testing…' : 'Test Connection'}</span>
           </button>
         </div>
 
-        <div className="grid gap-3 border-t border-slate-800 pt-4 text-xs sm:grid-cols-2">
-          <div className="space-y-1 rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-slate-400">Project URL</div>
-            <div className="truncate font-mono text-slate-200">{SUPABASE_URL}</div>
+        <div className="grid gap-3 border-t border-line pt-4 text-xs sm:grid-cols-2">
+          <div className="space-y-1 rounded-md border border-line bg-inset p-3.5">
+            <div className="text-ink-muted">Project URL</div>
+            <div className="truncate font-mono text-ink">{SUPABASE_URL}</div>
           </div>
-          <div className="space-y-1 rounded-md border border-slate-800 bg-[#0B1120] p-3.5">
-            <div className="text-slate-400">Publishable Key (Safe for GitHub Pages)</div>
-            <div className="truncate font-mono text-slate-200">{maskedKey}</div>
+          <div className="space-y-1 rounded-md border border-line bg-inset p-3.5">
+            <div className="text-ink-muted">Publishable Key (Safe for GitHub Pages)</div>
+            <div className="truncate font-mono text-ink">{maskedKey}</div>
           </div>
         </div>
 
@@ -630,16 +782,16 @@ export function SettingsPanel({
             role="status"
             className={`rounded-md border px-3.5 py-2.5 font-mono text-xs ${
               pingStatus === 'ok'
-                ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
-                : 'border-red-500/40 bg-red-950/30 text-red-200'
+                ? 'border-accent-border bg-accent-soft text-ink'
+                : 'border-red-500/40 bg-red-500/10 text-red-400'
             }`}
           >
             {pingMessage}
           </div>
         )}
 
-        <div className="flex items-start gap-2.5 rounded-md border border-slate-800 bg-[#0B1120] p-3.5 text-xs text-slate-300">
-          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+        <div className="flex items-start gap-2.5 rounded-md border border-line bg-inset p-3.5 text-xs text-ink-muted">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-accent-text" />
           <span>
             Security verified: Neither your Supabase Secret key nor your AI provider keys are stored
             in frontend code or GitHub.
@@ -648,54 +800,54 @@ export function SettingsPanel({
       </section>
 
       {/* Phase 1–6 SQL References */}
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
+      <section className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
-              <Database className="h-4 w-4 text-emerald-400" />
-              <h2 className="text-sm font-semibold text-slate-100">
+              <Database className="h-4 w-4 text-accent-text" />
+              <h2 className="text-sm font-semibold text-ink">
                 Phase 6 Polish SQL (Optional — {phase6SchemaMissing ? 'Fallback Active' : 'Synced in DB'})
               </h2>
             </div>
-            <p className="mt-1 text-xs text-slate-400">
+            <p className="mt-1 text-xs text-ink-muted">
               Adds cross-device syncing for Knowledge trust status, source URLs, extraction dates, and theme preferences. Safe fallback works even before running this SQL.
             </p>
           </div>
           <button
             type="button"
             onClick={() => void handleCopyText(MANTIS_PHASE6_SCHEMA_SQL, 6)}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3.5 py-2 text-xs font-medium text-ink hover:bg-elevated"
           >
             {copiedWhich === 6 ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
+              <Check className="h-3.5 w-3.5 text-accent-text" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
             <span>{copiedWhich === 6 ? 'Phase 6 SQL Copied' : 'Copy Phase 6 SQL'}</span>
           </button>
         </div>
-        <pre className="max-h-36 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
+        <pre className="max-h-36 overflow-auto rounded-md border border-line bg-inset p-3 font-mono text-[11px] leading-relaxed text-ink">
           {MANTIS_PHASE6_SCHEMA_SQL}
         </pre>
 
         {offlineQueueCount > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-950/25 px-3.5 py-2.5 text-xs text-amber-200">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-400">
             <span>
               {offlineQueueCount} offline knowledge {offlineQueueCount === 1 ? 'change' : 'changes'} queued locally.
             </span>
             <button
               type="button"
               onClick={onFlushOfflineQueue}
-              className="min-h-[34px] rounded bg-amber-600 px-3 py-1 font-semibold text-white hover:bg-amber-500"
+              className="min-h-[38px] rounded bg-amber-600 px-3 py-1 font-semibold text-white hover:bg-amber-500"
             >
               Sync Queued Now
             </button>
           </div>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-200">
-            <Database className="h-4 w-4 text-slate-400" />
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-ink">
+            <Database className="h-4 w-4 text-ink-muted" />
             <span>
               Phases 1–6: P1 {schemaMissing ? 'Missing' : 'Active'} · P2{' '}
               {phase2SchemaMissing ? 'Missing' : 'Active'} · P3{' '}
@@ -717,10 +869,10 @@ export function SettingsPanel({
                 key={item.num}
                 type="button"
                 onClick={() => void handleCopyText(item.sql, item.num)}
-                className="inline-flex min-h-[36px] items-center gap-1 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-700"
+                className="inline-flex min-h-[38px] items-center gap-1 rounded-md border border-line-strong bg-inset px-2.5 py-1 text-xs text-ink hover:bg-elevated"
               >
                 {copiedWhich === item.num ? (
-                  <Check className="h-3 w-3 text-emerald-400" />
+                  <Check className="h-3 w-3 text-accent-text" />
                 ) : (
                   <Copy className="h-3 w-3" />
                 )}
@@ -732,19 +884,19 @@ export function SettingsPanel({
       </section>
 
       {/* Account Session */}
-      <section className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+      <section className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-line bg-surface p-5">
         <div className="space-y-0.5">
-          <div className="text-xs text-slate-400">Signed-in Single-User Session</div>
-          <div className="font-mono text-sm text-slate-100">{userEmail}</div>
+          <div className="text-xs text-ink-muted">Signed-in Single-User Session</div>
+          <div className="font-mono text-sm text-ink">{userEmail}</div>
         </div>
         <button
           type="button"
           disabled={isSigningOut}
           onClick={handleSignOut}
-          className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-60"
+          className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-line-strong bg-inset px-4 py-2 text-xs font-semibold text-ink hover:bg-elevated disabled:opacity-60"
         >
           <LogOut className="h-4 w-4" />
-          <span>{isSigningOut ? 'Signing out...' : 'Sign Out'}</span>
+          <span>{isSigningOut ? 'Signing out…' : 'Sign Out'}</span>
         </button>
       </section>
     </div>

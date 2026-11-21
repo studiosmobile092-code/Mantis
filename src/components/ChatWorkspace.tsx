@@ -1,8 +1,11 @@
 import {
+  ArrowDown,
   ArrowUpRight,
   BookmarkPlus,
+  Check,
   Cpu,
   FileCode2,
+  FolderPlus,
   GitPullRequest,
   PlusCircle,
   Radio,
@@ -11,7 +14,7 @@ import {
   ThumbsUp,
   Trash2,
 } from 'lucide-react';
-import {type FormEvent, useEffect, useMemo, useRef, useState} from 'react';
+import {type FormEvent, memo, useEffect, useMemo, useRef, useState} from 'react';
 import type {
   BrainRouteStatus,
   ChatMessage,
@@ -38,6 +41,7 @@ interface ChatWorkspaceProps {
   onInspectEntry: (entryId: string) => void;
   onInspectRepoFile: (filePath: string) => void;
   onSaveTextToTeach: (suggestedTitle: string, content: string) => void;
+  onQuickSaveMessage?: (suggestedTitle: string, content: string) => Promise<string | null>;
   onReinforceEntries: (entryIds: string[]) => Promise<void>;
   onOpenIngest: () => void;
   onOpenTeach: () => void;
@@ -45,7 +49,14 @@ interface ChatWorkspaceProps {
   onOpenSettings: () => void;
 }
 
-export function ChatWorkspace({
+function deriveChatTitle(text: string): string {
+  const firstLine = text.split('\n').find((l) => l.trim().length > 0) || text;
+  const cleaned = firstLine.replace(/^\[.*?\]\s*/, '').replace(/^[#>*-\s]+/, '').trim();
+  if (cleaned.length <= 58) return cleaned || 'Saved Studio Note';
+  return `${cleaned.slice(0, 55).trim()}…`;
+}
+
+export const ChatWorkspace = memo(function ChatWorkspace({
   messages,
   entries,
   connection,
@@ -64,6 +75,7 @@ export function ChatWorkspace({
   onInspectEntry,
   onInspectRepoFile,
   onSaveTextToTeach,
+  onQuickSaveMessage,
   onReinforceEntries,
   onOpenIngest,
   onOpenTeach,
@@ -74,6 +86,11 @@ export function ChatWorkspace({
   const [confirmClear, setConfirmClear] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [reinforcedMsgIds, setReinforcedMsgIds] = useState<Record<string, boolean>>({});
+  const [savedMsgFolders, setSavedMsgFolders] = useState<Record<string, string>>({});
+  const [savingMsgId, setSavingMsgId] = useState<string | null>(null);
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
+
+  const streamRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
 
   const hasCloudRoute = routeStatus.activeKind !== 'built-in-only';
@@ -105,8 +122,30 @@ export function ChatWorkspace({
   }, [connection]);
 
   useEffect(() => {
-    scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
+    const container = streamRef.current;
+    if (!container) {
+      scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
+      return;
+    }
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom < 180 || messages.length <= 2) {
+      scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
+      setShowJumpLatest(false);
+    }
   }, [messages.length]);
+
+  function handleStreamScroll() {
+    const el = streamRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setShowJumpLatest(distanceFromBottom > 140);
+  }
+
+  function jumpToLatest() {
+    scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
+    setShowJumpLatest(false);
+  }
 
   async function submitPrompt(forceCloudAssist = false) {
     const trimmed = input.trim();
@@ -139,53 +178,69 @@ export function ChatWorkspace({
     }
   }
 
+  async function handleQuickStore(msg: ChatMessage) {
+    const title = deriveChatTitle(msg.content);
+    if (!onQuickSaveMessage) {
+      onSaveTextToTeach(title, msg.content);
+      return;
+    }
+    setSavingMsgId(msg.id);
+    try {
+      const folderName = await onQuickSaveMessage(title, msg.content);
+      if (folderName) {
+        setSavedMsgFolders((prev) => ({...prev, [msg.id]: folderName}));
+      }
+    } finally {
+      setSavingMsgId(null);
+    }
+  }
+
   return (
-    <div className="flex flex-col gap-3.5">
+    <div className="flex flex-col gap-3">
       {/* Studio Workbench Header Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-800 bg-[#0F172A] px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface px-4 py-3">
         <div className="space-y-0.5">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-base font-semibold tracking-tight text-slate-100">
+            <h1 className="text-base font-semibold tracking-tight text-ink">
               AI Studio Workbench
             </h1>
-            <span className="font-mono text-xs text-slate-400">
+            <span className="font-mono text-xs text-ink-muted">
               {preferBuiltInFirst ? 'Built-in AI Leads' : 'Cloud Assist Primary'}
               {hasCloudRoute ? ` · ${brainModel.split('/').pop()}` : ''}
             </span>
           </div>
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-ink-muted">
             Built-in rule miner, concept recall{connection ? `, and ${connection.owner}/${connection.repo}` : ''}.
-            Use <code className="font-mono text-slate-200">/teach</code>,{' '}
-            <code className="font-mono text-slate-200">/search</code>,{' '}
-            <code className="font-mono text-slate-200">/suggest</code>,{' '}
-            <code className="font-mono text-slate-200">/self-audit</code>.
+            Use <code className="font-mono text-ink">/teach</code>,{' '}
+            <code className="font-mono text-ink">/search</code>,{' '}
+            <code className="font-mono text-ink">/suggest</code>,{' '}
+            <code className="font-mono text-ink">/self-audit</code>.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Quick Mode Switchers */}
           <button
             type="button"
             onClick={onOpenIngest}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 hover:bg-slate-800"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-elevated"
           >
-            <Radio className="h-3.5 w-3.5 text-emerald-400" />
+            <Radio className="h-3.5 w-3.5 text-accent-text" />
             <span>Ingest</span>
           </button>
 
           <button
             type="button"
             onClick={onOpenTeach}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 hover:bg-slate-800"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-elevated"
           >
-            <PlusCircle className="h-3.5 w-3.5 text-sky-400" />
+            <PlusCircle className="h-3.5 w-3.5 text-accent-text" />
             <span>Teach</span>
           </button>
 
           <button
             type="button"
             onClick={onOpenSuggestions}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 hover:bg-slate-800"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-elevated"
           >
             <GitPullRequest className="h-3.5 w-3.5 text-amber-400" />
             <span>Diffs</span>
@@ -199,14 +254,14 @@ export function ChatWorkspace({
                     type="button"
                     disabled={isClearing}
                     onClick={handleConfirmClear}
-                    className="min-h-[38px] rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                    className="min-h-[40px] rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                   >
-                    {isClearing ? 'Clearing...' : 'Confirm'}
+                    {isClearing ? 'Clearing…' : 'Confirm'}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmClear(false)}
-                    className="min-h-[38px] rounded-md border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                    className="min-h-[40px] rounded-md border border-line-strong px-2.5 py-1.5 text-xs text-ink-muted hover:bg-elevated"
                   >
                     Cancel
                   </button>
@@ -216,7 +271,7 @@ export function ChatWorkspace({
                   type="button"
                   onClick={() => setConfirmClear(true)}
                   aria-label="Clear conversation history"
-                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-800 bg-[#0B1120] px-2.5 py-1.5 text-xs text-slate-400 hover:border-slate-700 hover:text-slate-200"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-inset px-2.5 py-1.5 text-xs text-ink-muted hover:border-line-strong hover:text-ink"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">Clear</span>
@@ -228,26 +283,26 @@ export function ChatWorkspace({
       </div>
 
       {/* Routing Control Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-800 bg-[#0F172A] px-3.5 py-2 text-xs">
-        <div className="flex items-center gap-2 font-mono text-[11px] text-slate-300">
-          <Cpu className="h-3.5 w-3.5 text-emerald-400" />
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-surface px-3.5 py-2 text-xs">
+        <div className="flex items-center gap-2 font-mono text-[11px] text-ink-muted">
+          <Cpu className="h-3.5 w-3.5 text-accent-text" />
           <span>
             Mode:{' '}
-            <strong className="text-slate-100">
+            <strong className="text-ink">
               {preferBuiltInFirst ? 'Built-in AI First (Instant + Auto-Mine)' : 'Cloud Assist Auto'}
             </strong>
           </span>
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="flex items-center rounded-md border border-slate-800 bg-[#0B1120] p-0.5">
+          <div className="flex items-center rounded-md border border-line bg-inset p-0.5">
             <button
               type="button"
               onClick={() => onTogglePreferBuiltIn(true)}
-              className={`min-h-[30px] rounded px-2.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-[34px] rounded px-2.5 text-[11px] font-medium transition-colors ${
                 preferBuiltInFirst
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-accent text-white'
+                  : 'text-ink-muted hover:text-ink'
               }`}
             >
               Built-in Leads
@@ -255,10 +310,10 @@ export function ChatWorkspace({
             <button
               type="button"
               onClick={() => onTogglePreferBuiltIn(false)}
-              className={`min-h-[30px] rounded px-2.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-[34px] rounded px-2.5 text-[11px] font-medium transition-colors ${
                 !preferBuiltInFirst
-                  ? 'bg-slate-800 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-elevated text-ink'
+                  : 'text-ink-muted hover:text-ink'
               }`}
             >
               Cloud Auto
@@ -269,7 +324,7 @@ export function ChatWorkspace({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="font-mono text-[11px] text-amber-300 underline underline-offset-2 hover:text-amber-200"
+              className="font-mono text-[11px] text-amber-400 underline underline-offset-2 hover:opacity-90"
             >
               Setup Cloud Backup
             </button>
@@ -278,193 +333,275 @@ export function ChatWorkspace({
       </div>
 
       {/* Conversation Stream */}
-      <div className="min-h-[380px] space-y-3.5 rounded-lg border border-slate-800 bg-[#0F172A] p-4">
-        {isLoading ? (
-          <div className="space-y-3">
-            {[1, 2].map((n) => (
-              <div
-                key={n}
-                className="h-20 animate-pulse rounded-md border border-slate-800 bg-[#0B1120]"
-              />
-            ))}
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex min-h-[300px] flex-col items-center justify-center space-y-4 text-center">
-            <div className="space-y-1.5">
-              <h2 className="text-sm font-semibold text-slate-200">
-                Mantis Built-in AI Workbench Ready
-              </h2>
-              <p className="max-w-md text-xs leading-relaxed text-slate-400">
-                Write rules starting with <code className="font-mono text-slate-200">Remember:</code>,
-                query your stored concepts or synced GitHub files, or escalate any turn to Cloud Assist.
-              </p>
-            </div>
-            <div className="flex flex-wrap justify-center gap-2">
-              {quickPrompts.map((prompt) => (
-                <button
-                  key={prompt}
-                  type="button"
-                  onClick={() => handleQuickPrompt(prompt)}
-                  className="min-h-[38px] rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 font-mono text-xs text-slate-200 transition-colors hover:border-emerald-500/60 hover:bg-slate-800"
+      <div className="relative rounded-lg border border-line bg-surface">
+        <div
+          ref={streamRef}
+          onScroll={handleStreamScroll}
+          className="max-h-[62vh] min-h-[360px] space-y-2.5 overflow-y-auto p-3.5 sm:p-4"
+        >
+          {isLoading ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((n) => (
+                <div
+                  key={n}
+                  className="space-y-2 rounded-md border border-line bg-inset p-3.5"
                 >
-                  {prompt}
-                </button>
+                  <div className="flex items-center justify-between">
+                    <div className="h-3 w-28 animate-pulse rounded bg-elevated" />
+                    <div className="h-3 w-16 animate-pulse rounded bg-elevated" />
+                  </div>
+                  <div className="h-3.5 w-4/5 animate-pulse rounded bg-elevated" />
+                  <div className="h-3.5 w-2/3 animate-pulse rounded bg-elevated" />
+                </div>
               ))}
             </div>
-          </div>
-        ) : (
-          <div className="space-y-3.5">
-            {messages.map((msg, idx) => {
-              const isUser = msg.role === 'user';
-              const citedEntries = (msg.cited_entry_ids || [])
-                .map((id) => entryMap.get(id))
-                .filter((e): e is KnowledgeEntry => Boolean(e));
-              const citedRepoPaths = msg.cited_repo_paths || [];
-              const prevUserMsg = idx > 0 && messages[idx - 1]?.role === 'user' ? messages[idx - 1] : null;
-              const isEscalating = escalatingMsgId === msg.id;
+          ) : messages.length === 0 ? (
+            <div className="flex min-h-[300px] flex-col items-center justify-center space-y-4 text-center">
+              <div className="space-y-1.5">
+                <h2 className="text-sm font-semibold text-ink">
+                  Mantis Built-in AI Workbench Ready
+                </h2>
+                <p className="max-w-md text-xs leading-relaxed text-ink-muted">
+                  Teach rules with <code className="font-mono text-ink">Remember:</code>, query
+                  trusted Knowledge or synced GitHub files, or escalate any turn to Cloud Assist.
+                </p>
+              </div>
+              <div className="flex flex-wrap justify-center gap-2">
+                {quickPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => handleQuickPrompt(prompt)}
+                    className="min-h-[40px] rounded-md border border-line-strong bg-inset px-3 py-1.5 font-mono text-xs text-ink transition-colors hover:border-accent-border hover:bg-elevated"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {messages.map((msg, idx) => {
+                const isUser = msg.role === 'user';
+                const citedEntries = (msg.cited_entry_ids || [])
+                  .map((id) => entryMap.get(id))
+                  .filter((e): e is KnowledgeEntry => Boolean(e));
+                const citedRepoPaths = msg.cited_repo_paths || [];
+                const prevUserMsg =
+                  idx > 0 && messages[idx - 1]?.role === 'user' ? messages[idx - 1] : null;
+                const isEscalating = escalatingMsgId === msg.id;
+                const storedFolder = savedMsgFolders[msg.id];
+                const isStoringThis = savingMsgId === msg.id;
 
-              return (
-                <div
-                  key={msg.id}
-                  className={`rounded-md border p-3.5 ${
-                    isUser
-                      ? 'border-slate-700 bg-slate-800/70'
-                      : 'border-slate-800 bg-[#0B1120]'
-                  }`}
-                >
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 font-mono text-xs text-slate-400">
-                      <span
-                        className={
-                          isUser ? 'font-semibold text-slate-200' : 'font-semibold text-emerald-400'
-                        }
-                      >
-                        {isUser ? 'You' : 'Mantis'}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span className="tabular-nums">
-                        {new Date(msg.created_at).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </span>
+                return (
+                  <div
+                    key={msg.id}
+                    className={`mantis-slide-up rounded-md border px-3.5 py-3 ${
+                      isUser
+                        ? 'ml-auto max-w-[92%] border-line-strong bg-elevated/55 sm:max-w-[85%]'
+                        : 'border-line bg-inset'
+                    }`}
+                  >
+                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-mono text-[11px] text-ink-muted">
+                        <span
+                          className={
+                            isUser ? 'font-semibold text-ink' : 'font-semibold text-accent-text'
+                          }
+                        >
+                          {isUser ? 'You' : 'Mantis'}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          {new Date(msg.created_at).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+
+                      {isUser && !msg.content.startsWith('/teach') && (
+                        <div className="flex items-center gap-1">
+                          {onQuickSaveMessage && (
+                            <button
+                              type="button"
+                              disabled={isStoringThis || Boolean(storedFolder)}
+                              onClick={() => void handleQuickStore(msg)}
+                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                                storedFolder
+                                  ? 'text-accent-text'
+                                  : 'text-ink-muted hover:bg-elevated hover:text-ink'
+                              }`}
+                            >
+                              {storedFolder ? (
+                                <>
+                                  <Check className="h-3 w-3" />
+                                  <span>Saved · {storedFolder}</span>
+                                </>
+                              ) : (
+                                <>
+                                  <FolderPlus className="h-3 w-3" />
+                                  <span>{isStoringThis ? 'Filing…' : 'Auto-Store'}</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
+                            }
+                            className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                          >
+                            <BookmarkPlus className="h-3.5 w-3.5" />
+                            <span>Save Rule</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {!isUser && (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {prevUserMsg && !msg.content.startsWith('[Cloud Assist') && (
+                            <button
+                              type="button"
+                              disabled={isEscalating || isSending}
+                              onClick={() => void onEscalateMessageToCloud(msg.id)}
+                              className="inline-flex min-h-[34px] items-center gap-1 rounded border border-line-strong bg-surface px-2.5 py-1 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>{isEscalating ? 'Assisting…' : 'Ask Cloud Assist'}</span>
+                            </button>
+                          )}
+
+                          {citedEntries.length > 0 && (
+                            <button
+                              type="button"
+                              disabled={Boolean(reinforcedMsgIds[msg.id])}
+                              onClick={async () => {
+                                setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
+                                await onReinforceEntries(citedEntries.map((e) => e.id));
+                              }}
+                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                                reinforcedMsgIds[msg.id]
+                                  ? 'text-accent-text'
+                                  : 'text-ink-muted hover:bg-elevated hover:text-ink'
+                              }`}
+                            >
+                              <ThumbsUp className="h-3 w-3" />
+                              <span>{reinforcedMsgIds[msg.id] ? 'Boosted' : 'Helpful'}</span>
+                            </button>
+                          )}
+
+                          {onQuickSaveMessage && (
+                            <button
+                              type="button"
+                              disabled={isStoringThis || Boolean(storedFolder)}
+                              onClick={() => void handleQuickStore(msg)}
+                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                                storedFolder
+                                  ? 'text-accent-text'
+                                  : 'text-ink-muted hover:bg-elevated hover:text-ink'
+                              }`}
+                            >
+                              {storedFolder ? (
+                                <>
+                                  <Check className="h-3 w-3" />
+                                  <span>{storedFolder}</span>
+                                </>
+                              ) : (
+                                <>
+                                  <FolderPlus className="h-3 w-3" />
+                                  <span>{isStoringThis ? 'Filing…' : 'Auto-Store'}</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
+                            }
+                            className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                          >
+                            <BookmarkPlus className="h-3 w-3" />
+                            <span>Edit &amp; Save</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
 
-                    {isUser && !msg.content.startsWith('/teach') && (
-                      <button
-                        type="button"
-                        onClick={() => onSaveTextToTeach(msg.content.slice(0, 60), msg.content)}
-                        className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-700/60 hover:text-slate-100"
-                      >
-                        <BookmarkPlus className="h-3.5 w-3.5" />
-                        <span>Save Rule</span>
-                      </button>
-                    )}
+                    <div className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-ink">
+                      {msg.content}
+                    </div>
 
-                    {!isUser && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {prevUserMsg && !msg.content.startsWith('[Cloud Assist') && (
+                    {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
+                      <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5">
+                        <span className="font-mono text-[11px] text-ink-muted">Sources:</span>
+                        {citedEntries.map((cited) => (
                           <button
+                            key={cited.id}
                             type="button"
-                            disabled={isEscalating || isSending}
-                            onClick={() => void onEscalateMessageToCloud(msg.id)}
-                            className="inline-flex min-h-[34px] items-center gap-1 rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-sky-300 hover:border-sky-500/50 hover:bg-slate-800 disabled:opacity-50"
+                            onClick={() => onInspectEntry(cited.id)}
+                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-accent-text transition-colors hover:border-accent-border"
                           >
-                            <Sparkles className="h-3.5 w-3.5" />
-                            <span>{isEscalating ? 'Assisting...' : 'Ask Cloud Assist'}</span>
+                            <span>{cited.title}</span>
+                            <ArrowUpRight className="h-3.5 w-3.5" />
                           </button>
-                        )}
-
-                        {citedEntries.length > 0 && (
+                        ))}
+                        {citedRepoPaths.map((repoPath) => (
                           <button
+                            key={repoPath}
                             type="button"
-                            disabled={Boolean(reinforcedMsgIds[msg.id])}
-                            onClick={async () => {
-                              setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
-                              await onReinforceEntries(citedEntries.map((e) => e.id));
-                            }}
-                            className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors ${
-                              reinforcedMsgIds[msg.id]
-                                ? 'text-emerald-400'
-                                : 'text-slate-400 hover:bg-slate-800 hover:text-emerald-300'
-                            }`}
+                            onClick={() => onInspectRepoFile(repoPath)}
+                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 font-mono text-xs text-ink transition-colors hover:border-accent-border"
                           >
-                            <ThumbsUp className="h-3.5 w-3.5" />
-                            <span>{reinforcedMsgIds[msg.id] ? 'Boosted' : 'Helpful'}</span>
+                            <FileCode2 className="h-3.5 w-3.5 text-accent-text" />
+                            <span>{repoPath}</span>
                           </button>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={() => onSaveTextToTeach('Learned from Studio Turn', msg.content)}
-                          className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-xs font-medium text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                        >
-                          <BookmarkPlus className="h-3.5 w-3.5" />
-                          <span>Store</span>
-                        </button>
+                        ))}
                       </div>
                     )}
                   </div>
+                );
+              })}
+              <div ref={scrollEndRef} />
+            </div>
+          )}
+        </div>
 
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
-                    {msg.content}
-                  </div>
-
-                  {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
-                    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-2.5">
-                      <span className="font-mono text-xs text-slate-400">Sources:</span>
-                      {citedEntries.map((cited) => (
-                        <button
-                          key={cited.id}
-                          type="button"
-                          onClick={() => onInspectEntry(cited.id)}
-                          className="inline-flex min-h-[34px] items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-colors hover:border-emerald-500/50 hover:bg-slate-800"
-                        >
-                          <span>{cited.title}</span>
-                          <ArrowUpRight className="h-3.5 w-3.5" />
-                        </button>
-                      ))}
-                      {citedRepoPaths.map((repoPath) => (
-                        <button
-                          key={repoPath}
-                          type="button"
-                          onClick={() => onInspectRepoFile(repoPath)}
-                          className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-xs text-sky-300 transition-colors hover:border-sky-500/50 hover:bg-slate-800"
-                        >
-                          <FileCode2 className="h-3.5 w-3.5" />
-                          <span>{repoPath}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            <div ref={scrollEndRef} />
-          </div>
+        {showJumpLatest && (
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-accent-border bg-surface/95 px-3 py-1.5 text-xs font-semibold text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
+          >
+            <ArrowDown className="h-3.5 w-3.5" />
+            <span>Jump to latest</span>
+          </button>
         )}
       </div>
 
       {/* Studio Composer */}
       <form
         onSubmit={handleSubmit}
-        className="flex flex-col gap-2 rounded-lg border border-slate-800 bg-[#0F172A] p-3"
+        className="flex flex-col gap-2 rounded-lg border border-line bg-surface p-3"
       >
         <textarea
           rows={2}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void submitPrompt(false);
             }
           }}
           placeholder="Ask Mantis, teach a rule (e.g. 'Remember: always validate JWTs server-side'), or run /suggest..."
-          className="min-h-[48px] w-full resize-y rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+          className="min-h-[52px] w-full resize-y rounded-md border border-line-strong bg-inset px-3.5 py-2.5 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
         />
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="font-mono text-[11px] text-slate-500">
+          <span className="font-mono text-[11px] text-ink-subtle">
             Rules with &quot;Remember:&quot;, &quot;Always&quot;, or &quot;Fix:&quot; auto-save immediately to Supabase.
           </span>
           <div className="flex flex-wrap items-center gap-2">
@@ -473,7 +610,7 @@ export function ChatWorkspace({
                 type="button"
                 disabled={isSending || !input.trim()}
                 onClick={() => void submitPrompt(true)}
-                className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 text-xs font-medium text-sky-300 hover:border-sky-500/50 hover:bg-slate-800 disabled:opacity-50"
+                className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3.5 py-2 text-xs font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 <span>Send + Cloud Assist</span>
@@ -482,14 +619,14 @@ export function ChatWorkspace({
             <button
               type="submit"
               disabled={isSending || !input.trim()}
-              className="inline-flex min-h-[42px] items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-accent px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Send className="h-3.5 w-3.5" />
-              <span>{isSending ? 'Running...' : 'Run'}</span>
+              <span>{isSending ? 'Running…' : 'Run'}</span>
             </button>
           </div>
         </div>
       </form>
     </div>
   );
-}
+});

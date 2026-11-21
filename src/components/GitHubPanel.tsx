@@ -188,27 +188,26 @@ export function GitHubPanel({
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mantis-fade-in space-y-6">
+      <div className="flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold tracking-tight text-slate-100">
+          <h1 className="text-xl font-semibold tracking-tight text-ink">
             GitHub &amp; Code Suggestions
           </h1>
-          <p className="text-sm text-slate-400">
-            Read-only repository awareness (Phase 2), approval-gated diffs (Phase 3), and guarded
-            self-improvement (Phase 4).
+          <p className="text-sm text-ink-muted">
+            Read-only repository awareness, approval-gated diffs, and guarded self-improvement (Propose-Only).
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-800 bg-slate-900 p-1">
+          <div className="flex flex-wrap items-center gap-1 rounded-md border border-line bg-surface p-1">
             <button
               type="button"
               onClick={() => onChangeSubTab('files')}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
                 activeSubTab === 'files'
-                  ? 'bg-slate-800 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-elevated text-ink'
+                  : 'text-ink-muted hover:text-ink'
               }`}
             >
               Repository ({repoFiles.length})
@@ -216,10 +215,10 @@ export function GitHubPanel({
             <button
               type="button"
               onClick={() => onChangeSubTab('suggestions')}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
                 activeSubTab === 'suggestions'
-                  ? 'bg-slate-800 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-elevated text-ink'
+                  : 'text-ink-muted hover:text-ink'
               }`}
             >
               Suggestions ({pendingSuggestionsCount} pending)
@@ -227,10 +226,10 @@ export function GitHubPanel({
             <button
               type="button"
               onClick={() => onChangeSubTab('self-improve')}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
                 activeSubTab === 'self-improve'
-                  ? 'bg-slate-800 text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-elevated text-ink'
+                  : 'text-ink-muted hover:text-ink'
               }`}
             >
               Self-Improve
@@ -268,14 +267,14 @@ export function GitHubPanel({
           onSaveLessonToTeach={onSaveLessonToTeach}
         />
       ) : phase2SchemaMissing ? (
-        <section className="rounded-lg border border-amber-500/40 bg-slate-900 p-5">
+        <section className="rounded-lg border border-amber-500/40 bg-surface p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1.5">
-              <div className="flex items-center gap-2 text-sm font-semibold text-amber-300">
+              <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
                 <Database className="h-4 w-4 shrink-0" />
                 <span>One-Time Phase 2 SQL Migration Needed</span>
               </div>
-              <p className="max-w-2xl text-sm leading-relaxed text-slate-300">
+              <p className="max-w-2xl text-sm leading-relaxed text-ink-muted">
                 To store connected GitHub repositories and indexed source files safely in Supabase,
                 run the Phase 2 SQL migration once in your Supabase SQL Editor, then tap{' '}
                 <strong>Verify Phase 2 Tables</strong>.
@@ -285,10 +284,10 @@ export function GitHubPanel({
               <button
                 type="button"
                 onClick={handleCopySql}
-                className="inline-flex min-h-[42px] items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-4 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-line-strong bg-inset px-4 py-2 text-xs font-medium text-ink hover:bg-elevated"
               >
                 {copiedSql ? (
-                  <Check className="h-4 w-4 text-emerald-400" />
+                  <Check className="h-4 w-4 text-accent-text" />
                 ) : (
                   <Copy className="h-4 w-4" />
                 )}
@@ -297,14 +296,14 @@ export function GitHubPanel({
               <button
                 type="button"
                 onClick={onVerifyTables}
-                className="inline-flex min-h-[42px] items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover"
               >
                 <RefreshCw className="h-4 w-4" />
                 <span>Verify Phase 2 Tables</span>
               </button>
             </div>
           </div>
-          <pre className="mt-4 max-h-56 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-xs leading-relaxed text-slate-300">
+          <pre className="mt-4 max-h-56 overflow-auto rounded-md border border-line bg-inset p-3 font-mono text-xs leading-relaxed text-ink">
             {MANTIS_PHASE2_SCHEMA_SQL}
           </pre>
         </section>
@@ -313,11 +312,11 @@ export function GitHubPanel({
           {/* Connect / Change Repository Form */}
           <form
             onSubmit={handleConnectSubmit}
-            className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5"
+            className="space-y-4 rounded-lg border border-line bg-surface p-5"
           >
             <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto]">
               <div className="space-y-1">
-                <label htmlFor="gh-repo" className="block text-xs font-medium text-slate-300">
+                <label htmlFor="gh-repo" className="block text-xs font-medium text-ink-muted">
                   GitHub Repository (owner/repo or URL)
                 </label>
                 <input
@@ -327,12 +326,12 @@ export function GitHubPanel({
                   value={repoInput}
                   onChange={(e) => setRepoInput(e.target.value)}
                   placeholder="studiosmobile092-code/Mantis"
-                  className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                  className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                 />
               </div>
 
               <div className="space-y-1">
-                <label htmlFor="gh-branch" className="block text-xs font-medium text-slate-300">
+                <label htmlFor="gh-branch" className="block text-xs font-medium text-ink-muted">
                   Branch (optional)
                 </label>
                 <input
@@ -341,7 +340,7 @@ export function GitHubPanel({
                   value={branchInput}
                   onChange={(e) => setBranchInput(e.target.value)}
                   placeholder="main"
-                  className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                  className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                 />
               </div>
 
@@ -349,12 +348,12 @@ export function GitHubPanel({
                 <button
                   type="submit"
                   disabled={isSyncingRepo}
-                  className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60 sm:w-auto"
+                  className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-accent px-5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-60 sm:w-auto"
                 >
                   <GitBranch className="h-4 w-4" />
                   <span>
                     {isSyncingRepo
-                      ? 'Indexing...'
+                      ? 'Indexing…'
                       : connection
                         ? 'Update Repo'
                         : 'Connect Read-Only'}
@@ -363,7 +362,7 @@ export function GitHubPanel({
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
               <span>
                 Public repositories require no token. Read-only indexing (up to 40 key source
                 files).
@@ -371,7 +370,7 @@ export function GitHubPanel({
               <button
                 type="button"
                 onClick={() => setShowTokenInput((v) => !v)}
-                className="inline-flex items-center gap-1.5 font-medium text-slate-300 hover:text-slate-100"
+                className="inline-flex items-center gap-1.5 font-medium text-ink hover:underline"
               >
                 <KeyRound className="h-3.5 w-3.5" />
                 <span>
@@ -381,8 +380,8 @@ export function GitHubPanel({
             </div>
 
             {showTokenInput && (
-              <div className="space-y-1.5 border-t border-slate-800 pt-3">
-                <label htmlFor="gh-pat" className="block text-xs font-medium text-slate-300">
+              <div className="space-y-1.5 border-t border-line pt-3">
+                <label htmlFor="gh-pat" className="block text-xs font-medium text-ink-muted">
                   Optional Read-Only GitHub Token (browser sessionStorage only)
                 </label>
                 <input
@@ -394,13 +393,13 @@ export function GitHubPanel({
                     setSessionGitHubToken(e.target.value);
                   }}
                   placeholder="github_pat_... (leave blank for public repos)"
-                  className="min-h-[42px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                  className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                 />
               </div>
             )}
 
             {syncProgressText && (
-              <div className="rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-emerald-300">
+              <div className="rounded-md border border-line bg-inset px-3.5 py-2 font-mono text-xs text-accent-text">
                 {syncProgressText}
               </div>
             )}
@@ -408,7 +407,7 @@ export function GitHubPanel({
             {formError && (
               <div
                 role="alert"
-                className="rounded-md border border-red-500/40 bg-red-950/30 px-3.5 py-2.5 text-xs text-red-200"
+                className="rounded-md border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400"
               >
                 {formError}
               </div>
@@ -418,9 +417,9 @@ export function GitHubPanel({
           {/* Indexed Repository Explorer */}
           {connection && (
             <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-3 font-mono text-xs text-slate-300">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface px-4 py-3 font-mono text-xs text-ink-muted">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold text-emerald-400">
+                  <span className="font-semibold text-accent-text">
                     {connection.owner}/{connection.repo}
                   </span>
                   <span aria-hidden="true">·</span>
@@ -428,7 +427,7 @@ export function GitHubPanel({
                   <span aria-hidden="true">·</span>
                   <span className="tabular-nums">{repoFiles.length} files indexed</span>
                   <span aria-hidden="true">·</span>
-                  <span className="tabular-nums text-slate-400">
+                  <span className="tabular-nums text-ink-subtle">
                     Synced {new Date(connection.last_synced_at).toLocaleString()}
                   </span>
                 </div>
@@ -438,7 +437,7 @@ export function GitHubPanel({
                     type="button"
                     disabled={isSyncingRepo}
                     onClick={() => void onResyncRepo(tokenInput.trim() || undefined)}
-                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded border border-slate-700 bg-[#0B1120] px-3 py-1 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-60"
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line-strong bg-inset px-3 py-1 text-xs font-medium text-ink hover:bg-elevated disabled:opacity-60"
                   >
                     <RefreshCw className={`h-3.5 w-3.5 ${isSyncingRepo ? 'animate-spin' : ''}`} />
                     <span>Re-sync</span>
@@ -453,14 +452,14 @@ export function GitHubPanel({
                           await onDisconnectRepo();
                           setConfirmDisconnect(false);
                         }}
-                        className="min-h-[36px] rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-500"
+                        className="min-h-[40px] rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-500"
                       >
                         Confirm
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmDisconnect(false)}
-                        className="min-h-[36px] rounded border border-slate-700 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                        className="min-h-[40px] rounded border border-line-strong px-2.5 py-1 text-xs text-ink-muted hover:bg-elevated"
                       >
                         Cancel
                       </button>
@@ -469,7 +468,7 @@ export function GitHubPanel({
                     <button
                       type="button"
                       onClick={() => setConfirmDisconnect(true)}
-                      className="inline-flex min-h-[36px] items-center gap-1 rounded border border-slate-800 bg-[#0B1120] px-2.5 py-1 text-xs text-slate-400 hover:border-red-500/40 hover:text-red-300"
+                      className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-inset px-2.5 py-1 text-xs text-ink-muted hover:border-red-500/40 hover:text-red-400"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       <span>Disconnect</span>
@@ -480,21 +479,21 @@ export function GitHubPanel({
 
               <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
                 {/* File Tree List */}
-                <aside className="space-y-2 rounded-lg border border-slate-800 bg-slate-900 p-3">
+                <aside className="space-y-2 rounded-lg border border-line bg-surface p-3">
                   <div className="relative">
-                    <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                    <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-ink-subtle" />
                     <input
                       type="search"
                       value={fileSearch}
                       onChange={(e) => setFileSearch(e.target.value)}
                       placeholder="Filter repo files..."
-                      className="min-h-[40px] w-full rounded-md border border-slate-700 bg-[#0B1120] py-1.5 pr-3 pl-8 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                      className="min-h-[42px] w-full rounded-md border border-line-strong bg-inset py-1.5 pr-3 pl-8 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                     />
                   </div>
 
                   <div className="max-h-[420px] space-y-1 overflow-y-auto pr-1">
                     {filteredFiles.length === 0 ? (
-                      <p className="px-2 py-4 text-center text-xs text-slate-400">
+                      <p className="px-2 py-4 text-center text-xs text-ink-muted">
                         No indexed files match that filter.
                       </p>
                     ) : (
@@ -507,11 +506,11 @@ export function GitHubPanel({
                             onClick={() => onSelectFilePath(file.path)}
                             className={`flex min-h-[40px] w-full items-center gap-2 rounded px-2.5 py-1.5 text-left font-mono text-xs transition-colors ${
                               isSelected
-                                ? 'bg-slate-800 font-medium text-emerald-300'
-                                : 'text-slate-300 hover:bg-slate-800/60'
+                                ? 'bg-accent-soft font-medium text-accent-text'
+                                : 'text-ink-muted hover:bg-elevated/60 hover:text-ink'
                             }`}
                           >
-                            <FileCode2 className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                            <FileCode2 className="h-3.5 w-3.5 shrink-0 text-ink-subtle" />
                             <span className="truncate">{file.path}</span>
                           </button>
                         );
@@ -521,15 +520,15 @@ export function GitHubPanel({
                 </aside>
 
                 {/* Read-Only Code Viewer */}
-                <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+                <section className="rounded-lg border border-line bg-surface p-4">
                   {activeFile ? (
                     <div className="space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
                         <div className="space-y-0.5">
-                          <div className="font-mono text-sm font-semibold text-slate-100">
+                          <div className="font-mono text-sm font-semibold text-ink">
                             {activeFile.path}
                           </div>
-                          <div className="font-mono text-xs tabular-nums text-slate-400">
+                          <div className="font-mono text-xs tabular-nums text-ink-muted">
                             {activeFile.size_bytes} bytes · Read-only snapshot
                           </div>
                         </div>
@@ -538,28 +537,28 @@ export function GitHubPanel({
                             type="button"
                             disabled={isAnalyzingFile}
                             onClick={() => void handleQuickPropose(activeFile)}
-                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+                            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-60"
                           >
                             <Sparkles className="h-3.5 w-3.5" />
-                            <span>{isAnalyzingFile ? 'Analyzing...' : 'Propose Improvement'}</span>
+                            <span>{isAnalyzingFile ? 'Analyzing…' : 'Propose Improvement'}</span>
                           </button>
 
                           <button
                             type="button"
                             onClick={() => onSaveFileToTeach(activeFile)}
-                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800"
+                            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink hover:bg-elevated"
                           >
                             <BookmarkPlus className="h-3.5 w-3.5" />
                             <span>Save to Teach</span>
                           </button>
                         </div>
                       </div>
-                      <pre className="max-h-[420px] overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
+                      <pre className="max-h-[420px] overflow-auto rounded-md border border-line bg-inset p-3.5 font-mono text-xs leading-relaxed text-ink">
                         {activeFile.content}
                       </pre>
                     </div>
                   ) : (
-                    <p className="py-12 text-center text-xs text-slate-400">
+                    <p className="py-12 text-center text-xs text-ink-muted">
                       Select an indexed file to inspect its contents.
                     </p>
                   )}

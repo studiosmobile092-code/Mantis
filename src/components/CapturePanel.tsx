@@ -6,20 +6,29 @@ import {
   FileText,
   Globe,
   Link2,
+  Loader2,
   Mic,
   MicOff,
   Monitor,
   Play,
   Square,
   Trash2,
+  Users,
 } from 'lucide-react';
 import {type ClipboardEvent, type FormEvent, useEffect, useRef, useState} from 'react';
 import {
   distillWithAiBrain,
+  enhanceSpeechTranscriptWithAi,
   extractUrlViaBrain,
   normalizeExternalUrl,
+  suggestSemanticFolderWithAi,
   type DistilledKnowledgeItem,
 } from '../lib/aiBrain';
+import {
+  AUTO_FOLDER_OPTION,
+  ensureAutoFolderExists,
+  inferFolderDeterministically,
+} from '../lib/autoFolders';
 import {
   captureVideoFrameText,
   recognizeImageBlob,
@@ -28,8 +37,12 @@ import {
   terminateOcrWorker,
   type CaptureZone,
 } from '../lib/ocrCapture';
+import {
+  SpeakerAcousticTracker,
+  type SpeechTurnSegment,
+} from '../lib/speechEngine';
 import {distillTextLocally, mergeIncrementalCaption} from '../lib/textDistiller';
-import type {KnowledgeFolder, KnowledgeStatus} from '../types/mantis';
+import type {KnowledgeEntry, KnowledgeFolder, KnowledgeStatus} from '../types/mantis';
 import {CaptureReviewModal, type CaptureReviewDraft} from './CaptureReviewModal';
 
 interface CapturePanelProps {
@@ -38,6 +51,8 @@ interface CapturePanelProps {
   brainModel: string;
   accessToken: string;
   folders: KnowledgeFolder[];
+  entries?: KnowledgeEntry[];
+  onCreateFolder?: (name: string, description: string) => Promise<KnowledgeFolder | null>;
   onSaveEntry: (payload: {
     folderId: string | null;
     title: string;
@@ -60,11 +75,13 @@ type CaptureTab = 'url_text' | 'image_mic' | 'screen';
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
+  confidence?: number;
 }
 
 interface SpeechRecognitionResultLike {
   isFinal: boolean;
-  0: SpeechRecognitionAlternativeLike;
+  length: number;
+  [index: number]: SpeechRecognitionAlternativeLike;
 }
 
 interface SpeechRecognitionEventLike {
@@ -75,6 +92,7 @@ interface SpeechRecognitionEventLike {
 interface SpeechRecognitionLike {
   continuous: boolean;
   interimResults: boolean;
+  maxAlternatives?: number;
   lang: string;
   onresult: ((ev: SpeechRecognitionEventLike) => void) | null;
   onerror: ((ev: {error?: string}) => void) | null;
@@ -112,11 +130,25 @@ function parseTagsText(raw: string): string[] {
   );
 }
 
-function resolveDefaultCaptureFolderId(folders: KnowledgeFolder[]): string | null {
-  const captured = folders.find(
-    (f) => f.name.toLowerCase() === 'captured learning',
-  );
-  return captured?.id || folders[0]?.id || null;
+function resolveInitialFolderSelection(
+  title: string,
+  content: string,
+  folders: KnowledgeFolder[],
+  canAutoCreate: boolean,
+): {folderId: string | null; suggestion: string; description: string} {
+  const inferred = inferFolderDeterministically(title, content, folders);
+  if (inferred.matchedFolderId) {
+    return {
+      folderId: canAutoCreate ? AUTO_FOLDER_OPTION : inferred.matchedFolderId,
+      suggestion: inferred.folderName,
+      description: inferred.description,
+    };
+  }
+  return {
+    folderId: canAutoCreate ? AUTO_FOLDER_OPTION : folders[0]?.id || null,
+    suggestion: inferred.folderName,
+    description: inferred.description,
+  };
 }
 
 export function CapturePanel({
@@ -125,6 +157,8 @@ export function CapturePanel({
   brainModel,
   accessToken,
   folders,
+  entries = [],
+  onCreateFolder,
   onSaveEntry,
   onSaveCapturedEntries,
   onOpenKnowledge,
@@ -143,11 +177,12 @@ export function CapturePanel({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Review & Confirm modal state (shared by URL, Paste, OCR, and Mic)
+  // Review & Confirm modal state
   const [reviewDraft, setReviewDraft] = useState<CaptureReviewDraft | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [isSavingReview, setIsSavingReview] = useState(false);
   const [isRefiningOcr, setIsRefiningOcr] = useState(false);
+  const [isCategorizingFolder, setIsCategorizingFolder] = useState(false);
 
   // Live Screen OCR state
   const [isRecordingScreen, setIsRecordingScreen] = useState(false);
@@ -163,13 +198,16 @@ export function CapturePanel({
   const [extractStepText, setExtractStepText] = useState<string | null>(null);
   const [linkHistory, setLinkHistory] = useState<LinkIngestRecord[]>([]);
 
-  // Image OCR & Live Mic state
+  // Image OCR & Advanced Multi-Voice Live Mic state
   const [imageOcrZone, setImageOcrZone] = useState<CaptureZone>('full');
   const [isOcrImageBusy, setIsOcrImageBusy] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
+  const [isPolishingMic, setIsPolishingMic] = useState(false);
   const [micLines, setMicLines] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [micLevel, setMicLevel] = useState(0);
+  const [detectedSpeakersCount, setDetectedSpeakersCount] = useState(1);
+  const [activeSpeakerLabel, setActiveSpeakerLabel] = useState('Speaker 1');
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -184,7 +222,9 @@ export function CapturePanel({
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioMeterRafRef = useRef<number | null>(null);
   const micLinesRef = useRef<string[]>([]);
+  const micTurnsRef = useRef<SpeechTurnSegment[]>([]);
   const latestInterimRef = useRef('');
+  const acousticTrackerRef = useRef(new SpeakerAcousticTracker());
 
   const linesRef = useRef<string[]>([]);
 
@@ -259,6 +299,69 @@ export function CapturePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function commitSpeechSegment(rawText: string) {
+    const cleaned = rawText.replace(/\s+/g, ' ').trim();
+    if (!cleaned) return;
+
+    const nowMs = Date.now();
+    const acoustic = acousticTrackerRef.current.registerUtterance(nowMs);
+    const totalVoices = acousticTrackerRef.current.getDetectedSpeakerCount();
+    setDetectedSpeakersCount(totalVoices);
+    setActiveSpeakerLabel(acoustic.speaker);
+
+    micTurnsRef.current = [
+      ...micTurnsRef.current,
+      {
+        id: `turn_${nowMs}_${micTurnsRef.current.length}`,
+        rawText: cleaned,
+        acousticSpeaker: acoustic.speaker,
+        centroidHz: acoustic.centroidHz,
+        pauseBeforeMs: acoustic.pauseBeforeMs,
+        timestampMs: nowMs,
+      },
+    ];
+
+    const formattedLine =
+      totalVoices > 1 ? `${acoustic.speaker}: ${cleaned}` : cleaned;
+    const {mergedLines} = mergeIncrementalCaption(micLinesRef.current, formattedLine);
+    micLinesRef.current = mergedLines;
+    setMicLines(mergedLines);
+  }
+
+  async function handleAutoCategorizeReviewFolder() {
+    if (!reviewDraft) return;
+    setIsCategorizingFolder(true);
+    try {
+      const suggestion = await suggestSemanticFolderWithAi({
+        brainUrl,
+        backupBrainUrl,
+        accessToken,
+        model: brainModel,
+        title: reviewDraft.title,
+        content: reviewDraft.content,
+        existingFolders: folders,
+      });
+
+      const mergedTags = Array.from(
+        new Set([...parseTagsText(reviewDraft.tagsText), ...suggestion.tags]),
+      ).join(', ');
+
+      setReviewDraft((prev) =>
+        prev
+          ? {
+              ...prev,
+              folderId: onCreateFolder ? AUTO_FOLDER_OPTION : prev.folderId,
+              autoFolderSuggestion: suggestion.folderName,
+              autoFolderDescription: suggestion.description,
+              tagsText: mergedTags,
+            }
+          : null,
+      );
+    } finally {
+      setIsCategorizingFolder(false);
+    }
+  }
+
   async function handleConfirmReviewSave() {
     if (!reviewDraft) return;
     const cleanTitle = reviewDraft.title.trim();
@@ -274,11 +377,51 @@ export function CapturePanel({
 
     try {
       const tags = parseTagsText(reviewDraft.tagsText);
+      let resolvedFolderId = reviewDraft.folderId;
+      let autoFolderCreatedLabel = '';
+
+      if (resolvedFolderId === AUTO_FOLDER_OPTION) {
+        let folderName = reviewDraft.autoFolderSuggestion || '';
+        let folderDesc = reviewDraft.autoFolderDescription || '';
+
+        if (!folderName) {
+          const classified = await suggestSemanticFolderWithAi({
+            brainUrl,
+            backupBrainUrl,
+            accessToken,
+            model: brainModel,
+            title: cleanTitle,
+            content: cleanContent,
+            existingFolders: folders,
+          });
+          folderName = classified.folderName;
+          folderDesc = classified.description;
+        }
+
+        if (onCreateFolder) {
+          const ensured = await ensureAutoFolderExists(
+            folderName,
+            folderDesc,
+            folders,
+            onCreateFolder,
+          );
+          resolvedFolderId = ensured.folder?.id || folders[0]?.id || null;
+          if (ensured.createdNew && ensured.folder) {
+            autoFolderCreatedLabel = ` (auto-created "${ensured.folder.name}" folder)`;
+          } else if (ensured.folder) {
+            autoFolderCreatedLabel = ` in "${ensured.folder.name}"`;
+          }
+        } else {
+          const fallback = inferFolderDeterministically(cleanTitle, cleanContent, folders);
+          resolvedFolderId = fallback.matchedFolderId || folders[0]?.id || null;
+        }
+      }
+
       let savedCount = 0;
 
       if (reviewDraft.saveMode === 'single') {
         const ok = await onSaveEntry({
-          folderId: reviewDraft.folderId,
+          folderId: resolvedFolderId,
           title: cleanTitle,
           content: cleanContent,
           tags: tags.length > 0 ? tags : [reviewDraft.sourceType.replace(/_/g, '-')],
@@ -322,7 +465,11 @@ export function CapturePanel({
           return;
         }
 
-        const chosenFolderName = folders.find((f) => f.id === reviewDraft.folderId)?.name;
+        const chosenFolderName =
+          reviewDraft.folderId === AUTO_FOLDER_OPTION
+            ? reviewDraft.autoFolderSuggestion
+            : folders.find((f) => f.id === resolvedFolderId)?.name;
+
         const preparedItems = items.map((item) => ({
           ...item,
           folder: chosenFolderName || item.folder,
@@ -341,7 +488,7 @@ export function CapturePanel({
         setStatusMessage(
           `Saved ${savedCount} ${reviewDraft.status} Knowledge ${
             savedCount === 1 ? 'entry' : 'entries'
-          }: "${cleanTitle}"`,
+          }: "${cleanTitle}"${autoFolderCreatedLabel}`,
         );
 
         if (reviewDraft.kind === 'url' && reviewDraft.sourceUrl) {
@@ -363,6 +510,7 @@ export function CapturePanel({
           setPastedText('');
         } else if (reviewDraft.kind === 'mic') {
           micLinesRef.current = [];
+          micTurnsRef.current = [];
           setMicLines([]);
         }
       } else {
@@ -381,6 +529,7 @@ export function CapturePanel({
   function handleDiscardReview() {
     if (reviewDraft?.kind === 'mic') {
       micLinesRef.current = [];
+      micTurnsRef.current = [];
       setMicLines([]);
     }
     setReviewDraft(null);
@@ -531,12 +680,21 @@ export function CapturePanel({
       setStatusMessage('Screen recording stopped — no readable text lines were captured.');
       return;
     }
+    const title = sourceTitle.trim() || `Screen OCR – ${new Date().toLocaleDateString()}`;
+    const folderInit = resolveInitialFolderSelection(
+      title,
+      collected,
+      folders,
+      Boolean(onCreateFolder),
+    );
     setReviewDraft({
       kind: 'ocr',
       sourceType: 'screen_ocr',
-      title: sourceTitle.trim() || `Screen OCR – ${new Date().toLocaleDateString()}`,
+      title,
       content: collected,
-      folderId: resolveDefaultCaptureFolderId(folders),
+      folderId: folderInit.folderId,
+      autoFolderSuggestion: folderInit.suggestion,
+      autoFolderDescription: folderInit.description,
       tagsText: 'screen, ocr',
       status: 'reviewed',
       saveMode: collected.length > 2200 ? 'distill' : 'single',
@@ -551,12 +709,21 @@ export function CapturePanel({
   function handleOpenBufferReview() {
     const collected = linesRef.current.join('\n').trim();
     if (!collected) return;
+    const title = sourceTitle.trim() || 'Captured Buffer Note';
+    const folderInit = resolveInitialFolderSelection(
+      title,
+      collected,
+      folders,
+      Boolean(onCreateFolder),
+    );
     setReviewDraft({
       kind: 'paste',
       sourceType: 'capture_buffer',
-      title: sourceTitle.trim() || 'Captured Buffer Note',
+      title,
       content: collected,
-      folderId: resolveDefaultCaptureFolderId(folders),
+      folderId: folderInit.folderId,
+      autoFolderSuggestion: folderInit.suggestion,
+      autoFolderDescription: folderInit.description,
       tagsText: 'captured, notes',
       status: 'reviewed',
       saveMode: collected.length > 2200 ? 'distill' : 'single',
@@ -584,16 +751,36 @@ export function CapturePanel({
         url: clean,
       });
 
-      setExtractStepText('2/2 Preparing editable preview...');
+      setExtractStepText('2/2 Classifying topic folder & preparing preview...');
       const sourceType = extracted.kind === 'youtube' ? 'youtube_transcript' : 'article_ingest';
+      const folderGuess = await suggestSemanticFolderWithAi({
+        brainUrl,
+        backupBrainUrl,
+        accessToken,
+        model: brainModel,
+        title: extracted.title,
+        content: extracted.text,
+        existingFolders: folders,
+      }).catch(() => {
+        const local = inferFolderDeterministically(extracted.title, extracted.text, folders);
+        return {folderName: local.folderName, description: local.description, tags: local.suggestedTags};
+      });
 
       setReviewDraft({
         kind: 'url',
         sourceType,
         title: extracted.title,
         content: extracted.text,
-        folderId: resolveDefaultCaptureFolderId(folders),
-        tagsText: extracted.kind === 'youtube' ? 'youtube, transcript' : 'article, web',
+        folderId: onCreateFolder ? AUTO_FOLDER_OPTION : folders[0]?.id || null,
+        autoFolderSuggestion: folderGuess.folderName,
+        autoFolderDescription: folderGuess.description,
+        tagsText: Array.from(
+          new Set([
+            extracted.kind === 'youtube' ? 'youtube' : 'article',
+            extracted.kind === 'youtube' ? 'transcript' : 'web',
+            ...folderGuess.tags,
+          ]),
+        ).join(', '),
         status: 'reviewed',
         saveMode: extracted.text.length > 2600 ? 'distill' : 'single',
         sourceUrl: extracted.url,
@@ -617,13 +804,21 @@ export function CapturePanel({
       sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
         ? sourceTitle.trim()
         : 'Pasted Article / Notes';
+    const folderInit = resolveInitialFolderSelection(
+      defaultTitle,
+      clean,
+      folders,
+      Boolean(onCreateFolder),
+    );
 
     setReviewDraft({
       kind: 'paste',
       sourceType: 'article_ingest',
       title: defaultTitle,
       content: clean,
-      folderId: resolveDefaultCaptureFolderId(folders),
+      folderId: folderInit.folderId,
+      autoFolderSuggestion: folderInit.suggestion,
+      autoFolderDescription: folderInit.description,
       tagsText: 'article, notes',
       status: 'reviewed',
       saveMode: clean.length > 2600 ? 'distill' : 'single',
@@ -671,6 +866,12 @@ export function CapturePanel({
           : list[0]?.name
             ? `Screenshot – ${list[0].name.replace(/\.[^.]+$/, '')}`
             : 'Screenshot OCR Capture';
+      const folderInit = resolveInitialFolderSelection(
+        baseTitle,
+        recognizedText,
+        folders,
+        Boolean(onCreateFolder),
+      );
 
       setStatusMessage(null);
       setReviewDraft({
@@ -678,7 +879,9 @@ export function CapturePanel({
         sourceType: 'screenshot_ocr',
         title: baseTitle,
         content: recognizedText,
-        folderId: resolveDefaultCaptureFolderId(folders),
+        folderId: folderInit.folderId,
+        autoFolderSuggestion: folderInit.suggestion,
+        autoFolderDescription: folderInit.description,
         tagsText: 'screenshot, ocr',
         status: 'reviewed',
         saveMode: 'single',
@@ -720,7 +923,13 @@ export function CapturePanel({
   async function startWebAudioMeter() {
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       audioStreamRef.current = stream;
 
       const AudioContextCtor =
@@ -732,25 +941,21 @@ export function CapturePanel({
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.55;
       source.connect(analyser);
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       const tick = () => {
         if (!isMicWantedRef.current) return;
         analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i += 1) {
-          sum += dataArray[i];
-        }
-        const avg = sum / dataArray.length;
-        const normalized = Math.min(100, Math.round((avg / 90) * 100));
-        setMicLevel(normalized);
+        const level = acousticTrackerRef.current.sampleFrequencyData(dataArray, ctx.sampleRate);
+        setMicLevel(level);
         audioMeterRafRef.current = window.requestAnimationFrame(tick);
       };
       audioMeterRafRef.current = window.requestAnimationFrame(tick);
     } catch {
-      // SpeechRecognition can still run even if AudioContext meter permission is skipped
+      // SpeechRecognition can still run even if Web Audio meter permission is skipped
     }
   }
 
@@ -765,6 +970,7 @@ export function CapturePanel({
     const recognition = new SpeechCtor();
     recognition.continuous = true;
     recognition.interimResults = true;
+    recognition.maxAlternatives = 3;
     recognition.lang = 'en-US';
 
     recognition.onresult = (event) => {
@@ -773,32 +979,36 @@ export function CapturePanel({
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
-        const transcript = (res[0]?.transcript || '').trim();
-        if (!transcript) continue;
+        // Pick highest-confidence non-empty alternative for fast speech clarity
+        let bestTranscript = (res[0]?.transcript || '').trim();
+        let bestConf = res[0]?.confidence ?? 0;
+        for (let alt = 1; alt < res.length; alt += 1) {
+          const candidate = res[alt];
+          if (candidate?.transcript?.trim() && (candidate.confidence ?? 0) > bestConf) {
+            bestTranscript = candidate.transcript.trim();
+            bestConf = candidate.confidence ?? 0;
+          }
+        }
+        if (!bestTranscript) continue;
+
         if (res.isFinal) {
-          finals.push(transcript);
+          finals.push(bestTranscript);
         } else {
-          liveInterim = liveInterim ? `${liveInterim} ${transcript}` : transcript;
+          liveInterim = liveInterim ? `${liveInterim} ${bestTranscript}` : bestTranscript;
         }
       }
 
       latestInterimRef.current = liveInterim;
       setInterimTranscript(liveInterim);
 
-      if (finals.length > 0) {
-        const {mergedLines} = mergeIncrementalCaption(
-          micLinesRef.current,
-          finals.join('\n'),
-        );
-        micLinesRef.current = mergedLines;
-        setMicLines(mergedLines);
+      for (const finalPhrase of finals) {
+        commitSpeechSegment(finalPhrase);
       }
     };
 
     recognition.onerror = (ev) => {
       const errCode = ev.error || '';
       if (errCode === 'no-speech' || errCode === 'aborted') {
-        // Benign silence on Android Chrome — let onend auto-restart cleanly
         return;
       }
       if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
@@ -812,13 +1022,20 @@ export function CapturePanel({
     };
 
     recognition.onend = () => {
+      // Flush any fast interim words before Android Chrome restarts the speech stream
+      const pendingInterim = latestInterimRef.current.trim();
+      if (pendingInterim && isMicWantedRef.current) {
+        commitSpeechSegment(pendingInterim);
+        latestInterimRef.current = '';
+        setInterimTranscript('');
+      }
+
       if (isMicWantedRef.current) {
-        // Auto-heal Chrome's Android continuous cutoff
         micRestartTimerRef.current = window.setTimeout(() => {
           if (isMicWantedRef.current) {
             spawnRecognitionSession();
           }
-        }, 250);
+        }, 75);
       } else {
         setIsListeningMic(false);
       }
@@ -832,44 +1049,73 @@ export function CapturePanel({
     }
   }
 
-  function handleToggleMic() {
+  async function handleToggleMic() {
     setErrorMessage(null);
     if (isListeningMic) {
-      // Capture any trailing interim words before stopping
       const trailing = latestInterimRef.current.trim();
-      let combinedLines = [...micLinesRef.current];
       if (trailing) {
-        combinedLines = mergeIncrementalCaption(combinedLines, trailing).mergedLines;
+        commitSpeechSegment(trailing);
       }
 
       stopMicCapture();
-      const transcriptText = combinedLines.join('\n').trim();
-      if (!transcriptText) {
+      const capturedTurns = [...micTurnsRef.current];
+      const combinedLines = [...micLinesRef.current];
+      const rawText = combinedLines.join('\n').trim();
+
+      if (!rawText && capturedTurns.length === 0) {
         setStatusMessage(
           'Recording stopped — no speech detected. Tap Start Recording to try again.',
         );
         micLinesRef.current = [];
+        micTurnsRef.current = [];
         setMicLines([]);
         return;
       }
 
-      const defaultTitle =
-        sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
-          ? `${formatConversationTitle()} · ${sourceTitle.trim()}`
-          : formatConversationTitle();
+      setIsPolishingMic(true);
+      setStatusMessage(
+        'Connected AI is polishing fast speech, labeling voices, and detecting topic folder…',
+      );
 
-      setStatusMessage(null);
-      setReviewDraft({
-        kind: 'mic',
-        sourceType: 'mic_transcript',
-        title: defaultTitle,
-        content: transcriptText,
-        folderId: resolveDefaultCaptureFolderId(folders),
-        tagsText: 'voice, conversation',
-        status: 'reviewed',
-        saveMode: transcriptText.length > 2800 ? 'distill' : 'single',
-        extractedAt: new Date().toISOString(),
-      });
+      try {
+        const enhanced = await enhanceSpeechTranscriptWithAi({
+          brainUrl,
+          backupBrainUrl,
+          accessToken,
+          model: brainModel,
+          turns: capturedTurns,
+          rawLines: combinedLines,
+          entries,
+          existingFolders: folders,
+        });
+
+        const baseTitle = formatConversationTitle();
+        const customSuffix =
+          sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
+            ? sourceTitle.trim()
+            : enhanced.suggestedTitle;
+        const finalTitle = customSuffix ? `${baseTitle} · ${customSuffix}` : baseTitle;
+
+        setStatusMessage(null);
+        setReviewDraft({
+          kind: 'mic',
+          sourceType: 'mic_transcript',
+          title: finalTitle,
+          content: enhanced.cleanedTranscript,
+          folderId: onCreateFolder ? AUTO_FOLDER_OPTION : folders[0]?.id || null,
+          autoFolderSuggestion: enhanced.suggestedFolder,
+          autoFolderDescription: enhanced.folderDescription,
+          tagsText: enhanced.tags.join(', '),
+          status: 'reviewed',
+          saveMode: enhanced.cleanedTranscript.length > 2800 ? 'distill' : 'single',
+          extractedAt: new Date().toISOString(),
+          micAiPolished: enhanced.aiEnhanced,
+          micModelUsed: enhanced.modelUsed,
+          micSpeakerCount: enhanced.speakerCount,
+        });
+      } finally {
+        setIsPolishingMic(false);
+      }
       return;
     }
 
@@ -878,33 +1124,37 @@ export function CapturePanel({
       return;
     }
 
+    acousticTrackerRef.current.reset();
     micLinesRef.current = [];
+    micTurnsRef.current = [];
     setMicLines([]);
+    setDetectedSpeakersCount(1);
+    setActiveSpeakerLabel('Speaker 1');
     latestInterimRef.current = '';
     setInterimTranscript('');
 
     isMicWantedRef.current = true;
     setIsListeningMic(true);
     setStatusMessage(
-      'Recording audio — transcript builds live below and opens for review when you tap Stop.',
+      'Recording live audio with multi-voice acoustic detection — tap Stop when done to review.',
     );
     void startWebAudioMeter();
     spawnRecognitionSession();
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-5" onPaste={handlePasteClipboard}>
-      <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mantis-fade-in mx-auto max-w-5xl space-y-5" onPaste={handlePasteClipboard}>
+      <div className="flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold tracking-tight text-slate-100">
+          <h1 className="text-xl font-semibold tracking-tight text-ink">
             Ingest &amp; Review Capture Lab
           </h1>
-          <p className="text-sm text-slate-400">
-            Extract links, run fast OCR on screenshots, or record conversations — always review and edit before saving.
+          <p className="text-sm text-ink-muted">
+            Extract links, run fast OCR on screenshots, or capture multi-voice speech with AI cleanup and Auto-Folder filing.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 font-mono text-xs tabular-nums text-slate-400">
+        <div className="flex flex-wrap items-center gap-3 font-mono text-xs tabular-nums text-ink-muted">
           <span>{framesScanned} OCR scans</span>
           {framesSkipped > 0 && (
             <>
@@ -915,19 +1165,19 @@ export function CapturePanel({
           <span aria-hidden="true">·</span>
           <span>{capturedLines.length} buffer lines</span>
           <span aria-hidden="true">·</span>
-          <span className="text-emerald-400">{notesLearned} saved</span>
+          <span className="text-accent-text">{notesLearned} saved</span>
         </div>
       </div>
 
       {/* Mode Selector */}
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-800 bg-[#0F172A] p-1.5">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-line bg-surface p-1.5">
         <button
           type="button"
           onClick={() => setActiveTab('url_text')}
           className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'url_text'
-              ? 'bg-slate-800 text-slate-100'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-elevated text-ink'
+              : 'text-ink-muted hover:text-ink'
           }`}
         >
           <Globe className="h-4 w-4" />
@@ -939,12 +1189,12 @@ export function CapturePanel({
           onClick={() => setActiveTab('image_mic')}
           className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'image_mic'
-              ? 'bg-slate-800 text-slate-100'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-elevated text-ink'
+              : 'text-ink-muted hover:text-ink'
           }`}
         >
           <Mic className="h-4 w-4" />
-          <span>Mic &amp; Screenshot OCR</span>
+          <span>AI Mic &amp; Screenshot OCR</span>
         </button>
 
         <button
@@ -952,8 +1202,8 @@ export function CapturePanel({
           onClick={() => setActiveTab('screen')}
           className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'screen'
-              ? 'bg-slate-800 text-slate-100'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'bg-elevated text-ink'
+              : 'text-ink-muted hover:text-ink'
           }`}
         >
           <Monitor className="h-4 w-4" />
@@ -962,9 +1212,9 @@ export function CapturePanel({
       </div>
 
       {/* Shared Session Title Prefix */}
-      <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+      <div className="rounded-lg border border-line bg-surface p-4">
         <div className="space-y-1">
-          <label htmlFor="capture-topic" className="block text-xs font-medium text-slate-300">
+          <label htmlFor="capture-topic" className="block text-xs font-medium text-ink-muted">
             Optional Session Label (editable again in Preview before saving)
           </label>
           <input
@@ -972,8 +1222,8 @@ export function CapturePanel({
             type="text"
             value={sourceTitle}
             onChange={(e) => setSourceTitle(e.target.value)}
-            placeholder="e.g. TypeScript Patterns Tutorial"
-            className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+            placeholder="e.g. TypeScript Patterns or Kitchen Definitions"
+            className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3.5 py-2 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
           />
         </div>
       </div>
@@ -983,15 +1233,15 @@ export function CapturePanel({
         <div className="space-y-4">
           <form
             onSubmit={handleExtractUrlSubmit}
-            className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
+            className="space-y-3 rounded-lg border border-line bg-surface p-5"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                <Link2 className="h-4 w-4 text-emerald-400" />
+              <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+                <Link2 className="h-4 w-4 text-accent-text" />
                 <span>Extract &amp; Preview from YouTube or Web Article URL</span>
               </div>
               {!(brainUrl.trim() || backupBrainUrl.trim()) && (
-                <span className="font-mono text-[11px] text-amber-300">
+                <span className="font-mono text-[11px] text-amber-400">
                   Browser readability fallback (add Cloud Backup in Settings for YouTube captions)
                 </span>
               )}
@@ -1007,12 +1257,12 @@ export function CapturePanel({
                 value={targetUrl}
                 onChange={(e) => setTargetUrl(e.target.value)}
                 placeholder="Paste youtube.com/watch?v=... or any documentation URL"
-                className="min-h-[44px] flex-1 rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                className="min-h-[44px] flex-1 rounded-md border border-line-strong bg-inset px-3.5 py-2 font-mono text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
               />
               <button
                 type="submit"
                 disabled={isExtractingUrl}
-                className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+                className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-accent px-5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-60"
               >
                 <Eye className="h-4 w-4" />
                 <span>{isExtractingUrl ? 'Extracting…' : 'Extract & Preview'}</span>
@@ -1020,22 +1270,22 @@ export function CapturePanel({
             </div>
 
             {extractStepText && (
-              <div className="rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 font-mono text-xs text-sky-300">
+              <div className="rounded-md border border-line bg-inset px-3.5 py-2 font-mono text-xs text-accent-text">
                 {extractStepText}
               </div>
             )}
 
             {linkHistory.length > 0 && (
-              <div className="space-y-1.5 border-t border-slate-800 pt-3">
-                <div className="text-[11px] font-medium text-slate-400">Saved Links (Session)</div>
+              <div className="space-y-1.5 border-t border-line pt-3">
+                <div className="text-[11px] font-medium text-ink-muted">Saved Links (Session)</div>
                 <div className="space-y-1">
                   {linkHistory.map((item) => (
                     <div
                       key={item.id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-800 bg-[#0B1120] px-3 py-1.5 text-xs"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded border border-line bg-inset px-3 py-1.5 text-xs"
                     >
-                      <span className="truncate font-medium text-slate-200">{item.title}</span>
-                      <span className="font-mono text-[11px] tabular-nums text-emerald-400">
+                      <span className="truncate font-medium text-ink">{item.title}</span>
+                      <span className="font-mono text-[11px] tabular-nums text-accent-text">
                         {item.kind} · {item.savedCount} saved
                       </span>
                     </div>
@@ -1047,10 +1297,10 @@ export function CapturePanel({
 
           <form
             onSubmit={handleOpenPastedReview}
-            className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
+            className="space-y-3 rounded-lg border border-line bg-surface p-5"
           >
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <FileText className="h-4 w-4 text-sky-400" />
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <FileText className="h-4 w-4 text-accent-text" />
               <span>Paste Article, Docs Page, or Transcript</span>
             </div>
             <textarea
@@ -1058,15 +1308,15 @@ export function CapturePanel({
               value={pastedText}
               onChange={(e) => setPastedText(e.target.value)}
               placeholder="Paste any article, notes, or transcript here — opens an editable preview before saving..."
-              className="w-full rounded-md border border-slate-700 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+              className="w-full rounded-md border border-line-strong bg-inset p-3.5 font-mono text-xs leading-relaxed text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
             <div className="flex justify-end">
               <button
                 type="submit"
                 disabled={!pastedText.trim()}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-50"
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-line-strong bg-elevated px-4 py-2 text-xs font-semibold text-ink hover:opacity-90 disabled:opacity-50"
               >
-                <Eye className="h-4 w-4 text-emerald-400" />
+                <Eye className="h-4 w-4 text-accent-text" />
                 <span>Preview &amp; Save Text</span>
               </button>
             </div>
@@ -1074,29 +1324,39 @@ export function CapturePanel({
         </div>
       )}
 
-      {/* Tab 2: Live Mic & Screenshot OCR */}
+      {/* Tab 2: AI Multi-Voice Live Mic & Screenshot OCR */}
       {activeTab === 'image_mic' && (
         <div className="grid gap-4 sm:grid-cols-2">
-          {/* Mic Record -> Transcribe -> Review -> Save */}
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+          {/* Mic Record -> AI Clean & Multi-Speaker Diarize -> Review -> Auto-Folder Save */}
+          <div className="space-y-3 rounded-lg border border-line bg-surface p-5">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-                <Mic className="h-4 w-4 text-sky-400" />
-                <span>Voice &amp; Conversation Recorder</span>
+              <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+                <Mic className="h-4 w-4 text-accent-text" />
+                <span>AI Multi-Voice Recorder</span>
               </div>
-              <span className="font-mono text-[11px] tabular-nums text-slate-400">
-                {isListeningMic ? `Signal ${micLevel}%` : 'Ready'}
-              </span>
+              <div className="flex items-center gap-2 font-mono text-[11px] tabular-nums text-ink-muted">
+                {isListeningMic && (
+                  <span className="inline-flex items-center gap-1 text-accent-text">
+                    <Users className="h-3 w-3" />
+                    <span>
+                      {detectedSpeakersCount > 1
+                        ? `${detectedSpeakersCount} voices (${activeSpeakerLabel})`
+                        : activeSpeakerLabel}
+                    </span>
+                  </span>
+                )}
+                <span>{isListeningMic ? `· ${micLevel}%` : 'Ready'}</span>
+              </div>
             </div>
 
-            <p className="text-xs leading-relaxed text-slate-400">
-              Tap Start to transcribe live speech. Nothing saves automatically — tapping Stop opens an editable transcript preview.
+            <p className="text-xs leading-relaxed text-ink-muted">
+              Captures rapid speech continuously, separates multiple voices by acoustic timbre &amp; AI turn analysis, and suggests a semantic Auto-Folder when you tap Stop.
             </p>
 
             {/* Real Web Audio 16-bar Level Meter */}
             <div
               aria-label="Microphone audio signal meter"
-              className="flex h-8 items-end gap-1 rounded-md border border-slate-800 bg-[#0B1120] px-2.5 py-1.5"
+              className="flex h-8 items-end gap-1 rounded-md border border-line bg-inset px-2.5 py-1.5"
             >
               {Array.from({length: 16}).map((_, idx) => {
                 const threshold = ((idx + 1) / 16) * 100;
@@ -1105,7 +1365,7 @@ export function CapturePanel({
                   <div
                     key={idx}
                     className={`flex-1 rounded-xs transition-all duration-75 ${
-                      active ? 'bg-emerald-500' : 'bg-slate-800'
+                      active ? 'bg-accent' : 'bg-elevated'
                     }`}
                     style={{height: `${35 + (idx % 4) * 16}%`}}
                   />
@@ -1113,14 +1373,20 @@ export function CapturePanel({
               })}
             </div>
 
-            {(isListeningMic || micLines.length > 0) && (
-              <div className="max-h-36 min-h-[56px] space-y-1 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] px-3 py-2 font-mono text-xs">
+            {(isListeningMic || micLines.length > 0 || isPolishingMic) && (
+              <div className="max-h-40 min-h-[60px] space-y-1 overflow-auto rounded-md border border-line bg-inset px-3 py-2 font-mono text-xs">
                 {micLines.length > 0 && (
-                  <div className="whitespace-pre-wrap text-slate-200">{micLines.join('\n')}</div>
+                  <div className="whitespace-pre-wrap text-ink">{micLines.join('\n')}</div>
                 )}
                 {isListeningMic && (
-                  <div className="text-emerald-300">
+                  <div className="text-accent-text">
                     {interimTranscript || 'Listening for speech…'}
+                  </div>
+                )}
+                {isPolishingMic && (
+                  <div className="flex items-center gap-2 text-accent-text">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Polishing fast speech &amp; labeling speakers…</span>
                   </div>
                 )}
               </div>
@@ -1128,37 +1394,45 @@ export function CapturePanel({
 
             <button
               type="button"
-              disabled={!hasMicApi}
-              onClick={handleToggleMic}
+              disabled={!hasMicApi || isPolishingMic}
+              onClick={() => void handleToggleMic()}
               className={`inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
                 isListeningMic
                   ? 'bg-red-600 hover:bg-red-500'
-                  : 'bg-emerald-600 hover:bg-emerald-500'
+                  : 'bg-accent hover:bg-accent-hover'
               }`}
             >
-              {isListeningMic ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              {isPolishingMic ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : isListeningMic ? (
+                <MicOff className="h-4 w-4" />
+              ) : (
+                <Mic className="h-4 w-4" />
+              )}
               <span>
                 {!hasMicApi
                   ? 'Speech API Unsupported Here'
-                  : isListeningMic
-                    ? 'Stop & Review Transcript'
-                    : 'Start Recording'}
+                  : isPolishingMic
+                    ? 'Polishing Transcript…'
+                    : isListeningMic
+                      ? 'Stop & AI Review Transcript'
+                      : 'Start Recording'}
               </span>
             </button>
           </div>
 
           {/* Screenshot OCR with ROI Crop + Fast Pass -> Preview Modal */}
-          <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
-              <Camera className="h-4 w-4 text-emerald-400" />
+          <div className="space-y-3 rounded-lg border border-line bg-surface p-5">
+            <div className="flex items-center gap-2 text-sm font-semibold text-ink">
+              <Camera className="h-4 w-4 text-accent-text" />
               <span>Screenshot / Image OCR</span>
             </div>
-            <p className="text-xs leading-relaxed text-slate-400">
+            <p className="text-xs leading-relaxed text-ink-muted">
               Runs a fast lower-res OCR pass on your selected crop region, then opens an editable preview with confidence score and High-Res refinement.
             </p>
 
             <div className="space-y-1">
-              <label htmlFor="image-ocr-zone" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="image-ocr-zone" className="block text-xs font-medium text-ink-muted">
                 Crop Focus Region
               </label>
               <select
@@ -1166,7 +1440,7 @@ export function CapturePanel({
                 value={imageOcrZone}
                 disabled={isOcrImageBusy}
                 onChange={(e) => setImageOcrZone(e.target.value as CaptureZone)}
-                className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-60"
               >
                 <option value="full">Full Image</option>
                 <option value="center_article">Center Article / Code Region</option>
@@ -1174,8 +1448,8 @@ export function CapturePanel({
               </select>
             </div>
 
-            <label className="flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-700 bg-[#0B1120] px-4 py-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/60 hover:bg-slate-800/60">
-              <ClipboardPaste className="h-4 w-4 text-emerald-400" />
+            <label className="flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-line-strong bg-inset px-4 py-3 text-xs font-semibold text-ink hover:border-accent-border hover:bg-elevated/60">
+              <ClipboardPaste className="h-4 w-4 text-accent-text" />
               <span>
                 {isOcrImageBusy
                   ? 'Running Fast OCR Pass…'
@@ -1201,19 +1475,19 @@ export function CapturePanel({
 
       {/* Tab 3: Diff-Gated Screen OCR */}
       {activeTab === 'screen' && (
-        <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+        <section className="space-y-4 rounded-lg border border-line bg-surface p-5">
           {!hasDisplayApi && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-950/20 p-4 text-xs leading-relaxed text-amber-200">
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-xs leading-relaxed text-amber-400">
               <strong>Android Browser Notice:</strong> Chrome on Android blocks{' '}
               <code className="font-mono">getDisplayMedia</code>. On your Galaxy Tab A9+, use{' '}
-              <strong>YouTube &amp; Article Links</strong> or <strong>Mic &amp; Screenshot OCR</strong>. On Chromebook,{' '}
+              <strong>YouTube &amp; Article Links</strong> or <strong>AI Mic &amp; Screenshot OCR</strong>. On Chromebook,{' '}
               <strong>Record Screen &amp; Read</strong> works natively.
             </div>
           )}
 
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-1">
-              <label htmlFor="ocr-zone" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="ocr-zone" className="block text-xs font-medium text-ink-muted">
                 OCR Focus Zone
               </label>
               <select
@@ -1221,7 +1495,7 @@ export function CapturePanel({
                 disabled={isRecordingScreen}
                 value={captureZone}
                 onChange={(e) => setCaptureZone(e.target.value as CaptureZone)}
-                className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-60"
               >
                 <option value="bottom_captions">YouTube Captions (Bottom 28%)</option>
                 <option value="center_article">Article Content (Center)</option>
@@ -1230,7 +1504,7 @@ export function CapturePanel({
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="ocr-interval" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="ocr-interval" className="block text-xs font-medium text-ink-muted">
                 Scan Speed
               </label>
               <select
@@ -1238,7 +1512,7 @@ export function CapturePanel({
                 disabled={isRecordingScreen}
                 value={scanIntervalMs}
                 onChange={(e) => setScanIntervalMs(Number(e.target.value))}
-                className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-60"
               >
                 <option value={1500}>Fast (1.5s)</option>
                 <option value={2000}>Balanced (2.0s)</option>
@@ -1261,7 +1535,7 @@ export function CapturePanel({
                   type="button"
                   disabled={!hasDisplayApi}
                   onClick={() => void handleStartScreenCapture()}
-                  className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+                  className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                 >
                   <Play className="h-4 w-4" />
                   <span>Record Screen &amp; Read</span>
@@ -1271,7 +1545,7 @@ export function CapturePanel({
           </div>
 
           <div className="grid gap-3 md:grid-cols-2">
-            <div className="overflow-hidden rounded-md border border-slate-800 bg-[#0B1120]">
+            <div className="overflow-hidden rounded-md border border-line bg-inset">
               <video
                 ref={videoRef}
                 muted
@@ -1279,7 +1553,7 @@ export function CapturePanel({
                 className={`w-full object-contain ${isRecordingScreen ? 'max-h-52' : 'hidden'}`}
               />
               {!isRecordingScreen && (
-                <div className="p-6 text-center text-xs text-slate-400">
+                <div className="p-6 text-center text-xs text-ink-muted">
                   Start recording a browser tab on Chromebook; static frames are skipped automatically
                   and lines wait in the review buffer until you confirm.
                 </div>
@@ -1287,14 +1561,14 @@ export function CapturePanel({
             </div>
 
             {cropPreviewUrl && isRecordingScreen && (
-              <div className="space-y-1.5 rounded-md border border-slate-800 bg-[#0B1120] p-2.5">
-                <div className="font-mono text-[11px] text-slate-400">
+              <div className="space-y-1.5 rounded-md border border-line bg-inset p-2.5">
+                <div className="font-mono text-[11px] text-ink-muted">
                   OCR Crop Target ({captureZone})
                 </div>
                 <img
                   src={cropPreviewUrl}
                   alt="Cropped OCR preview"
-                  className="max-h-40 w-full rounded border border-slate-800 object-contain"
+                  className="max-h-40 w-full rounded border border-line object-contain"
                 />
               </div>
             )}
@@ -1306,7 +1580,7 @@ export function CapturePanel({
       {errorMessage && (
         <div
           role="alert"
-          className="rounded-md border border-red-500/40 bg-red-950/30 px-4 py-3 text-xs text-red-200"
+          className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-400"
         >
           {errorMessage}
         </div>
@@ -1315,17 +1589,17 @@ export function CapturePanel({
       {statusMessage && (
         <div
           role="status"
-          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-500/40 bg-emerald-950/30 px-4 py-3 text-xs text-emerald-200"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent-border bg-accent-soft px-4 py-3 text-xs text-ink"
         >
           <span className="flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-accent-text" />
             <span>{statusMessage}</span>
           </span>
           {notesLearned > 0 && (
             <button
               type="button"
               onClick={onOpenKnowledge}
-              className="font-semibold text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
+              className="font-semibold text-accent-text underline underline-offset-2 hover:opacity-90"
             >
               View Saved Knowledge
             </button>
@@ -1334,14 +1608,14 @@ export function CapturePanel({
       )}
 
       {/* Screen Capture Review Buffer */}
-      <section className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
+      <section className="space-y-3 rounded-lg border border-line bg-surface p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 font-mono text-xs text-slate-300">
-            <span className="font-semibold text-slate-100">Screen Capture Review Buffer</span>
+          <div className="flex items-center gap-2 font-mono text-xs text-ink-muted">
+            <span className="font-semibold text-ink">Screen Capture Review Buffer</span>
             {lastConfidence !== null && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="tabular-nums text-slate-400">Last OCR conf: {lastConfidence}%</span>
+                <span className="tabular-nums">Last OCR conf: {lastConfidence}%</span>
               </>
             )}
           </div>
@@ -1351,7 +1625,7 @@ export function CapturePanel({
               type="button"
               disabled={capturedLines.length === 0}
               onClick={handleOpenBufferReview}
-              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md bg-accent px-3.5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
             >
               <Eye className="h-3.5 w-3.5" />
               <span>Review &amp; Save Buffer</span>
@@ -1363,7 +1637,7 @@ export function CapturePanel({
                 setCapturedLines([]);
                 linesRef.current = [];
               }}
-              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-2 text-xs text-ink-muted hover:bg-elevated disabled:opacity-40"
             >
               <Trash2 className="h-3.5 w-3.5" />
               <span>Clear</span>
@@ -1371,7 +1645,7 @@ export function CapturePanel({
           </div>
         </div>
 
-        <pre className="max-h-56 min-h-[96px] overflow-auto whitespace-pre-wrap rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
+        <pre className="max-h-56 min-h-[96px] overflow-auto whitespace-pre-wrap rounded-md border border-line bg-inset p-3.5 font-mono text-xs leading-relaxed text-ink">
           {capturedLines.length > 0
             ? capturedLines.join('\n')
             : 'Live Screen OCR lines collect here for review before saving.'}
@@ -1384,9 +1658,11 @@ export function CapturePanel({
         folders={folders}
         isSaving={isSavingReview}
         isRefiningOcr={isRefiningOcr}
+        isCategorizingFolder={isCategorizingFolder}
         errorMessage={reviewError}
         onChangeDraft={(updater) => setReviewDraft((prev) => (prev ? updater(prev) : null))}
         onRefineOcrHighRes={handleRefineOcrHighRes}
+        onAutoCategorizeFolder={handleAutoCategorizeReviewFolder}
         onConfirmSave={handleConfirmReviewSave}
         onDiscard={handleDiscardReview}
       />
