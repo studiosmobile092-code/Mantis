@@ -126,6 +126,46 @@ function trigramSimilarity(a: Set<string>, b: Set<string>): number {
   return shared / Math.max(1, Math.min(a.size, b.size));
 }
 
+function splitSearchTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9_.\-/+#]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0),
+  );
+}
+
+/**
+ * Prevents 2-3 letter technical tokens ("ai", "ui", "db", "ts") from falsely matching
+ * inside unrelated English words ("maintain", "build", "components").
+ */
+export function matchTokenStrength(
+  textLower: string,
+  tokenSet: Set<string>,
+  token: string,
+): 'exact' | 'substring' | 'none' {
+  if (tokenSet.has(token)) return 'exact';
+  if (token.length <= 3) {
+    // Also match compound code identifiers like "aiBrain" or "ui_panel" via delimiter boundaries
+    for (const word of tokenSet) {
+      if (word === token) return 'exact';
+      if (
+        (word.startsWith(`${token}.`) ||
+          word.startsWith(`${token}/`) ||
+          word.startsWith(`${token}_`) ||
+          word.endsWith(`/${token}`) ||
+          word.endsWith(`.${token}`)) &&
+        word.length > token.length
+      ) {
+        return 'exact';
+      }
+    }
+    return 'none';
+  }
+  return textLower.includes(token) ? 'substring' : 'none';
+}
+
 export function retrieveRelevantKnowledge(
   query: string,
   entries: KnowledgeEntry[],
@@ -157,6 +197,11 @@ export function retrieveRelevantKnowledge(
     const folderLower = folderName.toLowerCase();
     const tagsLower = entry.tags.map((t) => t.toLowerCase());
 
+    const titleTokenSet = splitSearchTokens(titleLower);
+    const contentTokenSet = splitSearchTokens(contentLower);
+    const folderTokenSet = splitSearchTokens(folderLower);
+    const tagTokenSet = splitSearchTokens(tagsLower.join(' '));
+
     let score = 0;
     const reasons: string[] = [];
 
@@ -173,25 +218,43 @@ export function retrieveRelevantKnowledge(
     const matchedContentTokens: string[] = [];
 
     for (const token of tokens) {
-      if (titleLower.includes(token)) {
-        score += 3;
+      const titleHit = matchTokenStrength(titleLower, titleTokenSet, token);
+      if (titleHit === 'exact') {
+        score += 3.2;
+        matchedTitleTokens.push(token);
+      } else if (titleHit === 'substring') {
+        score += 1.6;
         matchedTitleTokens.push(token);
       }
-      if (tagsLower.some((tag) => tag.includes(token))) {
-        score += 3;
+
+      const tagHit = matchTokenStrength(tagsLower.join(' '), tagTokenSet, token);
+      if (tagHit === 'exact') {
+        score += 3.0;
+        matchedTagTokens.push(token);
+      } else if (tagHit === 'substring') {
+        score += 1.5;
         matchedTagTokens.push(token);
       }
-      if (folderLower.includes(token)) {
-        score += 2;
+
+      const folderHit = matchTokenStrength(folderLower, folderTokenSet, token);
+      if (folderHit === 'exact') {
+        score += 2.0;
+      } else if (folderHit === 'substring') {
+        score += 1.0;
       }
-      if (contentLower.includes(token)) {
-        score += 1.5;
+
+      const bodyHit = matchTokenStrength(contentLower, contentTokenSet, token);
+      if (bodyHit === 'exact') {
+        score += 1.6;
+        matchedContentTokens.push(token);
+      } else if (bodyHit === 'substring') {
+        score += 0.65;
         matchedContentTokens.push(token);
       }
     }
 
     // Fuzzy trigram similarity fallback so partial or slightly misspelled terms match
-    if (tokens.length > 0 && score < 3) {
+    if (tokens.length > 0 && score < 3 && normalizedQuery.length >= 4) {
       const sim = trigramSimilarity(queryGrams, buildTrigrams(`${titleLower} ${tagsLower.join(' ')}`));
       if (sim >= 0.42) {
         score += sim * 4;
@@ -251,6 +314,8 @@ export function retrieveRelevantRepoFiles(
   for (const file of repoFiles) {
     const pathLower = file.path.toLowerCase();
     const contentLower = file.content.toLowerCase();
+    const pathTokenSet = splitSearchTokens(pathLower.replace(/[/.]/g, ' '));
+    const contentTokenSet = splitSearchTokens(contentLower.slice(0, 14000));
     let score = 0;
     const reasons: string[] = [];
 
@@ -263,12 +328,21 @@ export function retrieveRelevantRepoFiles(
     const matchedCodeTokens: string[] = [];
 
     for (const token of tokens) {
-      if (pathLower.includes(token)) {
-        score += 3.5;
+      const pathHit = matchTokenStrength(pathLower, pathTokenSet, token);
+      if (pathHit === 'exact') {
+        score += 3.8;
+        matchedPathTokens.push(token);
+      } else if (pathHit === 'substring') {
+        score += 2.0;
         matchedPathTokens.push(token);
       }
-      if (contentLower.includes(token)) {
-        score += 1.5;
+
+      const codeHit = matchTokenStrength(contentLower, contentTokenSet, token);
+      if (codeHit === 'exact') {
+        score += 1.6;
+        matchedCodeTokens.push(token);
+      } else if (codeHit === 'substring') {
+        score += 0.65;
         matchedCodeTokens.push(token);
       }
     }
@@ -292,9 +366,11 @@ export function retrieveRelevantRepoFiles(
 function extractMatchingSnippet(content: string, tokens: string[]): string {
   const lines = content.split('\n');
   if (tokens.length > 0) {
-    const idx = lines.findIndex((line) =>
-      tokens.some((tok) => line.toLowerCase().includes(tok)),
-    );
+    const idx = lines.findIndex((line) => {
+      const lower = line.toLowerCase();
+      const lineSet = splitSearchTokens(lower);
+      return tokens.some((tok) => matchTokenStrength(lower, lineSet, tok) !== 'none');
+    });
     if (idx !== -1) {
       const start = Math.max(0, idx - 2);
       const end = Math.min(lines.length, idx + 6);

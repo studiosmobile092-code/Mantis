@@ -18,6 +18,7 @@ import {
   Terminal,
   ThumbsUp,
   Trash2,
+  Wrench,
 } from 'lucide-react';
 import {type FormEvent, memo, useEffect, useMemo, useRef, useState} from 'react';
 import type {
@@ -34,6 +35,24 @@ import {AssassinBriefCard} from './AssassinBriefCard';
 import {ConceptGraphCanvas} from './ConceptGraphCanvas';
 
 export type StudioComposerMode = 'scratch' | 'cloud' | 'distill' | 'assassin';
+
+const SLASH_COMMANDS: Array<{cmd: string; template: string; desc: string}> = [
+  {cmd: '/search', template: '/search ', desc: 'Search Hybrid BM25 + Int8 Knowledge memory'},
+  {cmd: '/repo', template: '/repo ', desc: 'Search synced GitHub repository files'},
+  {cmd: '/teach', template: '/teach Title :: ', desc: 'Save a Trusted rule with auto-folder classification'},
+  {cmd: '/execute', template: '/execute ', desc: 'Smart-Assassin parallel prep + safety gate'},
+  {cmd: '/suggest', template: '/suggest ', desc: 'Propose an approval-gated diff for a file'},
+  {cmd: '/self-audit', template: '/self-audit', desc: 'Scan Mantis codebase for safety & health'},
+];
+
+function isLowConfidenceReply(content: string): boolean {
+  return (
+    content.includes('[Low Confidence') ||
+    content.includes('found no high-confidence stored skill') ||
+    content.includes('found no stored skill or knowledge entry') ||
+    content.includes('[Scratch Fallback')
+  );
+}
 
 interface ChatWorkspaceProps {
   messages: ChatMessage[];
@@ -63,6 +82,7 @@ interface ChatWorkspaceProps {
   ) => Promise<void>;
   onEscalateMessageToCloud: (msgId: string) => Promise<void>;
   onDistillMessageWithTeacher: (msgId: string) => Promise<void>;
+  onTeachScratchFix?: (userPrompt: string, correctedAnswer: string) => Promise<boolean>;
   onSendToArena: (prompt: string) => void;
   onClearChat: () => Promise<void>;
   onInspectEntry: (entryId: string) => void;
@@ -214,6 +234,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   onSendMessage,
   onEscalateMessageToCloud,
   onDistillMessageWithTeacher,
+  onTeachScratchFix,
   onSendToArena,
   onClearChat,
   onInspectEntry,
@@ -238,8 +259,19 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [savingMsgId, setSavingMsgId] = useState<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
 
+  // Low-confidence inline feedback/fix state
+  const [fixingMsgId, setFixingMsgId] = useState<string | null>(null);
+  const [fixDraft, setFixDraft] = useState('');
+  const [isSavingFix, setIsSavingFix] = useState(false);
+  const [fixedMsgIds, setFixedMsgIds] = useState<Record<string, boolean>>({});
+
+  // Slash command palette state
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [forceSlashMenu, setForceSlashMenu] = useState(false);
+
   const streamRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const hasCloudRoute = routeStatus.activeKind !== 'built-in-only';
 
@@ -257,6 +289,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     if (composerPrefill) {
       setInput(composerPrefill);
       onConsumeComposerPrefill?.();
+      window.setTimeout(() => textareaRef.current?.focus(), 20);
     }
   }, [composerPrefill, onConsumeComposerPrefill]);
 
@@ -264,6 +297,34 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     () => new Map<string, KnowledgeEntry>(entries.map((e) => [e.id, e])),
     [entries],
   );
+
+  const messageIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    messages.forEach((m, i) => map.set(m.id, i));
+    return map;
+  }, [messages]);
+
+  const lastUserPrompt = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].content;
+    }
+    return '';
+  }, [messages]);
+
+  const matchingSlashCommands = useMemo(() => {
+    const trimmedStart = input.trimStart();
+    if (!forceSlashMenu && (!trimmedStart.startsWith('/') || trimmedStart.includes(' ') || trimmedStart.includes('\n'))) {
+      return [];
+    }
+    const prefix = trimmedStart.toLowerCase();
+    return SLASH_COMMANDS.filter((item) =>
+      forceSlashMenu && !prefix.startsWith('/') ? true : item.cmd.startsWith(prefix),
+    );
+  }, [input, forceSlashMenu]);
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [matchingSlashCommands.length]);
 
   const windowedMessages = useMemo(() => {
     if (messages.length <= visibleCount) return messages;
@@ -529,16 +590,26 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                       </div>
                     )}
 
-                    {windowedMessages.map((msg, idx) => {
+                    {windowedMessages.map((msg) => {
                       const isUser = msg.role === 'user';
                       const citedEntries = (msg.cited_entry_ids || [])
                         .map((id) => entryMap.get(id))
                         .filter((e): e is KnowledgeEntry => Boolean(e));
                       const citedRepoPaths = msg.cited_repo_paths || [];
-                      const prevUserMsg =
-                        idx > 0 && windowedMessages[idx - 1]?.role === 'user'
-                          ? windowedMessages[idx - 1]
-                          : null;
+
+                      // Resolve nearest preceding user prompt across full message stream (works across pagination windows & stacked replies)
+                      let prevUserMsg: ChatMessage | null = null;
+                      if (!isUser) {
+                        const fullIdx = messageIndexById.get(msg.id) ?? -1;
+                        for (let back = fullIdx - 1; back >= 0; back -= 1) {
+                          if (messages[back]?.role === 'user') {
+                            prevUserMsg = messages[back];
+                            break;
+                          }
+                        }
+                      }
+
+                      const isLowConf = !isUser && isLowConfidenceReply(msg.content);
                       const isEscalating = escalatingMsgId === msg.id;
                       const isDistilling = distillingMsgId === msg.id;
                       const storedFolder = savedMsgFolders[msg.id];
@@ -553,7 +624,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                         >
                           {/* Subtle Author + Timestamp Row */}
                           <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 font-mono text-[11px] text-ink-muted">
+                            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-ink-muted">
                               <span
                                 className={
                                   isUser
@@ -570,6 +641,22 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   minute: '2-digit',
                                 })}
                               </span>
+                              {isLowConf && !fixedMsgIds[msg.id] && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="rounded border border-warn-border bg-warn-soft px-1.5 py-0.5 text-[10px] font-semibold text-warn">
+                                    Low Confidence · Teach Needed
+                                  </span>
+                                </>
+                              )}
+                              {fixedMsgIds[msg.id] && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="rounded border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent-text">
+                                    Skill Taught ✓
+                                  </span>
+                                </>
+                              )}
                             </div>
 
                             {isUser && !msg.content.startsWith('/teach') && (
@@ -630,10 +717,37 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     type="button"
                                     disabled={isDistilling || isSending}
                                     onClick={() => void onDistillMessageWithTeacher(msg.id)}
-                                    className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-surface px-2.5 text-[11px] font-medium text-ink-muted hover:border-line-strong hover:text-ink disabled:opacity-50"
+                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded border px-2.5 text-[11px] font-medium disabled:opacity-50 ${
+                                      isLowConf
+                                        ? 'border-warn-border bg-warn-soft text-warn hover:bg-surface'
+                                        : 'border-line bg-surface text-ink-muted hover:border-line-strong hover:text-ink'
+                                    }`}
                                   >
                                     <GraduationCap className="h-3 w-3 text-accent-text" />
                                     <span>{isDistilling ? 'Teaching…' : 'Teach Scratch'}</span>
+                                  </button>
+                                )}
+
+                                {prevUserMsg && onTeachScratchFix && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (fixingMsgId === msg.id) {
+                                        setFixingMsgId(null);
+                                        setFixDraft('');
+                                      } else {
+                                        setFixingMsgId(msg.id);
+                                        setFixDraft('');
+                                      }
+                                    }}
+                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium ${
+                                      fixingMsgId === msg.id
+                                        ? 'border border-accent-border bg-accent-soft text-accent-text'
+                                        : 'text-ink-subtle hover:text-ink'
+                                    }`}
+                                  >
+                                    <Wrench className="h-3 w-3" />
+                                    <span>{fixingMsgId === msg.id ? 'Cancel Fix' : 'Fix Answer'}</span>
                                   </button>
                                 )}
 
@@ -709,6 +823,60 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                           {/* Editorial Prose Body */}
                           <RichMessageContent content={msg.content} />
 
+                          {/* Inline Confidence Feedback / Direct Skill Correction Drawer */}
+                          {!isUser && prevUserMsg && onTeachScratchFix && fixingMsgId === msg.id && (
+                            <div className="mt-3 space-y-2 rounded-lg border border-accent-border bg-inset p-3">
+                              <div className="text-[11px] font-medium text-ink-muted">
+                                Teach Scratch AI the right answer for:{' '}
+                                <span className="font-mono text-ink">&quot;{prevUserMsg.content}&quot;</span>
+                              </div>
+                              <textarea
+                                rows={2}
+                                value={fixDraft}
+                                onChange={(e) => setFixDraft(e.target.value)}
+                                placeholder="Enter the preferred rule or answer to save as a Trusted note + permanent Scratch Skill…"
+                                className="w-full rounded-md border border-line-strong bg-surface px-3 py-2 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                              />
+                              <div className="flex flex-wrap items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setFixingMsgId(null);
+                                    setFixDraft('');
+                                  }}
+                                  className="min-h-[40px] rounded border border-line px-3 text-xs text-ink-muted hover:text-ink"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isSavingFix || !fixDraft.trim()}
+                                  onClick={async () => {
+                                    if (!prevUserMsg || !fixDraft.trim()) return;
+                                    setIsSavingFix(true);
+                                    try {
+                                      const ok = await onTeachScratchFix(
+                                        prevUserMsg.content,
+                                        fixDraft.trim(),
+                                      );
+                                      if (ok) {
+                                        setFixedMsgIds((prev) => ({...prev, [msg.id]: true}));
+                                        setFixingMsgId(null);
+                                        setFixDraft('');
+                                      }
+                                    } finally {
+                                      setIsSavingFix(false);
+                                    }
+                                  }}
+                                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-3.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+                                >
+                                  <Check className="h-3.5 w-3.5" />
+                                  <span>{isSavingFix ? 'Training…' : 'Save Skill & Trusted Rule'}</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
                           {/* Compact Inline Citations */}
                           {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
                             <footer className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
@@ -760,32 +928,109 @@ export const ChatWorkspace = memo(function ChatWorkspace({
             )}
           </div>
 
-          {/* Grok-Style Clean Anchored Omnibar Composer */}
+          {/* Grok-Style Clean Anchored Omnibar Composer + Slash Autocomplete */}
           <form
             onSubmit={handleSubmit}
             className="mx-auto w-full max-w-[82ch] rounded-xl border border-line-strong bg-surface p-3 shadow-sm"
           >
+            {matchingSlashCommands.length > 0 && (
+              <div className="mb-2 space-y-1 rounded-lg border border-line bg-inset p-1.5">
+                {matchingSlashCommands.map((item, idx) => (
+                  <button
+                    key={item.cmd}
+                    type="button"
+                    onClick={() => {
+                      setInput(item.template);
+                      setForceSlashMenu(false);
+                      if (item.cmd === '/execute') setComposerMode('assassin');
+                      textareaRef.current?.focus();
+                    }}
+                    className={`flex min-h-[40px] w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors ${
+                      idx === slashIndex
+                        ? 'bg-accent-soft text-accent-text'
+                        : 'text-ink-muted hover:bg-elevated hover:text-ink'
+                    }`}
+                  >
+                    <span className="font-mono font-semibold text-ink">{item.cmd}</span>
+                    <span className="truncate text-[11px] text-ink-muted">{item.desc}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
             <textarea
+              ref={textareaRef}
               rows={2}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                if (forceSlashMenu && e.target.value.includes(' ')) {
+                  setForceSlashMenu(false);
+                }
+              }}
               onKeyDown={(e) => {
+                if (matchingSlashCommands.length > 0) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setSlashIndex((i) => (i + 1) % matchingSlashCommands.length);
+                    return;
+                  }
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setSlashIndex((i) =>
+                      (i - 1 + matchingSlashCommands.length) % matchingSlashCommands.length,
+                    );
+                    return;
+                  }
+                  if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const picked = matchingSlashCommands[slashIndex] || matchingSlashCommands[0];
+                    if (picked) {
+                      setInput(picked.template);
+                      setForceSlashMenu(false);
+                      if (picked.cmd === '/execute') setComposerMode('assassin');
+                    }
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    setForceSlashMenu(false);
+                    return;
+                  }
+                } else if (e.key === 'ArrowUp' && !input.trim() && lastUserPrompt) {
+                  e.preventDefault();
+                  setInput(lastUserPrompt);
+                  return;
+                }
+
                 if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
+                  setForceSlashMenu(false);
                   void submitPrompt();
                 }
               }}
               placeholder={
                 composerMode === 'assassin'
                   ? 'Describe a code goal for Smart-Assassin parallel prep (/execute automatically applied)…'
-                  : 'Ask Scratch AI, teach with Remember:, or run /execute, /suggest, /self-audit…'
+                  : 'Ask Scratch AI, type / for commands, Remember: to teach, or ↑ for last prompt…'
               }
               className="min-h-[48px] w-full resize-none bg-transparent px-1.5 py-1 text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
             />
 
             <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2.5">
-              {/* Inline Mode Selector */}
+              {/* Inline Mode Selector + Slash Trigger */}
               <div className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setForceSlashMenu((prev) => !prev)}
+                  aria-label="Toggle slash command helper"
+                  className={`inline-flex min-h-[40px] shrink-0 items-center gap-1 rounded-md border px-2.5 font-mono text-[11px] font-semibold transition-colors ${
+                    forceSlashMenu || matchingSlashCommands.length > 0
+                      ? 'border-accent-border bg-accent-soft text-accent-text'
+                      : 'border-line bg-inset text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  /
+                </button>
                 {(
                   [
                     {id: 'scratch', label: 'Scratch Leads'},

@@ -2,12 +2,13 @@ import type {
   BrainRouteKind,
   BrainRouteStatus,
   ChatMessage,
+  CurriculumDrillPacket,
   KnowledgeEntry,
   KnowledgeFolder,
   RepoFile,
 } from '../types/mantis';
 import {inferFolderDeterministically, normalizeFolderName} from './autoFolders';
-import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles} from './memory';
+import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
 import {
   extractSpeakerLabels,
   formatTranscriptLocally,
@@ -1856,4 +1857,146 @@ export async function runArenaDuelWithBrain(params: {
     };
   }
 }
+
+/**
+ * Generates a structured 3-turn Teacher-Student curriculum drill packet for a Knowledge topic
+ * or skill gap, minting triggers, response variants, SFT turns, and an Eval test case.
+ */
+export async function generateCurriculumDrillWithTeacher(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  topicTitle: string;
+  folderName: string;
+  sourceContent?: string;
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+}): Promise<CurriculumDrillPacket> {
+  const cleanTopic = params.topicTitle.trim();
+  const baseKeywords = tokenizeQuery(`${cleanTopic} ${params.sourceContent || ''}`).slice(0, 4);
+  const fallbackSummary = params.sourceContent?.trim()
+    ? params.sourceContent.trim().slice(0, 420)
+    : `Apply our verified workspace rule for ${cleanTopic}.`;
+
+  const deterministicFallback: CurriculumDrillPacket = {
+    topicTitle: cleanTopic,
+    folderName: params.folderName || 'Patterns',
+    triggers: Array.from(
+      new Set([
+        cleanTopic.toLowerCase(),
+        `how do we handle ${cleanTopic.toLowerCase()}`,
+        ...baseKeywords.slice(0, 3),
+      ]),
+    ).slice(0, 5),
+    responseVariants: [
+      fallbackSummary,
+      `${cleanTopic}: ${fallbackSummary}`,
+    ],
+    turns: [
+      {
+        userPrompt: `What is our standard rule for ${cleanTopic}?`,
+        idealResponse: fallbackSummary,
+        takeaway: `Direct recall on ${cleanTopic}`,
+      },
+      {
+        userPrompt: `When writing or reviewing code involving ${baseKeywords[0] || cleanTopic}, what should Mantis enforce?`,
+        idealResponse: fallbackSummary,
+        takeaway: 'Practical enforcement cue',
+      },
+      {
+        userPrompt: `Summarize ${cleanTopic} in one concise verification checklist.`,
+        idealResponse: `- Verify: ${fallbackSummary.slice(0, 220)}`,
+        takeaway: 'Checklist compression',
+      },
+    ],
+    evalPrompt: `What should Mantis follow for ${cleanTopic}?`,
+    evalRequiredTerms: baseKeywords.slice(0, 2),
+    modelUsed: 'built-in-curriculum-drill',
+    usedTeacher: false,
+  };
+
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  if (candidates.length === 0) {
+    return deterministicFallback;
+  }
+
+  const relevant = retrieveRelevantKnowledge(cleanTopic, params.entries, params.folders, 3);
+  const drillPrompt = [
+    'You are training Mantis Scratch AI via a structured 3-turn Teacher-Student Curriculum Drill.',
+    'Generate strict valid JSON ONLY (no markdown fences) for this topic:',
+    `Topic: ${cleanTopic}`,
+    `Folder: ${params.folderName}`,
+    params.sourceContent ? `Source Knowledge:\n${params.sourceContent.slice(0, 1200)}` : '',
+    '',
+    'JSON Schema:',
+    '{"triggers":["3-5 lowercase phrases/keywords"],"responseVariants":["2-3 crisp offline answers"],"turns":[{"userPrompt":"Turn 1 question","idealResponse":"Crisp grounded answer","takeaway":"short skill takeaway"},{"userPrompt":"Turn 2 scenario/code question","idealResponse":"...","takeaway":"..."},{"userPrompt":"Turn 3 edge-case check","idealResponse":"...","takeaway":"..."}],"evalPrompt":"Single verification prompt","evalRequiredTerms":["1-2 key terms required in answer"]}',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  try {
+    const res = await runLightweightAiJsonPrompt({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt: drillPrompt,
+      knowledgeContext: relevant.map((m) => ({
+        title: m.entry.title,
+        folder: m.folderName,
+        content: m.entry.content.slice(0, 350),
+      })),
+      timeoutMs: 12000,
+    });
+
+    const parsed = parseJsonObjectFromAiReply<{
+      triggers?: string[];
+      responseVariants?: string[];
+      turns?: Array<{userPrompt?: string; idealResponse?: string; takeaway?: string}>;
+      evalPrompt?: string;
+      evalRequiredTerms?: string[];
+    }>(res.text);
+
+    if (parsed && Array.isArray(parsed.turns) && parsed.turns.length > 0) {
+      const validTurns = parsed.turns
+        .filter((t) => t.userPrompt?.trim() && t.idealResponse?.trim())
+        .slice(0, 4)
+        .map((t) => ({
+          userPrompt: t.userPrompt!.trim(),
+          idealResponse: t.idealResponse!.trim(),
+          takeaway: (t.takeaway || 'Teacher drill').trim(),
+        }));
+
+      if (validTurns.length > 0) {
+        const triggers = Array.isArray(parsed.triggers) && parsed.triggers.length > 0
+          ? parsed.triggers.map((t) => String(t).trim().toLowerCase()).filter(Boolean).slice(0, 6)
+          : deterministicFallback.triggers;
+        const responseVariants =
+          Array.isArray(parsed.responseVariants) && parsed.responseVariants.length > 0
+            ? parsed.responseVariants.map((r) => String(r).trim()).filter(Boolean).slice(0, 4)
+            : validTurns.map((t) => t.idealResponse).slice(0, 3);
+
+        return {
+          topicTitle: cleanTopic,
+          folderName: params.folderName || 'Patterns',
+          triggers,
+          responseVariants,
+          turns: validTurns,
+          evalPrompt: (parsed.evalPrompt || validTurns[0].userPrompt).trim(),
+          evalRequiredTerms: Array.isArray(parsed.evalRequiredTerms)
+            ? parsed.evalRequiredTerms.map((k) => String(k).trim()).filter(Boolean).slice(0, 4)
+            : deterministicFallback.evalRequiredTerms,
+          modelUsed: res.modelUsed,
+          usedTeacher: true,
+        };
+      }
+    }
+  } catch {
+    // Graceful fallback to deterministic curriculum packet
+  }
+
+  return deterministicFallback;
+}
+
 

@@ -43,6 +43,8 @@ export type WorkerRequest =
       payload: {
         candidateTitle: string;
         candidateContent: string;
+        newEntryId?: string;
+        excludeEntryId?: string;
         entries: KnowledgeEntry[];
         folders: KnowledgeFolder[];
       };
@@ -74,6 +76,7 @@ export type WorkerResponse =
       ok: true;
       type: 'HYBRID_SEARCH';
       matches: RetrievalMatch[];
+      candidatePool?: RetrievalMatch[];
       newVectors: QuantizedVectorRecord[];
       matrixBuffer?: Float32Array;
       usedEntryIds: string[];
@@ -109,13 +112,23 @@ export function runHybridSearchCore(payload: {
   cachedVectors: Map<string, QuantizedVectorRecord>;
   limit: number;
   includeRaw: boolean;
+  includeMatrixForGpu?: boolean;
 }): {
   matches: RetrievalMatch[];
+  candidatePool: RetrievalMatch[];
   newVectors: QuantizedVectorRecord[];
   matrixBuffer: Float32Array;
   usedEntryIds: string[];
 } {
-  const {query, entries, folders, cachedVectors, limit, includeRaw} = payload;
+  const {
+    query,
+    entries,
+    folders,
+    cachedVectors,
+    limit,
+    includeRaw,
+    includeMatrixForGpu = false,
+  } = payload;
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
   const queryClean = query.trim().toLowerCase();
   const tokens = tokenizeQuery(query);
@@ -127,7 +140,13 @@ export function runHybridSearchCore(payload: {
   });
 
   if (!queryClean || activeEntries.length === 0) {
-    return {matches: [], newVectors: [], matrixBuffer: new Float32Array(0), usedEntryIds: []};
+    return {
+      matches: [],
+      candidatePool: [],
+      newVectors: [],
+      matrixBuffer: new Float32Array(0),
+      usedEntryIds: [],
+    };
   }
 
   // Document frequency map for genuine BM25 IDF weighting
@@ -156,7 +175,10 @@ export function runHybridSearchCore(payload: {
     reasons: string[];
   }> = [];
 
-  const matrixBuffer = new Float32Array(activeEntries.length * EMBEDDING_DIMS);
+  const shouldBuildMatrix = includeMatrixForGpu && activeEntries.length >= 64;
+  const matrixBuffer = shouldBuildMatrix
+    ? new Float32Array(activeEntries.length * EMBEDDING_DIMS)
+    : new Float32Array(0);
   const usedEntryIds: string[] = [];
 
   const k1 = 1.4;
@@ -183,8 +205,10 @@ export function runHybridSearchCore(payload: {
     }
 
     const deq = dequantizeInt8(vecRecord.int8, vecRecord.scale);
-    matrixBuffer.set(deq, i * EMBEDDING_DIMS);
-    usedEntryIds.push(entry.id);
+    if (shouldBuildMatrix) {
+      matrixBuffer.set(deq, i * EMBEDDING_DIMS);
+      usedEntryIds.push(entry.id);
+    }
 
     const vectorCosine = cosineQueryVsInt8(queryVec, vecRecord.int8, vecRecord.scale);
 
@@ -292,61 +316,146 @@ export function runHybridSearchCore(payload: {
     selected.push(pool.splice(bestIdx, 1)[0]);
   }
 
+  const toMatch = (s: (typeof fused)[number]): RetrievalMatch => ({
+    entry: s.entry,
+    folderName: s.folderName,
+    score: Math.round(s.finalScore * 100) / 100,
+    reasons: s.reasons.slice(0, 3),
+    bm25Score: Math.round(s.bm25 * 100) / 100,
+    vectorScore: Math.round(s.vectorCosine * 100) / 100,
+    rrfScore: Math.round(s.rrfScore * 100) / 100,
+  });
+
   return {
-    matches: selected.map((s) => ({
-      entry: s.entry,
-      folderName: s.folderName,
-      score: Math.round(s.finalScore * 100) / 100,
-      reasons: s.reasons.slice(0, 3),
-      bm25Score: Math.round(s.bm25 * 100) / 100,
-      vectorScore: Math.round(s.vectorCosine * 100) / 100,
-      rrfScore: Math.round(s.rrfScore * 100) / 100,
-    })),
+    matches: selected.map(toMatch),
+    candidatePool: shouldBuildMatrix ? fused.slice(0, Math.max(limit * 4, 24)).map(toMatch) : [],
     newVectors,
     matrixBuffer,
     usedEntryIds,
   };
 }
 
+/**
+ * Re-ranks hybrid search candidate pool using real WebGPU batch cosine scores
+ * BEFORE truncating down to `limit`, so GPU similarity genuinely affects ranking.
+ */
+export function rerankHybridWithGpuScores(
+  pool: RetrievalMatch[],
+  gpuScores: Float32Array,
+  usedEntryIds: string[],
+  limit: number,
+): RetrievalMatch[] {
+  if (pool.length === 0 || gpuScores.length === 0 || usedEntryIds.length === 0) {
+    return pool.slice(0, limit);
+  }
+  const gpuScoreMap = new Map<string, number>();
+  for (let i = 0; i < usedEntryIds.length; i += 1) {
+    gpuScoreMap.set(usedEntryIds[i], gpuScores[i]);
+  }
+
+  const enriched = pool.map((m) => {
+    const gpuSim = gpuScoreMap.get(m.entry.id);
+    const vectorCosine = typeof gpuSim === 'number' && Number.isFinite(gpuSim)
+      ? gpuSim
+      : (m.vectorScore ?? 0);
+    return {
+      match: m,
+      bm25: m.bm25Score ?? 0,
+      vectorCosine,
+    };
+  });
+
+  const byBm25 = [...enriched].sort((a, b) => b.bm25 - a.bm25);
+  const byVec = [...enriched].sort((a, b) => b.vectorCosine - a.vectorCosine);
+  const bm25Rank = new Map<string, number>();
+  const vecRank = new Map<string, number>();
+  byBm25.forEach((c, idx) => bm25Rank.set(c.match.entry.id, idx + 1));
+  byVec.forEach((c, idx) => vecRank.set(c.match.entry.id, idx + 1));
+
+  const rrfK = 28;
+  return enriched
+    .map((c) => {
+      const rBm25 = c.bm25 > 0 ? 1 / (rrfK + (bm25Rank.get(c.match.entry.id) || 999)) : 0;
+      const rVec = c.vectorCosine > 0.14 ? 1 / (rrfK + (vecRank.get(c.match.entry.id) || 999)) : 0;
+      const baseRrf = (rBm25 + rVec) * 100;
+      const status = getEntryStatus(c.match.entry);
+      const trustMult = status === 'trusted' ? 1.48 : status === 'reviewed' ? 0.92 : 0.45;
+      const confBoost =
+        1 + Math.min(0.4, Math.max(0, (c.match.entry.confidence_score || 1) - 1) * 0.08);
+      const finalScore = baseRrf * trustMult * confBoost + (c.bm25 > 0 ? c.bm25 * 0.35 : 0);
+
+      return {
+        ...c.match,
+        score: Math.round(finalScore * 100) / 100,
+        vectorScore: Math.round(c.vectorCosine * 100) / 100,
+        rrfScore: Math.round(baseRrf * 100) / 100,
+      };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function classifyRulePolarity(text: string): {hasNeg: boolean; hasPos: boolean} {
+  const lower = text.toLowerCase();
+  const hasNeg = /\b(never|do not|don't|avoid|disable|must not|prohibit|deprecated)\b/i.test(lower);
+  const strippedNegations = lower.replace(
+    /\b(never|do not|don't|avoid|disable|must not|prohibit)\s+[a-z0-9_.\-/]*\b/gi,
+    ' ',
+  );
+  const hasPos = /\b(always|must|prefer|enable|require|use|recommend)\b/i.test(strippedNegations);
+  return {hasNeg, hasPos};
+}
+
 export function detectContradictionsCore(payload: {
   candidateTitle: string;
   candidateContent: string;
+  newEntryId?: string;
+  excludeEntryId?: string;
   entries: KnowledgeEntry[];
   folders: KnowledgeFolder[];
 }): ContradictionAlert[] {
-  const {candidateTitle, candidateContent, entries, folders} = payload;
+  const {candidateTitle, candidateContent, newEntryId, excludeEntryId, entries, folders} = payload;
   const folderMap = new Map(folders.map((f) => [f.id, f.name]));
   const alerts: ContradictionAlert[] = [];
 
   const candCombined = `${candidateTitle} ${candidateContent}`.toLowerCase();
   const candTokens = new Set(tokenizeQuery(candCombined));
-  const candNeg = /\b(never|do not|don't|avoid|disable|must not|prohibit)\b/i.test(candCombined);
-  const candPos = /\b(always|must|prefer|enable|require|use )\b/i.test(candCombined);
+  const candPol = classifyRulePolarity(candCombined);
 
-  if (!candNeg && !candPos) return alerts;
+  if (!candPol.hasNeg && !candPol.hasPos) return alerts;
 
   for (const existing of entries) {
-    if (getEntryStatus(existing) !== 'trusted') continue;
+    if (excludeEntryId && existing.id === excludeEntryId) continue;
+    const status = getEntryStatus(existing);
+    if (status !== 'trusted' && status !== 'reviewed') continue;
+
     const exCombined = `${existing.title} ${existing.content}`.toLowerCase();
     const exTokens = tokenizeQuery(exCombined);
     const shared = exTokens.filter((t) => candTokens.has(t));
     if (shared.length < 2) continue;
 
-    const exNeg = /\b(never|do not|don't|avoid|disable|must not|prohibit)\b/i.test(exCombined);
-    const exPos = /\b(always|must|prefer|enable|require|use )\b/i.test(exCombined);
+    const exPol = classifyRulePolarity(exCombined);
 
-    if ((candNeg && exPos && !exNeg) || (candPos && exNeg && !exPos)) {
+    if ((candPol.hasNeg && exPol.hasPos && !exPol.hasNeg) || (candPol.hasPos && exPol.hasNeg && !exPol.hasPos)) {
       alerts.push({
+        newEntryId,
         newTitle: candidateTitle,
+        newContent: candidateContent.slice(0, 260),
         existingEntryId: existing.id,
         existingTitle: existing.title,
+        existingContent: existing.content.slice(0, 260),
         existingFolder: (existing.folder_id && folderMap.get(existing.folder_id)) || 'Uncategorized',
+        existingStatus: status,
         reason: `Opposite polarity ("always/use" vs "never/avoid") on shared topic: ${shared.slice(0, 3).join(', ')}`,
       });
     }
   }
 
-  return alerts.slice(0, 4);
+  return alerts.sort((a, b) => {
+    const rankA = a.existingStatus === 'trusted' ? 0 : 1;
+    const rankB = b.existingStatus === 'trusted' ? 0 : 1;
+    return rankA - rankB;
+  }).slice(0, 4);
 }
 
 export function profileResourcesCore(payload: {
@@ -483,6 +592,7 @@ if (typeof self !== 'undefined' && typeof (self as unknown as {document?: unknow
           }
         }
 
+        const includeMatrix = Boolean(req.payload.includeMatrixForGpu && req.payload.entries.length >= 64);
         const res = runHybridSearchCore({
           query: req.payload.query,
           entries: req.payload.entries,
@@ -490,20 +600,22 @@ if (typeof self !== 'undefined' && typeof (self as unknown as {document?: unknow
           cachedVectors: workerVectors,
           limit: req.payload.limit,
           includeRaw: req.payload.includeRaw,
+          includeMatrixForGpu: includeMatrix,
         });
-        const includeMatrix = Boolean(req.payload.includeMatrixForGpu && res.usedEntryIds.length >= 64);
+        const hasTransferMatrix = includeMatrix && res.usedEntryIds.length >= 64;
         const response: WorkerResponse = {
           id: req.id,
           ok: true,
           type: 'HYBRID_SEARCH',
           matches: res.matches,
+          candidatePool: hasTransferMatrix ? res.candidatePool : undefined,
           newVectors: res.newVectors,
-          matrixBuffer: includeMatrix ? res.matrixBuffer : undefined,
+          matrixBuffer: hasTransferMatrix ? res.matrixBuffer : undefined,
           usedEntryIds: res.usedEntryIds,
         };
         const post = (self as unknown as {postMessage: (msg: WorkerResponse, transfer?: Transferable[]) => void})
           .postMessage;
-        if (includeMatrix) {
+        if (hasTransferMatrix) {
           post(response, [res.matrixBuffer.buffer]);
         } else {
           post(response);

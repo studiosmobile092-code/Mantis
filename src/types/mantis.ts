@@ -242,11 +242,43 @@ export interface RetrievalMatch {
 }
 
 export interface ContradictionAlert {
+  newEntryId?: string;
   newTitle: string;
+  newContent?: string;
   existingEntryId: string;
   existingTitle: string;
+  existingContent?: string;
   existingFolder: string;
+  existingStatus?: KnowledgeStatus;
   reason: string;
+}
+
+export interface CurriculumTopicGap {
+  id: string;
+  title: string;
+  folderName: string;
+  reason: 'uncovered' | 'low-usage' | 'eval-gap';
+  suggestedPrompt: string;
+  sourceEntryId?: string;
+  sourceContent?: string;
+}
+
+export interface CurriculumTurn {
+  userPrompt: string;
+  idealResponse: string;
+  takeaway: string;
+}
+
+export interface CurriculumDrillPacket {
+  topicTitle: string;
+  folderName: string;
+  triggers: string[];
+  responseVariants: string[];
+  turns: CurriculumTurn[];
+  evalPrompt: string;
+  evalRequiredTerms: string[];
+  modelUsed: string;
+  usedTeacher: boolean;
 }
 
 export interface RepoMatch {

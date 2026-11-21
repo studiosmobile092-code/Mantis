@@ -72,6 +72,7 @@ import {
   deleteScratchSkill,
   loadScratchSkills,
   synthesizeScratchWithHybrid,
+  updateScratchSkill,
   upsertScratchSkill,
 } from './lib/scratchEngine';
 import {
@@ -749,7 +750,7 @@ export default function App() {
       return true;
     }
 
-    // Non-blocking contradiction guard against Trusted entries
+    // Non-blocking contradiction guard against Trusted & Reviewed entries
     const liveFolders = foldersRef.current;
     void detectContradictionsAsync({
       candidateTitle: cleanTitle,
@@ -989,6 +990,18 @@ export default function App() {
       }
       const hydrated = applyEntryMetaFallbacks([rawUpdated])[0];
       setEntries((prev) => prev.map((item) => (item.id === id ? hydrated : item)));
+      void detectContradictionsAsync({
+        candidateTitle: hydrated.title,
+        candidateContent: hydrated.content,
+        newEntryId: hydrated.id,
+        excludeEntryId: hydrated.id,
+        entries,
+        folders: foldersRef.current,
+      }).then((alerts) => {
+        if (alerts.length > 0) {
+          setContradictionAlerts(alerts);
+        }
+      });
       retrySaveFnRef.current = null;
       setTransientSaveFeedback({state: 'saved', message: 'Saved ✓'});
       return true;
@@ -1930,7 +1943,7 @@ export default function App() {
 
       let autoMinedCount = 0;
       if (autoLearnFromChat && !prompt.startsWith('/')) {
-        const mined = mineKnowledgeFromText(prompt, entries);
+        const mined = mineKnowledgeFromText(prompt, entries, foldersRef.current);
         if (mined.length > 0) {
           autoMinedCount = await handleSaveCapturedEntries(mined, 'auto_mined');
         }
@@ -1952,19 +1965,25 @@ export default function App() {
         if (!noteContent) {
           replyText = 'Provide note details after `/teach Title :: Details`.';
         } else {
-          const defaultFolder =
-            folders.find((f) => f.name.toLowerCase() === 'patterns') || folders[0] || null;
+          const liveFolders = foldersRef.current;
+          const semantic = inferFolderDeterministically(noteTitle, noteContent, liveFolders);
+          const ensured = await ensureAutoFolderExists(
+            semantic.folderName,
+            semantic.description,
+            liveFolders,
+            handleCreateFolder,
+          );
           const savedOk = await handleSaveEntry({
             title: noteTitle,
             content: noteContent,
-            folderId: defaultFolder?.id || null,
-            tags: [],
+            folderId: ensured.folder?.id || null,
+            tags: semantic.suggestedTags,
             source: 'chat',
             status: 'trusted',
           });
           replyText = savedOk
             ? `Saved "${noteTitle}" as Trusted to ${
-                defaultFolder?.name || 'Patterns'
+                ensured.folder?.name || semantic.folderName
               }. Mantis indexed it at 384-d Int8 priority.`
             : 'Could not save note to Supabase — tap Retry on the save status notice.';
         }
@@ -2212,21 +2231,25 @@ export default function App() {
         }
       } else {
         // Scratch Leads via Hybrid BM25 + Int8 Dense RRF + Teacher Distillation when Scratch lacks confidence!
+        const liveFolders = foldersRef.current;
         const hybridMatches = await runHybridRetrievalAsync({
           query: prompt,
           entries,
-          folders,
+          folders: liveFolders,
           limit: 4,
         });
         const scratch = synthesizeScratchWithHybrid({
           prompt,
           hybridMatches,
           entries,
-          folders,
+          folders: liveFolders,
           repoFiles,
           repoLabel,
           growth: knowledgeGrowth,
         });
+        if (scratch.usedSkillId) {
+          setScratchSkills(loadScratchSkills());
+        }
 
         const shouldDistill =
           (modeOverride === 'distill' || scratch.needsTeacherDistill) &&
@@ -2252,7 +2275,11 @@ export default function App() {
             citedRepoPaths = scratch.citedRepoPaths;
           }
         } else {
-          replyText = scratch.replyText;
+          const lowConfNotice =
+            scratch.needsTeacherDistill && scratch.confidence < 0.55 && !scratch.replyText.includes('found no')
+              ? '\n\n[Low Confidence · Use Teach Scratch or Fix Answer below to train this topic]'
+              : '';
+          replyText = `${scratch.replyText}${lowConfNotice}`;
           citedEntryIds = scratch.citedEntryIds;
           citedRepoPaths = scratch.citedRepoPaths;
         }
@@ -2295,8 +2322,14 @@ export default function App() {
     if (!session) return;
     const msgIdx = messages.findIndex((m) => m.id === msgId);
     if (msgIdx <= 0) return;
-    const userMsg = messages[msgIdx - 1];
-    if (!userMsg || userMsg.role !== 'user') return;
+    let userMsg: ChatMessage | null = null;
+    for (let i = msgIdx - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') {
+        userMsg = messages[i];
+        break;
+      }
+    }
+    if (!userMsg) return;
 
     if (!brainUrl.trim() && !backupBrainUrl.trim()) {
       setErrorBanner('Connect your Cloudflare Worker, Edge Backup, or Ollama route in Settings to run Teacher Distillation.');
@@ -2447,12 +2480,77 @@ export default function App() {
     pushLearningEvent('self_optimized', `Staged Opt Diff: ${filePath}`, title, 'profiler');
   }
 
+  async function handleTeachScratchFix(
+    userPrompt: string,
+    correctedAnswer: string,
+  ): Promise<boolean> {
+    if (!session) return false;
+    const cleanPrompt = userPrompt.trim();
+    const cleanAnswer = correctedAnswer.trim();
+    if (!cleanPrompt || !cleanAnswer) return false;
+
+    const liveFolders = foldersRef.current;
+    const semantic = inferFolderDeterministically(cleanPrompt, cleanAnswer, liveFolders);
+    const ensured = await ensureAutoFolderExists(
+      semantic.folderName,
+      semantic.description,
+      liveFolders,
+      handleCreateFolder,
+    );
+
+    const updatedSkills = upsertScratchSkill({
+      triggerType: 'intent',
+      triggers: [cleanPrompt.toLowerCase()],
+      responses: [cleanAnswer],
+      folderName: ensured.folder?.name || semantic.folderName,
+      tags: semantic.suggestedTags,
+      learnedFrom: 'manual',
+      confidence: 2.6,
+      usageCount: 0,
+    });
+    setScratchSkills(updatedSkills);
+
+    const saved = await handleSaveEntry({
+      title: cleanPrompt.length > 72 ? `${cleanPrompt.slice(0, 69).trim()}…` : cleanPrompt,
+      content: cleanAnswer,
+      folderId: ensured.folder?.id || null,
+      tags: semantic.suggestedTags,
+      source: 'teach',
+      status: 'trusted',
+    });
+
+    setTrainingSamples(
+      addTrainingSample({
+        format: 'sft',
+        prompt: cleanPrompt,
+        chosenResponse: cleanAnswer,
+        modelChosen: 'Operator Feedback Fix',
+        citedEntryIds: [],
+        status: 'approved',
+      }),
+    );
+
+    pushLearningEvent(
+      'manual_teach',
+      `Fixed Scratch Skill: ${cleanPrompt.slice(0, 48)}`,
+      `Saved to ${ensured.folder?.name || semantic.folderName}`,
+      'feedback',
+    );
+    return saved;
+  }
+
   async function handleEscalateMessageToCloud(msgId: string) {
     if (!session) return;
     const msgIdx = messages.findIndex((m) => m.id === msgId);
     if (msgIdx <= 0) return;
-    const userMsg = messages[msgIdx - 1];
-    if (!userMsg || userMsg.role !== 'user') return;
+    let userMsg: ChatMessage | null = null;
+    for (let i = msgIdx - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') {
+        userMsg = messages[i];
+        break;
+      }
+    }
+    if (!userMsg) return;
 
     if (!brainUrl.trim() && !backupBrainUrl.trim()) {
       setErrorBanner('Configure your Cloudflare Worker or Chromebook Supabase Backup URL in Settings to use Cloud Assist.');
@@ -2644,33 +2742,87 @@ export default function App() {
             {contradictionAlerts.length > 0 && (
               <div
                 role="status"
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warn-border bg-warn-soft px-4 py-2.5 text-xs text-ink"
+                className="space-y-2.5 rounded-lg border border-warn-border bg-warn-soft px-4 py-3 text-xs text-ink"
               >
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 shrink-0 text-warn" />
-                  <span>
-                    <strong>Contradiction Guard:</strong> &quot;{contradictionAlerts[0].newTitle}&quot; conflicts with Trusted note &quot;
-                    {contradictionAlerts[0].existingTitle}&quot; ({contradictionAlerts[0].reason}).
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-warn" />
+                    <span>
+                      <strong>Contradiction Guard ({contradictionAlerts.length}):</strong> &quot;
+                      {contradictionAlerts[0].newTitle}&quot; conflicts with{' '}
+                      <span className="font-mono uppercase text-warn">
+                        {contradictionAlerts[0].existingStatus || 'trusted'}
+                      </span>{' '}
+                      note &quot;{contradictionAlerts[0].existingTitle}&quot; (
+                      {contradictionAlerts[0].reason}).
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
+
+                {(contradictionAlerts[0].newContent || contradictionAlerts[0].existingContent) && (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {contradictionAlerts[0].newContent && (
+                      <div className="rounded border border-warn-border/60 bg-surface/70 p-2 text-[11px]">
+                        <div className="font-mono font-semibold text-ink">New / Updated:</div>
+                        <div className="mt-0.5 line-clamp-2 text-ink-muted">
+                          {contradictionAlerts[0].newContent}
+                        </div>
+                      </div>
+                    )}
+                    {contradictionAlerts[0].existingContent && (
+                      <div className="rounded border border-warn-border/60 bg-surface/70 p-2 text-[11px]">
+                        <div className="font-mono font-semibold text-warn">
+                          Existing ({contradictionAlerts[0].existingFolder}):
+                        </div>
+                        <div className="mt-0.5 line-clamp-2 text-ink-muted">
+                          {contradictionAlerts[0].existingContent}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const target = contradictionAlerts[0];
+                      const ok = await handleUpdateEntryStatus(target.existingEntryId, 'raw');
+                      if (ok) {
+                        pushLearningEvent(
+                          'manual_teach',
+                          `Superseded rule: ${target.existingTitle}`,
+                          `Demoted to Raw in favor of "${target.newTitle}"`,
+                          'contradiction-guard',
+                        );
+                        setTransientSaveFeedback({
+                          state: 'saved',
+                          message: 'Demoted old conflicting rule to Raw ✓',
+                        });
+                        setContradictionAlerts((prev) => prev.slice(1));
+                      }
+                    }}
+                    className="min-h-[40px] rounded border border-accent-border bg-accent-soft px-3 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white"
+                  >
+                    Demote Old Note to Raw (Keep New)
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
                       setHighlightedEntryId(contradictionAlerts[0].existingEntryId);
                       setActiveArea('knowledge');
-                      setContradictionAlerts([]);
+                      setContradictionAlerts((prev) => prev.slice(1));
                     }}
-                    className="min-h-[40px] rounded border border-warn-border bg-surface/60 px-3 text-xs font-semibold text-warn hover:bg-surface"
+                    className="min-h-[40px] rounded border border-warn-border bg-surface/80 px-3 text-xs font-semibold text-warn hover:bg-surface"
                   >
-                    Inspect Note
+                    Inspect Old Note
                   </button>
                   <button
                     type="button"
-                    onClick={() => setContradictionAlerts([])}
+                    onClick={() => setContradictionAlerts((prev) => prev.slice(1))}
                     className="min-h-[40px] px-2.5 text-xs text-ink-muted hover:text-ink"
                   >
-                    Dismiss
+                    Keep Both (Dismiss)
                   </button>
                 </div>
               </div>
@@ -2934,6 +3086,7 @@ export default function App() {
                         onSendMessage={handleSendChatMessage}
                         onEscalateMessageToCloud={handleEscalateMessageToCloud}
                         onDistillMessageWithTeacher={handleDistillMessageWithTeacher}
+                        onTeachScratchFix={handleTeachScratchFix}
                         onSendToArena={(promptText) => {
                           setArenaInitialPrompt(promptText);
                           setActiveArea('training');
@@ -3103,6 +3256,10 @@ export default function App() {
                   trainingSamples={trainingSamples}
                   onChangeTrainingSamples={setTrainingSamples}
                   scratchSkills={scratchSkills}
+                  onChangeScratchSkills={setScratchSkills}
+                  onUpdateScratchSkill={(id, patch) =>
+                    setScratchSkills(updateScratchSkill(id, patch))
+                  }
                   onDeleteScratchSkill={(id) => setScratchSkills(deleteScratchSkill(id))}
                   evalCases={evalCases}
                   onChangeEvalCases={setEvalCases}

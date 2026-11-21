@@ -11,6 +11,7 @@ import type {
 import {
   detectContradictionsCore,
   profileResourcesCore,
+  rerankHybridWithGpuScores,
   runHybridSearchCore,
   type WorkerRequest,
   type WorkerResponse,
@@ -191,6 +192,7 @@ export async function runHybridRetrievalAsync(params: {
       for (const rec of res.newVectors) {
         workerSyncedHashes.set(rec.id, rec.contentHash);
       }
+      let finalMatches = res.matches;
       if (res.matrixBuffer && res.usedEntryIds.length >= 64) {
         const qVec = encodeDenseVector384(params.query);
         const gpuScores = await webGpuBatchCosine(
@@ -200,17 +202,15 @@ export async function runHybridRetrievalAsync(params: {
           EMBEDDING_DIMS,
         );
         if (gpuScores) {
-          const gpuScoreMap = new Map<string, number>();
-          res.usedEntryIds.forEach((id, idx) => gpuScoreMap.set(id, gpuScores[idx]));
-          for (const m of res.matches) {
-            const s = gpuScoreMap.get(m.entry.id);
-            if (typeof s === 'number') {
-              m.vectorScore = Math.round(s * 100) / 100;
-            }
-          }
+          finalMatches = rerankHybridWithGpuScores(
+            res.candidatePool && res.candidatePool.length > 0 ? res.candidatePool : res.matches,
+            gpuScores,
+            res.usedEntryIds,
+            limit,
+          );
         }
       }
-      result = {matches: res.matches, newVectors: res.newVectors};
+      result = {matches: finalMatches, newVectors: res.newVectors};
     } else {
       throw new Error('Fallback');
     }
@@ -222,9 +222,11 @@ export async function runHybridRetrievalAsync(params: {
       cachedVectors: vectorMapCache,
       limit,
       includeRaw,
+      includeMatrixForGpu: wantsGpu,
     });
+    let finalMatches = core.matches;
     // Optional WebGPU compute pass boost on large corpora (>=64 notes)
-    if (core.usedEntryIds.length >= 64) {
+    if (wantsGpu && core.usedEntryIds.length >= 64) {
       const qVec = encodeDenseVector384(params.query);
       const gpuScores = await webGpuBatchCosine(
         qVec,
@@ -233,15 +235,15 @@ export async function runHybridRetrievalAsync(params: {
         EMBEDDING_DIMS,
       );
       if (gpuScores) {
-        const gpuScoreMap = new Map<string, number>();
-        core.usedEntryIds.forEach((id, idx) => gpuScoreMap.set(id, gpuScores[idx]));
-        for (const m of core.matches) {
-          const s = gpuScoreMap.get(m.entry.id);
-          if (typeof s === 'number') m.vectorScore = Math.round(s * 100) / 100;
-        }
+        finalMatches = rerankHybridWithGpuScores(
+          core.candidatePool.length > 0 ? core.candidatePool : core.matches,
+          gpuScores,
+          core.usedEntryIds,
+          limit,
+        );
       }
     }
-    result = {matches: core.matches, newVectors: core.newVectors};
+    result = {matches: finalMatches, newVectors: core.newVectors};
   }
 
   if (result.newVectors.length > 0) {
@@ -266,6 +268,8 @@ export async function runHybridRetrievalAsync(params: {
 export async function detectContradictionsAsync(params: {
   candidateTitle: string;
   candidateContent: string;
+  newEntryId?: string;
+  excludeEntryId?: string;
   entries: KnowledgeEntry[];
   folders: KnowledgeFolder[];
 }): Promise<ContradictionAlert[]> {

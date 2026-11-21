@@ -5,8 +5,10 @@ import type {
   KnowledgeGrowthStats,
   RepoFile,
 } from '../types/mantis';
+import {inferFolderDeterministically} from './autoFolders';
 import {getEntryStatus} from './knowledgeSync';
 import {
+  matchTokenStrength,
   retrieveRelevantKnowledge,
   retrieveRelevantRepoFiles,
   tokenizeQuery,
@@ -167,13 +169,13 @@ export function computeKnowledgeGrowth(
 export function mineKnowledgeFromText(
   rawInput: string,
   existingEntries: KnowledgeEntry[],
+  folders: KnowledgeFolder[] = [],
 ): DistilledKnowledgeItem[] {
   const trimmed = rawInput.trim();
   if (!trimmed || trimmed.length < 18 || trimmed.startsWith('/')) {
     return [];
   }
 
-  const lower = trimmed.toLowerCase();
   const isQuestionOnly =
     trimmed.endsWith('?') &&
     !/\b(remember|note:|rule:|fix:|always |never |prefer |we use )\b/i.test(trimmed);
@@ -192,7 +194,7 @@ export function mineKnowledgeFromText(
     return [];
   }
 
-  let cleanedContent = trimmed
+  const cleanedContent = trimmed
     .replace(/^(please\s+)?(remember\s+(that|this)?|note:|rule:|fix:)\s*/i, '')
     .trim();
 
@@ -200,28 +202,27 @@ export function mineKnowledgeFromText(
     return [];
   }
 
-  let folder = 'Patterns';
-  if (hasFixPattern || /\b(bug|error|fix|broken|crash|401|402|403|404|cors|blocked)\b/i.test(lower)) {
-    folder = 'Debugging';
-  } else if (/\b(always|never|prefer|style|naming|ui|tab|chromebook|tablet)\b/i.test(lower)) {
-    folder = 'Preferences';
-  } else if (/\b(supabase|cloudflare|database|schema|architecture|edge|worker|oauth|deploy)\b/i.test(lower)) {
-    folder = 'Architecture';
-  }
-
   const firstSentence = cleanedContent.split(/[\n.!?]/)[0].trim();
   const cleanTitle =
     firstSentence.length > 72 ? `${firstSentence.slice(0, 69).trim()}...` : firstSentence;
 
-  const tags = tokenizeQuery(cleanedContent)
-    .filter((t) => !COMMON_STOPWORDS.has(t))
-    .slice(0, 4);
+  const semanticFolder = inferFolderDeterministically(cleanTitle, cleanedContent, folders);
+  const folder = hasFixPattern && semanticFolder.folderName === 'General'
+    ? 'Debugging'
+    : semanticFolder.folderName;
 
-  const normalizedCandidate = cleanedContent.toLowerCase().slice(0, 80);
+  const tags = Array.from(
+    new Set([
+      ...semanticFolder.suggestedTags,
+      ...tokenizeQuery(cleanedContent).filter((t) => !COMMON_STOPWORDS.has(t)),
+    ]),
+  ).slice(0, 4);
+
+  const normalizedCandidate = cleanedContent.replace(/\s+/g, ' ').toLowerCase().slice(0, 96);
   const duplicate = existingEntries.some(
     (e) =>
-      e.title.toLowerCase() === cleanTitle.toLowerCase() ||
-      e.content.toLowerCase().slice(0, 80) === normalizedCandidate,
+      e.title.trim().toLowerCase() === cleanTitle.toLowerCase() ||
+      e.content.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 96) === normalizedCandidate,
   );
   if (duplicate) {
     return [];
@@ -245,9 +246,11 @@ function clipText(text: string, maxLen: number): string {
 function findMatchingSnippet(content: string, tokens: string[]): string {
   const lines = content.split('\n');
   if (tokens.length > 0) {
-    const idx = lines.findIndex((line) =>
-      tokens.some((tok) => line.toLowerCase().includes(tok)),
-    );
+    const idx = lines.findIndex((line) => {
+      const lower = line.toLowerCase();
+      const lineSet = new Set(lower.split(/[^a-z0-9_.\-/+#]+/).filter(Boolean));
+      return tokens.some((tok) => matchTokenStrength(lower, lineSet, tok) !== 'none');
+    });
     if (idx !== -1) {
       return lines.slice(Math.max(0, idx - 2), Math.min(lines.length, idx + 7)).join('\n').trim();
     }

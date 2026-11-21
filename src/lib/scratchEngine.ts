@@ -1,4 +1,6 @@
 import type {
+  CurriculumTopicGap,
+  EvalCase,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeGrowthStats,
@@ -7,7 +9,7 @@ import type {
   ScratchSkillRule,
 } from '../types/mantis';
 import {getEntryStatus} from './knowledgeSync';
-import {retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
+import {matchTokenStrength, retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
 
 const SCRATCH_SKILLS_KEY = 'mantis_scratch_skills_v1';
 
@@ -280,6 +282,110 @@ export function deleteScratchSkill(skillId: string): ScratchSkillRule[] {
   return next;
 }
 
+export function updateScratchSkill(
+  skillId: string,
+  patch: Partial<Pick<ScratchSkillRule, 'triggers' | 'responses' | 'folderName' | 'confidence'>>,
+): ScratchSkillRule[] {
+  const next = loadScratchSkills().map((s) => {
+    if (s.id !== skillId) return s;
+    const triggers = patch.triggers
+      ? Array.from(new Set(patch.triggers.map((t) => t.trim().toLowerCase()).filter(Boolean))).slice(0, 12)
+      : s.triggers;
+    const responses = patch.responses
+      ? Array.from(new Set(patch.responses.map((r) => r.trim()).filter(Boolean))).slice(0, 8)
+      : s.responses;
+    return {
+      ...s,
+      triggers: triggers.length > 0 ? triggers : s.triggers,
+      responses: responses.length > 0 ? responses : s.responses,
+      folderName: patch.folderName?.trim() || s.folderName,
+      confidence: patch.confidence ?? s.confidence,
+    };
+  });
+  saveScratchSkills(next);
+  return next;
+}
+
+export function analyzeCurriculumCoverage(
+  entries: KnowledgeEntry[],
+  folders: KnowledgeFolder[],
+  skills: ScratchSkillRule[],
+  evalCases: EvalCase[] = [],
+): {
+  totalActiveEntries: number;
+  coveredEntries: number;
+  coveragePercent: number;
+  gaps: CurriculumTopicGap[];
+} {
+  const folderMap = new Map(folders.map((f) => [f.id, f.name]));
+  const activeEntries = entries.filter((e) => getEntryStatus(e) !== 'raw');
+  const gaps: CurriculumTopicGap[] = [];
+  let coveredEntries = 0;
+
+  for (const entry of activeEntries) {
+    const titleLower = entry.title.toLowerCase();
+    const hit = matchScratchSkill(entry.title, skills);
+    const tokenSet = new Set(tokenizeQuery(`${entry.title} ${entry.tags.join(' ')}`));
+    const hasSkillByToken = skills.some((sk) =>
+      sk.triggers.some((t) => {
+        const clean = t.toLowerCase().trim();
+        return clean === titleLower || matchTokenStrength(titleLower, tokenSet, clean) !== 'none';
+      }),
+    );
+
+    if ((hit && hit.score >= 0.65) || hasSkillByToken) {
+      coveredEntries += 1;
+    } else {
+      const folderName = (entry.folder_id && folderMap.get(entry.folder_id)) || 'Patterns';
+      gaps.push({
+        id: `gap-entry-${entry.id}`,
+        title: entry.title,
+        folderName,
+        reason: 'uncovered',
+        suggestedPrompt: `Explain and apply our rule for: ${entry.title}`,
+        sourceEntryId: entry.id,
+        sourceContent: entry.content,
+      });
+    }
+  }
+
+  for (const sk of skills) {
+    if (sk.usageCount === 0 && sk.confidence < 2.2 && gaps.length < 18) {
+      gaps.push({
+        id: `gap-skill-${sk.id}`,
+        title: `Reinforce skill: ${sk.triggers[0] || sk.folderName}`,
+        folderName: sk.folderName,
+        reason: 'low-usage',
+        suggestedPrompt: sk.triggers[0] || sk.folderName,
+      });
+    }
+  }
+
+  for (const ec of evalCases) {
+    const hit = matchScratchSkill(ec.prompt, skills);
+    if (!hit && gaps.length < 22) {
+      gaps.push({
+        id: `gap-eval-${ec.id}`,
+        title: `Eval readiness: ${ec.title}`,
+        folderName: 'Eval Readiness',
+        reason: 'eval-gap',
+        suggestedPrompt: ec.prompt,
+      });
+    }
+  }
+
+  const totalActiveEntries = activeEntries.length;
+  const coveragePercent =
+    totalActiveEntries > 0 ? Math.round((coveredEntries / totalActiveEntries) * 100) : 0;
+
+  return {
+    totalActiveEntries,
+    coveredEntries,
+    coveragePercent,
+    gaps: gaps.slice(0, 16),
+  };
+}
+
 export function matchScratchSkill(
   prompt: string,
   skills: ScratchSkillRule[],
@@ -331,6 +437,8 @@ export interface ScratchSynthesisResult {
   confidence: number;
   needsTeacherDistill: boolean;
   matchedSkillId?: string;
+  usedSkillId?: string;
+  nearMissSkillTrigger?: string;
 }
 
 /**
@@ -368,8 +476,10 @@ export function synthesizeScratchWithHybrid(params: {
   const skills = loadScratchSkills();
   const skillHit = matchScratchSkill(trimmed, skills);
   if (skillHit && skillHit.score >= 0.72) {
+    let usedSkillId: string | undefined;
     if (params.recordUsage !== false) {
       recordSkillUsage(skillHit.skill.id);
+      usedSkillId = skillHit.skill.id;
     }
     const variants = skillHit.skill.responses;
     const picked = variants[skillHit.skill.usageCount % variants.length] || variants[0];
@@ -384,8 +494,13 @@ export function synthesizeScratchWithHybrid(params: {
       confidence: Math.min(0.95, skillHit.score),
       needsTeacherDistill: false,
       matchedSkillId: skillHit.skill.id,
+      usedSkillId,
     };
   }
+  const nearMissSkillTrigger =
+    skillHit && skillHit.score >= 0.52 && skillHit.score < 0.72
+      ? skillHit.skill.triggers[0]
+      : undefined;
 
   // 3. Built-in Greeting Check (If Teacher hasn't enriched greetings yet, still respond cleanly & allow enrichment!)
   const cleanedGreeting = lower.replace(/[!?.]+$/g, '').trim();
@@ -462,12 +577,16 @@ export function synthesizeScratchWithHybrid(params: {
   const hasStrongMatch = topScore >= 3.2 || repoMatches.length > 0;
 
   if (hybridMatches.length === 0 && repoMatches.length === 0) {
+    const nearMissHint = nearMissSkillTrigger
+      ? `\n\nRelated partial skill found ("${nearMissSkillTrigger}"), but confidence is below 72%. Use Teach Scratch or fix the reply below to generalize this pattern.`
+      : '';
     return {
-      replyText: `Scratch AI found no stored skill or knowledge entry matching "${searchTerm}".`,
+      replyText: `Scratch AI found no high-confidence stored skill or knowledge entry matching "${searchTerm}".${nearMissHint}`,
       citedEntryIds: [],
       citedRepoPaths: [],
-      confidence: 0.12,
+      confidence: nearMissSkillTrigger ? 0.34 : 0.12,
       needsTeacherDistill: true,
+      nearMissSkillTrigger,
     };
   }
 

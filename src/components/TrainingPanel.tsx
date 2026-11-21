@@ -1,10 +1,13 @@
 import {
   Activity,
+  BookOpen,
   Check,
   CheckCircle2,
   Cpu,
+  Edit3,
   FlaskConical,
   Gauge,
+  GraduationCap,
   Play,
   PlusCircle,
   Scale,
@@ -13,10 +16,17 @@ import {
   Wrench,
   XCircle,
 } from 'lucide-react';
-import {type FormEvent, useEffect, useState} from 'react';
-import {runArenaDuelWithBrain} from '../lib/aiBrain';
+import {type FormEvent, useEffect, useMemo, useState} from 'react';
+import {
+  generateCurriculumDrillWithTeacher,
+  runArenaDuelWithBrain,
+} from '../lib/aiBrain';
 import {computeKnowledgeGrowth} from '../lib/mantisBrain';
-import {synthesizeScratchWithHybrid} from '../lib/scratchEngine';
+import {
+  analyzeCurriculumCoverage,
+  synthesizeScratchWithHybrid,
+  upsertScratchSkill,
+} from '../lib/scratchEngine';
 import {
   addEvalCase,
   addTrainingSample,
@@ -29,6 +39,7 @@ import {
 import {profileWorkspaceResourcesAsync, runHybridRetrievalAsync} from '../lib/workerClient';
 import type {
   ComputeEngineStatus,
+  CurriculumDrillPacket,
   EvalCase,
   EvalRunSummary,
   KnowledgeEntry,
@@ -53,6 +64,11 @@ interface TrainingPanelProps {
   trainingSamples: TrainingSample[];
   onChangeTrainingSamples: (next: TrainingSample[]) => void;
   scratchSkills: ScratchSkillRule[];
+  onChangeScratchSkills: (next: ScratchSkillRule[]) => void;
+  onUpdateScratchSkill: (
+    skillId: string,
+    patch: Partial<Pick<ScratchSkillRule, 'triggers' | 'responses' | 'folderName'>>,
+  ) => void;
   onDeleteScratchSkill: (skillId: string) => void;
   evalCases: EvalCase[];
   onChangeEvalCases: (next: EvalCase[]) => void;
@@ -65,7 +81,7 @@ interface TrainingPanelProps {
   onConsumeArenaPrompt?: () => void;
 }
 
-type TrainingTab = 'arena' | 'dataset' | 'evals' | 'profiler';
+type TrainingTab = 'arena' | 'curriculum' | 'dataset' | 'evals' | 'profiler';
 
 function formatKb(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return 'N/A';
@@ -87,6 +103,8 @@ export function TrainingPanel({
   trainingSamples,
   onChangeTrainingSamples,
   scratchSkills,
+  onChangeScratchSkills,
+  onUpdateScratchSkill,
   onDeleteScratchSkill,
   evalCases,
   onChangeEvalCases,
@@ -111,6 +129,18 @@ export function TrainingPanel({
   } | null>(null);
   const [duelFeedback, setDuelFeedback] = useState<string | null>(null);
 
+  // Curriculum Drills State
+  const [customDrillTopic, setCustomDrillTopic] = useState('');
+  const [isDrilling, setIsDrilling] = useState(false);
+  const [activeDrill, setActiveDrill] = useState<CurriculumDrillPacket | null>(null);
+  const [drillFeedback, setDrillFeedback] = useState<string | null>(null);
+
+  // Scratch Skill Inline Editor State
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const [editTriggersText, setEditTriggersText] = useState('');
+  const [editResponsesText, setEditResponsesText] = useState('');
+  const [editFolderText, setEditFolderText] = useState('');
+
   // Eval Bench State
   const [evalMode, setEvalMode] = useState<'scratch' | 'hybrid' | 'cloud'>('hybrid');
   const [isRunningEval, setIsRunningEval] = useState(false);
@@ -123,6 +153,11 @@ export function TrainingPanel({
   const [isProfiling, setIsProfiling] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [optMessage, setOptMessage] = useState<string | null>(null);
+
+  const curriculumCoverage = useMemo(
+    () => analyzeCurriculumCoverage(entries, folders, scratchSkills, evalCases),
+    [entries, folders, scratchSkills, evalCases],
+  );
 
   useEffect(() => {
     if (arenaInitialPrompt) {
@@ -259,6 +294,79 @@ export function TrainingPanel({
     setNewCaseRequired('');
   }
 
+  async function handleRunCurriculumDrill(params: {
+    topicTitle: string;
+    folderName: string;
+    sourceContent?: string;
+  }) {
+    if (!params.topicTitle.trim() || isDrilling) return;
+    setIsDrilling(true);
+    setDrillFeedback(null);
+    try {
+      const packet = await generateCurriculumDrillWithTeacher({
+        brainUrl,
+        backupBrainUrl,
+        accessToken,
+        model: brainModel,
+        topicTitle: params.topicTitle,
+        folderName: params.folderName,
+        sourceContent: params.sourceContent,
+        entries,
+        folders,
+      });
+      setActiveDrill(packet);
+    } finally {
+      setIsDrilling(false);
+    }
+  }
+
+  function handleCommitCurriculumDrill(packet: CurriculumDrillPacket, addEval: boolean) {
+    const updatedSkills = upsertScratchSkill({
+      triggerType: 'intent',
+      triggers: packet.triggers,
+      responses: packet.responseVariants,
+      folderName: packet.folderName,
+      tags: ['curriculum-drill'],
+      learnedFrom: packet.usedTeacher ? 'teacher-distilled' : 'scratch',
+      confidence: packet.usedTeacher ? 2.4 : 1.9,
+      usageCount: 0,
+    });
+    onChangeScratchSkills(updatedSkills);
+
+    let nextSamples = trainingSamples;
+    for (const turn of packet.turns) {
+      nextSamples = addTrainingSample({
+        format: 'sft',
+        prompt: turn.userPrompt,
+        chosenResponse: turn.idealResponse,
+        modelChosen: packet.modelUsed,
+        citedEntryIds: [],
+        status: 'approved',
+      });
+    }
+    onChangeTrainingSamples(nextSamples);
+
+    if (addEval && packet.evalPrompt.trim()) {
+      const nextEvals = addEvalCase({
+        title: `Drill: ${packet.topicTitle.slice(0, 48)}`,
+        prompt: packet.evalPrompt,
+        requiredTerms: packet.evalRequiredTerms,
+        forbiddenTerms: ['undefined', 'sb_secret_', 'hf_'],
+        requireCitation: false,
+        requireSafeCode: true,
+        category: 'recall',
+      });
+      onChangeEvalCases(nextEvals);
+    }
+
+    setDrillFeedback(
+      `Committed "${packet.topicTitle}": saved ${packet.triggers.length} Scratch triggers, ${packet.turns.length} SFT turns${
+        addEval ? ', and 1 Eval test case' : ''
+      }.`,
+    );
+    setActiveDrill(null);
+  }
+
   const proposals = profile ? buildSelfOptimizationProposals(profile, repoFiles) : [];
   const latestRun = evalRuns[0] || null;
   const approvedSamples = trainingSamples.filter((s) => s.status !== 'rejected');
@@ -269,15 +377,15 @@ export function TrainingPanel({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
         <div>
           <h1 className="text-base font-semibold tracking-tight text-ink">
-            Training, DPO Arena &amp; Eval Studio
+            Training, Curriculum, DPO Arena &amp; Eval Studio
           </h1>
           <p className="mt-0.5 text-xs text-ink-muted">
-            Post-train Mantis on your workflow: rank A/B responses, verify Scratch skills, benchmark regressions, and optimize RAM.
+            Post-train Mantis on your workflow: drill knowledge gaps, rank A/B responses, refine Scratch skills, and benchmark regressions.
           </p>
         </div>
         <div className="font-mono text-xs tabular-nums text-ink-muted">
-          {approvedSamples.length} DPO/SFT samples · {scratchSkills.length} distilled skills ·{' '}
-          {latestRun ? `${latestRun.passRate}% eval pass` : 'No eval run yet'}
+          {curriculumCoverage.coveragePercent}% skill coverage · {approvedSamples.length} SFT/DPO ·{' '}
+          {scratchSkills.length} skills · {latestRun ? `${latestRun.passRate}% eval` : 'No eval'}
         </div>
       </div>
 
@@ -286,6 +394,7 @@ export function TrainingPanel({
         {(
           [
             {id: 'arena', label: 'DPO Arena', icon: Scale},
+            {id: 'curriculum', label: `Curriculum (${curriculumCoverage.gaps.length})`, icon: GraduationCap},
             {id: 'dataset', label: `Dataset & Skills (${trainingSamples.length + scratchSkills.length})`, icon: FlaskConical},
             {id: 'evals', label: `Eval Bench (${evalCases.length})`, icon: Gauge},
             {id: 'profiler', label: 'RAM & Self-Opt', icon: Wrench},
@@ -379,7 +488,178 @@ export function TrainingPanel({
         </div>
       )}
 
-      {/* TAB 2: DATASET & LEARNED SCRATCH SKILLS */}
+      {/* TAB 2: TEACHER-STUDENT CURRICULUM DRILLS */}
+      {activeTab === 'curriculum' && (
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Topic Skill Coverage</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-accent-text">
+                {curriculumCoverage.coveragePercent}% ({curriculumCoverage.coveredEntries}/
+                {curriculumCoverage.totalActiveEntries})
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Untrained Gaps Queue</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {curriculumCoverage.gaps.length}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Teacher Route</div>
+              <div className="mt-1 font-mono text-xs font-medium text-ink">
+                {brainUrl.trim() || backupBrainUrl?.trim() ? brainModel.split('/').pop() : 'Offline Synthesizer'}
+              </div>
+            </div>
+          </div>
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleRunCurriculumDrill({
+                topicTitle: customDrillTopic,
+                folderName: 'Patterns',
+              });
+              setCustomDrillTopic('');
+            }}
+            className="flex flex-wrap gap-2"
+          >
+            <input
+              type="text"
+              value={customDrillTopic}
+              onChange={(e) => setCustomDrillTopic(e.target.value)}
+              placeholder="Enter any skill topic to drill across 3 turns (e.g. Supabase RLS rules, TypeScript async cleanup)…"
+              className="min-h-[44px] min-w-[240px] flex-1 rounded-md border border-line-strong bg-inset px-3.5 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={isDrilling || !customDrillTopic.trim()}
+              className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+            >
+              <GraduationCap className="h-3.5 w-3.5" />
+              <span>{isDrilling ? 'Synthesizing Drill…' : 'Generate 3-Turn Drill'}</span>
+            </button>
+          </form>
+
+          {drillFeedback && (
+            <div className="rounded-md border border-accent-border bg-accent-soft px-3.5 py-2.5 text-xs text-accent-text">
+              {drillFeedback}
+            </div>
+          )}
+
+          {activeDrill && (
+            <div className="space-y-3 rounded-lg border border-accent-border bg-surface p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
+                <div>
+                  <div className="font-mono text-[11px] font-semibold text-accent-text uppercase">
+                    {activeDrill.usedTeacher ? `Teacher Drill · ${activeDrill.modelUsed}` : 'Local Rule Drill'}
+                  </div>
+                  <h3 className="text-sm font-semibold text-ink">{activeDrill.topicTitle}</h3>
+                </div>
+                <span className="rounded border border-line bg-inset px-2.5 py-1 font-mono text-[11px] text-ink-muted">
+                  Folder: {activeDrill.folderName}
+                </span>
+              </div>
+
+              <div className="font-mono text-[11px] text-ink-muted">
+                Triggers: <span className="text-ink">{activeDrill.triggers.join(' · ')}</span>
+              </div>
+
+              <div className="space-y-2">
+                {activeDrill.turns.map((turn, idx) => (
+                  <div key={idx} className="space-y-1 rounded border border-line bg-inset p-3 text-xs">
+                    <div className="font-semibold text-ink">
+                      Turn {idx + 1}: {turn.userPrompt}
+                    </div>
+                    <div className="text-ink-muted">{turn.idealResponse}</div>
+                    <div className="font-mono text-[10px] text-accent-text">
+                      Takeaway: {turn.takeaway}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveDrill(null)}
+                  className="min-h-[40px] rounded border border-line px-3 text-xs text-ink-muted hover:text-ink"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCommitCurriculumDrill(activeDrill, false)}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-accent-border bg-accent-soft px-3.5 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  <span>Save Skill + SFT Turns</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleCommitCurriculumDrill(activeDrill, true)}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-4 text-xs font-semibold text-white hover:bg-accent-hover"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  <span>Commit Skill + SFT + Eval Case</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <h2 className="text-xs font-semibold tracking-wide text-ink-muted uppercase">
+              Detected Knowledge &amp; Skill Gaps ({curriculumCoverage.gaps.length})
+            </h2>
+            {curriculumCoverage.gaps.length === 0 ? (
+              <div className="rounded-lg border border-line bg-surface p-5 text-xs text-ink-muted">
+                All active Trusted &amp; Reviewed Knowledge topics have Scratch trigger coverage. Add new rules or test custom drill topics above.
+              </div>
+            ) : (
+              <div className="grid gap-2.5 md:grid-cols-2">
+                {curriculumCoverage.gaps.map((gap) => (
+                  <div
+                    key={gap.id}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-line bg-surface p-3.5 text-xs"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2 font-mono text-[10px] text-accent-text uppercase">
+                        <BookOpen className="h-3 w-3 shrink-0" />
+                        <span>
+                          {gap.folderName} · {gap.reason}
+                        </span>
+                      </div>
+                      <div className="truncate font-medium text-ink">{gap.title}</div>
+                      {gap.sourceContent && (
+                        <div className="line-clamp-2 text-[11px] text-ink-muted">
+                          {gap.sourceContent}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isDrilling}
+                      onClick={() =>
+                        void handleRunCurriculumDrill({
+                          topicTitle: gap.title,
+                          folderName: gap.folderName,
+                          sourceContent: gap.sourceContent,
+                        })
+                      }
+                      className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-md border border-accent-border bg-accent-soft px-3 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white disabled:opacity-50"
+                    >
+                      <GraduationCap className="h-3.5 w-3.5" />
+                      <span>Drill</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: DATASET & LEARNED SCRATCH SKILLS */}
       {activeTab === 'dataset' && (
         <div className="grid gap-5 lg:grid-cols-2">
           {/* Training Samples Table */}
@@ -447,32 +727,112 @@ export function TrainingPanel({
               </div>
             ) : (
               <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
-                {scratchSkills.map((sk) => (
-                  <div
-                    key={sk.id}
-                    className="space-y-1.5 rounded-lg border border-line bg-surface p-3 text-xs"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[11px] font-semibold text-accent-text">
-                        {sk.folderName} · {sk.usageCount} recalls
-                      </span>
-                      <button
-                        type="button"
-                        aria-label="Delete distilled skill"
-                        onClick={() => onDeleteScratchSkill(sk.id)}
-                        className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
+                {scratchSkills.map((sk) => {
+                  const isEditing = editingSkillId === sk.id;
+                  return (
+                    <div
+                      key={sk.id}
+                      className="space-y-2 rounded-lg border border-line bg-surface p-3 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[11px] font-semibold text-accent-text">
+                          {sk.folderName} · {sk.usageCount} recalls · conf {sk.confidence.toFixed(1)}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            aria-label="Edit distilled skill"
+                            onClick={() => {
+                              if (isEditing) {
+                                setEditingSkillId(null);
+                              } else {
+                                setEditingSkillId(sk.id);
+                                setEditFolderText(sk.folderName);
+                                setEditTriggersText(sk.triggers.join(', '));
+                                setEditResponsesText(sk.responses.join('\n'));
+                              }
+                            }}
+                            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-ink"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Delete distilled skill"
+                            onClick={() => onDeleteScratchSkill(sk.id)}
+                            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {isEditing ? (
+                        <div className="space-y-2 border-t border-line pt-2">
+                          <input
+                            type="text"
+                            value={editFolderText}
+                            onChange={(e) => setEditFolderText(e.target.value)}
+                            placeholder="Folder name"
+                            className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 text-xs text-ink"
+                          />
+                          <input
+                            type="text"
+                            value={editTriggersText}
+                            onChange={(e) => setEditTriggersText(e.target.value)}
+                            placeholder="Comma-separated triggers"
+                            className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 font-mono text-xs text-ink"
+                          />
+                          <textarea
+                            rows={3}
+                            value={editResponsesText}
+                            onChange={(e) => setEditResponsesText(e.target.value)}
+                            placeholder="One response variant per line"
+                            className="w-full rounded border border-line-strong bg-inset p-2.5 text-xs text-ink"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setEditingSkillId(null)}
+                              className="min-h-[40px] rounded border border-line px-3 text-xs text-ink-muted"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onUpdateScratchSkill(sk.id, {
+                                  folderName: editFolderText.trim() || sk.folderName,
+                                  triggers: editTriggersText
+                                    .split(',')
+                                    .map((t) => t.trim())
+                                    .filter(Boolean),
+                                  responses: editResponsesText
+                                    .split('\n')
+                                    .map((r) => r.trim())
+                                    .filter(Boolean),
+                                });
+                                setEditingSkillId(null);
+                              }}
+                              className="min-h-[40px] rounded bg-accent px-3 text-xs font-semibold text-white hover:bg-accent-hover"
+                            >
+                              Save Skill
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="font-mono text-[11px] text-ink">
+                            Triggers: {sk.triggers.join(' · ')}
+                          </div>
+                          <div className="line-clamp-2 text-[11px] text-ink-muted">
+                            {sk.responses[0]}
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <div className="font-mono text-[11px] text-ink">
-                      Triggers: {sk.triggers.join(' · ')}
-                    </div>
-                    <div className="line-clamp-2 text-[11px] text-ink-muted">
-                      {sk.responses[0]}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
