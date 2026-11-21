@@ -106,9 +106,9 @@ export function LiveMonitorPanel({
             <button
               type="button"
               onClick={onCollapse}
-              title="Collapse Context Monitor"
+              title="Collapse Context Monitor (Ctrl+Shift+M)"
               aria-label="Collapse Context Monitor pane"
-              className="hidden min-h-[34px] min-w-[34px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink xl:inline-flex"
+              className="hidden min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink xl:inline-flex"
             >
               <PanelRightClose className="h-4 w-4" />
             </button>

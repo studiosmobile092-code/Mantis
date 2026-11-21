@@ -273,6 +273,88 @@ export function SettingsPanel({
         </p>
       </div>
 
+      {/* Clear Connected / Optional / Needs Setup Overview */}
+      <section
+        aria-label="Setup readiness overview"
+        className="space-y-3 rounded-lg border border-line bg-surface p-5 sm:p-6"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-ink">Setup Readiness Checklist</h2>
+          <span className="font-mono text-[11px] text-ink-muted">
+            Core tools work right away; Cloud AI &amp; GitHub are optional upgrades
+          </span>
+        </div>
+
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            {
+              title: 'Supabase Cloud Memory',
+              badge: schemaMissing ? 'Needs Setup' : 'Connected',
+              tone: schemaMissing ? 'text-amber-400' : 'text-accent-text',
+              detail: schemaMissing
+                ? 'Run P1 schema SQL below and refresh.'
+                : 'Postgres + RLS active across devices.',
+            },
+            {
+              title: 'Built-in Local AI Engine',
+              badge: 'Connected',
+              tone: 'text-accent-text',
+              detail: 'Instant rule mining, recall, and OCR work offline.',
+            },
+            {
+              title: 'Cloud Assist & Chromebook Route',
+              badge:
+                routeStatus.activeKind !== 'built-in-only'
+                  ? 'Connected'
+                  : brainUrl.trim() || backupBrainUrl.trim()
+                    ? 'Needs Setup'
+                    : 'Optional',
+              tone:
+                routeStatus.activeKind !== 'built-in-only'
+                  ? 'text-accent-text'
+                  : brainUrl.trim() || backupBrainUrl.trim()
+                    ? 'text-amber-400'
+                    : 'text-ink-muted',
+              detail:
+                routeStatus.activeKind !== 'built-in-only'
+                  ? `Active via ${routeStatus.activeKind}.`
+                  : brainUrl.trim() || backupBrainUrl.trim()
+                    ? 'Tap Save & Test Both Routes below to verify.'
+                    : 'Add Cloudflare Worker or Supabase Edge URL below.',
+            },
+            {
+              title: 'GitHub Repository Index',
+              badge: connection ? 'Connected' : 'Optional',
+              tone: connection ? 'text-accent-text' : 'text-ink-muted',
+              detail: connection
+                ? `${connection.owner}/${connection.repo} (${metrics.repoFileCount} files)`
+                : 'Connect any repo under the GitHub tab.',
+            },
+            {
+              title: 'Phase 6 Sync (Trust & Theme)',
+              badge: phase6SchemaMissing ? 'Optional' : 'Connected',
+              tone: phase6SchemaMissing ? 'text-ink-muted' : 'text-accent-text',
+              detail: phase6SchemaMissing
+                ? 'Local fallback active; copy Phase 6 SQL for DB sync.'
+                : 'Trust status, URLs, and theme synced in Supabase.',
+            },
+          ].map((item) => (
+            <div
+              key={item.title}
+              className="rounded-md border border-line bg-inset p-3 text-xs"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-ink">{item.title}</span>
+                <span className={`shrink-0 font-mono text-[11px] font-semibold ${item.tone}`}>
+                  {item.badge}
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-snug text-ink-muted">{item.detail}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {/* Theme & Accent Personalization */}
       <section className="space-y-4 rounded-lg border border-line bg-surface p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">

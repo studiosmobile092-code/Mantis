@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   BookmarkPlus,
   Check,
+  Copy,
   Cpu,
   FileCode2,
   FolderPlus,
@@ -54,6 +55,96 @@ function deriveChatTitle(text: string): string {
   const cleaned = firstLine.replace(/^\[.*?\]\s*/, '').replace(/^[#>*-\s]+/, '').trim();
   if (cleaned.length <= 58) return cleaned || 'Saved Studio Note';
   return `${cleaned.slice(0, 55).trim()}…`;
+}
+
+function renderInlineProse(text: string) {
+  const tokens = text.split(/(`[^`\n]+`)/g);
+  return tokens.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+      return (
+        <code
+          key={i}
+          className="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[12px] text-accent-text"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+function RichMessageContent({content}: {content: string}) {
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const blocks = useMemo(() => {
+    const parts: Array<{type: 'prose' | 'code'; text: string; lang?: string}> = [];
+    const fenceRe = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)```/g;
+    let lastIdx = 0;
+    let match: RegExpExecArray | null = null;
+    while ((match = fenceRe.exec(content)) !== null) {
+      if (match.index > lastIdx) {
+        parts.push({type: 'prose', text: content.slice(lastIdx, match.index)});
+      }
+      parts.push({
+        type: 'code',
+        lang: match[1] || 'code',
+        text: match[2].replace(/\n$/, ''),
+      });
+      lastIdx = fenceRe.lastIndex;
+    }
+    if (lastIdx < content.length) {
+      parts.push({type: 'prose', text: content.slice(lastIdx)});
+    }
+    return parts.length > 0 ? parts : [{type: 'prose' as const, text: content}];
+  }, [content]);
+
+  async function handleCopyCode(text: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIndex(idx);
+      window.setTimeout(() => setCopiedIndex(null), 1800);
+    } catch {
+      // ignore clipboard errors
+    }
+  }
+
+  return (
+    <div className="space-y-2.5 text-[13.5px] leading-relaxed text-ink">
+      {blocks.map((block, idx) =>
+        block.type === 'code' ? (
+          <div
+            key={idx}
+            className="overflow-hidden rounded-md border border-line-strong bg-canvas"
+          >
+            <div className="flex items-center justify-between border-b border-line bg-surface px-3 py-1.5">
+              <span className="font-mono text-[11px] font-medium text-ink-muted">
+                {block.lang || 'code'}
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleCopyCode(block.text, idx)}
+                className="inline-flex min-h-[32px] items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+              >
+                {copiedIndex === idx ? (
+                  <Check className="h-3 w-3 text-accent-text" />
+                ) : (
+                  <Copy className="h-3 w-3" />
+                )}
+                <span>{copiedIndex === idx ? 'Copied' : 'Copy'}</span>
+              </button>
+            </div>
+            <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-ink">
+              <code>{block.text}</code>
+            </pre>
+          </div>
+        ) : (
+          <div key={idx} className="whitespace-pre-wrap">
+            {renderInlineProse(block.text)}
+          </div>
+        ),
+      )}
+    </div>
+  );
 }
 
 export const ChatWorkspace = memo(function ChatWorkspace({
@@ -299,7 +390,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
             <button
               type="button"
               onClick={() => onTogglePreferBuiltIn(true)}
-              className={`min-h-[34px] rounded px-2.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-[11px] font-medium transition-colors ${
                 preferBuiltInFirst
                   ? 'bg-accent text-white'
                   : 'text-ink-muted hover:text-ink'
@@ -310,7 +401,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
             <button
               type="button"
               onClick={() => onTogglePreferBuiltIn(false)}
-              className={`min-h-[34px] rounded px-2.5 text-[11px] font-medium transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-[11px] font-medium transition-colors ${
                 !preferBuiltInFirst
                   ? 'bg-elevated text-ink'
                   : 'text-ink-muted hover:text-ink'
@@ -427,7 +518,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                               type="button"
                               disabled={isStoringThis || Boolean(storedFolder)}
                               onClick={() => void handleQuickStore(msg)}
-                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                              className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
                                 storedFolder
                                   ? 'text-accent-text'
                                   : 'text-ink-muted hover:bg-elevated hover:text-ink'
@@ -451,7 +542,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                             onClick={() =>
                               onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
                             }
-                            className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                            className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
                           >
                             <BookmarkPlus className="h-3.5 w-3.5" />
                             <span>Save Rule</span>
@@ -466,7 +557,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                               type="button"
                               disabled={isEscalating || isSending}
                               onClick={() => void onEscalateMessageToCloud(msg.id)}
-                              className="inline-flex min-h-[34px] items-center gap-1 rounded border border-line-strong bg-surface px-2.5 py-1 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
+                              className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line-strong bg-surface px-2.5 py-1 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
                             >
                               <Sparkles className="h-3 w-3" />
                               <span>{isEscalating ? 'Assisting…' : 'Ask Cloud Assist'}</span>
@@ -481,7 +572,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                 setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
                                 await onReinforceEntries(citedEntries.map((e) => e.id));
                               }}
-                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                              className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
                                 reinforcedMsgIds[msg.id]
                                   ? 'text-accent-text'
                                   : 'text-ink-muted hover:bg-elevated hover:text-ink'
@@ -497,7 +588,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                               type="button"
                               disabled={isStoringThis || Boolean(storedFolder)}
                               onClick={() => void handleQuickStore(msg)}
-                              className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                              className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
                                 storedFolder
                                   ? 'text-accent-text'
                                   : 'text-ink-muted hover:bg-elevated hover:text-ink'
@@ -522,7 +613,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                             onClick={() =>
                               onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
                             }
-                            className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                            className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-1 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
                           >
                             <BookmarkPlus className="h-3 w-3" />
                             <span>Edit &amp; Save</span>
@@ -531,9 +622,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                       )}
                     </div>
 
-                    <div className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-ink">
-                      {msg.content}
-                    </div>
+                    <RichMessageContent content={msg.content} />
 
                     {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-line pt-2.5">
@@ -543,7 +632,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                             key={cited.id}
                             type="button"
                             onClick={() => onInspectEntry(cited.id)}
-                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-accent-text transition-colors hover:border-accent-border"
+                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 text-xs font-medium text-accent-text transition-colors hover:border-accent-border"
                           >
                             <span>{cited.title}</span>
                             <ArrowUpRight className="h-3.5 w-3.5" />
@@ -554,7 +643,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                             key={repoPath}
                             type="button"
                             onClick={() => onInspectRepoFile(repoPath)}
-                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 font-mono text-xs text-ink transition-colors hover:border-accent-border"
+                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2.5 py-1 font-mono text-xs text-ink transition-colors hover:border-accent-border"
                           >
                             <FileCode2 className="h-3.5 w-3.5 text-accent-text" />
                             <span>{repoPath}</span>

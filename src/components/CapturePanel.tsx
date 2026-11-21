@@ -10,6 +10,7 @@ import {
   Mic,
   MicOff,
   Monitor,
+  Pause,
   Play,
   Square,
   Trash2,
@@ -38,6 +39,8 @@ import {
   type CaptureZone,
 } from '../lib/ocrCapture';
 import {
+  appendDedupedSpeechTurn,
+  normalizeSpeechCompareKey,
   SpeakerAcousticTracker,
   type SpeechTurnSegment,
 } from '../lib/speechEngine';
@@ -94,12 +97,27 @@ interface SpeechRecognitionLike {
   interimResults: boolean;
   maxAlternatives?: number;
   lang: string;
+  onaudiostart?: (() => void) | null;
+  onsoundstart?: (() => void) | null;
+  onspeechstart?: (() => void) | null;
+  onspeechend?: (() => void) | null;
+  onsoundend?: (() => void) | null;
   onresult: ((ev: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((ev: {error?: string}) => void) | null;
+  onerror: ((ev: {error?: string; message?: string}) => void) | null;
   onend: (() => void) | null;
   start: () => void;
   stop: () => void;
+  abort?: () => void;
 }
+
+const SPEECH_LANG_OPTIONS = [
+  {code: 'en-US', label: 'English (US)'},
+  {code: 'en-GB', label: 'English (UK)'},
+  {code: 'es-ES', label: 'Spanish'},
+  {code: 'fr-FR', label: 'French'},
+  {code: 'de-DE', label: 'German'},
+  {code: 'ja-JP', label: 'Japanese'},
+];
 
 interface LinkIngestRecord {
   id: string;
@@ -198,10 +216,12 @@ export function CapturePanel({
   const [extractStepText, setExtractStepText] = useState<string | null>(null);
   const [linkHistory, setLinkHistory] = useState<LinkIngestRecord[]>([]);
 
-  // Image OCR & Advanced Multi-Voice Live Mic state
+  // Image OCR & Reliable Multi-Voice Live Mic state
   const [imageOcrZone, setImageOcrZone] = useState<CaptureZone>('full');
   const [isOcrImageBusy, setIsOcrImageBusy] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
+  const [isMicPaused, setIsMicPaused] = useState(false);
+  const [micLang, setMicLang] = useState('en-US');
   const [isPolishingMic, setIsPolishingMic] = useState(false);
   const [micLines, setMicLines] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
@@ -217,13 +237,17 @@ export function CapturePanel({
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const isMicWantedRef = useRef(false);
+  const isMicPausedRef = useRef(false);
   const micRestartTimerRef = useRef<number | null>(null);
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const audioMeterRafRef = useRef<number | null>(null);
+  const micWatchdogTimerRef = useRef<number | null>(null);
+  const micDecayTimerRef = useRef<number | null>(null);
+  const micActivityAtRef = useRef<number>(0);
+  const micRetryCountRef = useRef(0);
+  const micLevelTargetRef = useRef(0);
   const micLinesRef = useRef<string[]>([]);
   const micTurnsRef = useRef<SpeechTurnSegment[]>([]);
   const latestInterimRef = useRef('');
+  const lastFinalNormalizedRef = useRef('');
   const acousticTrackerRef = useRef(new SpeakerAcousticTracker());
 
   const linesRef = useRef<string[]>([]);
@@ -250,41 +274,51 @@ export function CapturePanel({
     setIsRecordingScreen(false);
   };
 
-  const stopAudioMeter = () => {
-    if (audioMeterRafRef.current !== null) {
-      window.cancelAnimationFrame(audioMeterRafRef.current);
-      audioMeterRafRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      void audioCtxRef.current.close().catch(() => {});
-      audioCtxRef.current = null;
-    }
-    if (audioStreamRef.current) {
-      for (const track of audioStreamRef.current.getTracks()) {
-        track.stop();
-      }
-      audioStreamRef.current = null;
-    }
-    setMicLevel(0);
-  };
-
-  const stopMicCapture = () => {
-    isMicWantedRef.current = false;
+  const stopMicTimers = () => {
     if (micRestartTimerRef.current !== null) {
       window.clearTimeout(micRestartTimerRef.current);
       micRestartTimerRef.current = null;
     }
-    if (recognitionRef.current) {
-      recognitionRef.current.onend = null;
-      recognitionRef.current.onerror = null;
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // ignore stop errors
-      }
-      recognitionRef.current = null;
+    if (micWatchdogTimerRef.current !== null) {
+      window.clearInterval(micWatchdogTimerRef.current);
+      micWatchdogTimerRef.current = null;
     }
-    stopAudioMeter();
+    if (micDecayTimerRef.current !== null) {
+      window.clearInterval(micDecayTimerRef.current);
+      micDecayTimerRef.current = null;
+    }
+    micLevelTargetRef.current = 0;
+    setMicLevel(0);
+  };
+
+  const tearDownRecognitionInstance = () => {
+    if (!recognitionRef.current) return;
+    recognitionRef.current.onaudiostart = null;
+    recognitionRef.current.onsoundstart = null;
+    recognitionRef.current.onspeechstart = null;
+    recognitionRef.current.onspeechend = null;
+    recognitionRef.current.onsoundend = null;
+    recognitionRef.current.onresult = null;
+    recognitionRef.current.onerror = null;
+    recognitionRef.current.onend = null;
+    try {
+      recognitionRef.current.stop();
+    } catch {
+      try {
+        recognitionRef.current.abort?.();
+      } catch {
+        // ignore abort errors
+      }
+    }
+    recognitionRef.current = null;
+  };
+
+  const stopMicCapture = () => {
+    isMicWantedRef.current = false;
+    isMicPausedRef.current = false;
+    setIsMicPaused(false);
+    stopMicTimers();
+    tearDownRecognitionInstance();
     setInterimTranscript('');
     latestInterimRef.current = '';
     setIsListeningMic(false);
@@ -302,13 +336,21 @@ export function CapturePanel({
   function commitSpeechSegment(rawText: string) {
     const cleaned = rawText.replace(/\s+/g, ' ').trim();
     if (!cleaned) return;
+    const normKey = normalizeSpeechCompareKey(cleaned);
+    if (!normKey) return;
 
     const nowMs = Date.now();
-    const acoustic = acousticTrackerRef.current.registerUtterance(nowMs);
+    const acoustic = acousticTrackerRef.current.registerUtterance(nowMs, cleaned);
     const totalVoices = acousticTrackerRef.current.getDetectedSpeakerCount();
     setDetectedSpeakersCount(totalVoices);
     setActiveSpeakerLabel(acoustic.speaker);
 
+    const formattedLine =
+      totalVoices > 1 ? `${acoustic.speaker}: ${cleaned}` : cleaned;
+    const {mergedLines, appended} = appendDedupedSpeechTurn(micLinesRef.current, formattedLine);
+    if (!appended) return;
+
+    lastFinalNormalizedRef.current = normKey;
     micTurnsRef.current = [
       ...micTurnsRef.current,
       {
@@ -320,10 +362,6 @@ export function CapturePanel({
         timestampMs: nowMs,
       },
     ];
-
-    const formattedLine =
-      totalVoices > 1 ? `${acoustic.speaker}: ${cleaned}` : cleaned;
-    const {mergedLines} = mergeIncrementalCaption(micLinesRef.current, formattedLine);
     micLinesRef.current = mergedLines;
     setMicLines(mergedLines);
   }
@@ -920,46 +958,57 @@ export function CapturePanel({
     }
   }
 
-  async function startWebAudioMeter() {
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) return;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      audioStreamRef.current = stream;
-
-      const AudioContextCtor =
-        window.AudioContext ||
-        (window as unknown as {webkitAudioContext?: typeof AudioContext}).webkitAudioContext;
-      if (!AudioContextCtor) return;
-
-      const ctx = new AudioContextCtor();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.55;
-      source.connect(analyser);
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      const tick = () => {
-        if (!isMicWantedRef.current) return;
-        analyser.getByteFrequencyData(dataArray);
-        const level = acousticTrackerRef.current.sampleFrequencyData(dataArray, ctx.sampleRate);
-        setMicLevel(level);
-        audioMeterRafRef.current = window.requestAnimationFrame(tick);
-      };
-      audioMeterRafRef.current = window.requestAnimationFrame(tick);
-    } catch {
-      // SpeechRecognition can still run even if Web Audio meter permission is skipped
+  function startMicActivityMonitor() {
+    if (micDecayTimerRef.current !== null) {
+      window.clearInterval(micDecayTimerRef.current);
     }
+    if (micWatchdogTimerRef.current !== null) {
+      window.clearInterval(micWatchdogTimerRef.current);
+    }
+
+    // Event-driven smooth signal meter without opening a competing getUserMedia lock
+    micDecayTimerRef.current = window.setInterval(() => {
+      if (!isMicWantedRef.current || isMicPausedRef.current) {
+        micLevelTargetRef.current = 0;
+        setMicLevel(0);
+        return;
+      }
+      setMicLevel((prev) => {
+        const target = micLevelTargetRef.current;
+        micLevelTargetRef.current = Math.max(12, Math.round(target * 0.78));
+        if (Math.abs(target - prev) <= 2) return target;
+        return Math.round(prev * 0.55 + target * 0.45);
+      });
+    }, 95);
+
+    // Watchdog prevents silent Web Speech freezes on Chromebook & Android Chrome
+    micWatchdogTimerRef.current = window.setInterval(() => {
+      if (!isMicWantedRef.current || isMicPausedRef.current) return;
+      const idleMs = Date.now() - micActivityAtRef.current;
+      if (idleMs > 12000 && !latestInterimRef.current.trim()) {
+        micActivityAtRef.current = Date.now();
+        tearDownRecognitionInstance();
+        spawnRecognitionSession();
+      }
+    }, 4000);
+  }
+
+  function scheduleMicRestart(delayMs: number) {
+    if (micRestartTimerRef.current !== null) {
+      window.clearTimeout(micRestartTimerRef.current);
+    }
+    micRestartTimerRef.current = window.setTimeout(() => {
+      micRestartTimerRef.current = null;
+      if (isMicWantedRef.current && !isMicPausedRef.current) {
+        spawnRecognitionSession();
+      }
+    }, delayMs);
   }
 
   function spawnRecognitionSession() {
+    if (!isMicWantedRef.current || isMicPausedRef.current) return;
+    tearDownRecognitionInstance();
+
     const win = window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionLike;
       webkitSpeechRecognition?: new () => SpeechRecognitionLike;
@@ -971,15 +1020,35 @@ export function CapturePanel({
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 3;
-    recognition.lang = 'en-US';
+    recognition.lang = micLang || 'en-US';
+
+    const markPulse = (boost: number) => {
+      micActivityAtRef.current = Date.now();
+      micLevelTargetRef.current = Math.min(100, Math.max(micLevelTargetRef.current, boost));
+    };
+
+    recognition.onaudiostart = () => {
+      micRetryCountRef.current = 0;
+      markPulse(28);
+    };
+    recognition.onsoundstart = () => markPulse(48);
+    recognition.onspeechstart = () => markPulse(78);
+    recognition.onspeechend = () => {
+      micLevelTargetRef.current = 20;
+    };
+    recognition.onsoundend = () => {
+      micLevelTargetRef.current = 14;
+    };
 
     recognition.onresult = (event) => {
+      micRetryCountRef.current = 0;
+      markPulse(88);
+
       const finals: string[] = [];
       let liveInterim = '';
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
-        // Pick highest-confidence non-empty alternative for fast speech clarity
         let bestTranscript = (res[0]?.transcript || '').trim();
         let bestConf = res[0]?.confidence ?? 0;
         for (let alt = 1; alt < res.length; alt += 1) {
@@ -1004,6 +1073,10 @@ export function CapturePanel({
       for (const finalPhrase of finals) {
         commitSpeechSegment(finalPhrase);
       }
+      if (finals.length > 0 && !liveInterim) {
+        latestInterimRef.current = '';
+        setInterimTranscript('');
+      }
     };
 
     recognition.onerror = (ev) => {
@@ -1013,39 +1086,79 @@ export function CapturePanel({
       }
       if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
         setErrorMessage(
-          'Microphone access was denied by browser settings. Allow microphone access and retry.',
+          'Microphone permission blocked. Tap the lock/site icon in your browser address bar, set Microphone to Allow, and retry.',
         );
         stopMicCapture();
         return;
       }
-      setErrorMessage(`Mic listener notice: ${errCode || 'reconnecting...'}`);
+      if (errCode === 'audio-capture') {
+        setErrorMessage(
+          'No active microphone device found or another app/tab holds exclusive mic control. Close other mic tabs and tap Start Recording.',
+        );
+        stopMicCapture();
+        return;
+      }
+      if (errCode === 'network') {
+        setStatusMessage('Speech network hiccup — reconnecting live listener automatically…');
+        return;
+      }
+      setStatusMessage(`Mic listener notice (${errCode || 'reconnecting'}) — keeping recording alive…`);
     };
 
     recognition.onend = () => {
-      // Flush any fast interim words before Android Chrome restarts the speech stream
       const pendingInterim = latestInterimRef.current.trim();
       if (pendingInterim && isMicWantedRef.current) {
-        commitSpeechSegment(pendingInterim);
+        const interimKey = normalizeSpeechCompareKey(pendingInterim);
+        if (
+          interimKey &&
+          interimKey !== lastFinalNormalizedRef.current &&
+          !lastFinalNormalizedRef.current.endsWith(interimKey)
+        ) {
+          commitSpeechSegment(pendingInterim);
+        }
         latestInterimRef.current = '';
         setInterimTranscript('');
       }
 
-      if (isMicWantedRef.current) {
-        micRestartTimerRef.current = window.setTimeout(() => {
-          if (isMicWantedRef.current) {
-            spawnRecognitionSession();
-          }
-        }, 75);
-      } else {
+      if (isMicWantedRef.current && !isMicPausedRef.current) {
+        const attempt = micRetryCountRef.current;
+        micRetryCountRef.current = Math.min(attempt + 1, 5);
+        const delayMs = attempt === 0 ? 180 : attempt === 1 ? 380 : 750;
+        scheduleMicRestart(delayMs);
+      } else if (!isMicWantedRef.current) {
         setIsListeningMic(false);
       }
     };
 
     recognitionRef.current = recognition;
+    micActivityAtRef.current = Date.now();
     try {
       recognition.start();
     } catch {
-      // Ignore start race conditions
+      if (isMicWantedRef.current && !isMicPausedRef.current) {
+        scheduleMicRestart(350);
+      }
+    }
+  }
+
+  function handleTogglePauseMic() {
+    if (!isListeningMic) return;
+    if (isMicPaused) {
+      isMicPausedRef.current = false;
+      setIsMicPaused(false);
+      setStatusMessage('Recording resumed — speak naturally.');
+      spawnRecognitionSession();
+    } else {
+      const pending = latestInterimRef.current.trim();
+      if (pending) {
+        commitSpeechSegment(pending);
+        latestInterimRef.current = '';
+        setInterimTranscript('');
+      }
+      isMicPausedRef.current = true;
+      setIsMicPaused(true);
+      tearDownRecognitionInstance();
+      setStatusMessage('Recording paused — tap Resume to continue or Stop & Review.');
     }
   }
 
@@ -1054,7 +1167,10 @@ export function CapturePanel({
     if (isListeningMic) {
       const trailing = latestInterimRef.current.trim();
       if (trailing) {
-        commitSpeechSegment(trailing);
+        const trailingKey = normalizeSpeechCompareKey(trailing);
+        if (trailingKey && trailingKey !== lastFinalNormalizedRef.current) {
+          commitSpeechSegment(trailing);
+        }
       }
 
       stopMicCapture();
@@ -1064,7 +1180,7 @@ export function CapturePanel({
 
       if (!rawText && capturedTurns.length === 0) {
         setStatusMessage(
-          'Recording stopped — no speech detected. Tap Start Recording to try again.',
+          'Recording stopped — no speech detected. Check your microphone input and tap Start Recording to retry.',
         );
         micLinesRef.current = [];
         micTurnsRef.current = [];
@@ -1127,6 +1243,8 @@ export function CapturePanel({
     acousticTrackerRef.current.reset();
     micLinesRef.current = [];
     micTurnsRef.current = [];
+    lastFinalNormalizedRef.current = '';
+    micRetryCountRef.current = 0;
     setMicLines([]);
     setDetectedSpeakersCount(1);
     setActiveSpeakerLabel('Speaker 1');
@@ -1134,11 +1252,13 @@ export function CapturePanel({
     setInterimTranscript('');
 
     isMicWantedRef.current = true;
+    isMicPausedRef.current = false;
+    setIsMicPaused(false);
     setIsListeningMic(true);
     setStatusMessage(
-      'Recording live audio with multi-voice acoustic detection — tap Stop when done to review.',
+      'Recording live speech (exclusive hardware mode — no mic conflict). Tap Pause or Stop anytime.',
     );
-    void startWebAudioMeter();
+    startMicActivityMonitor();
     spawnRecognitionSession();
   }
 
@@ -1329,7 +1449,7 @@ export function CapturePanel({
         <div className="grid gap-4 sm:grid-cols-2">
           {/* Mic Record -> AI Clean & Multi-Speaker Diarize -> Review -> Auto-Folder Save */}
           <div className="space-y-3 rounded-lg border border-line bg-surface p-5">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-semibold text-ink">
                 <Mic className="h-4 w-4 text-accent-text" />
                 <span>AI Multi-Voice Recorder</span>
@@ -1339,28 +1459,52 @@ export function CapturePanel({
                   <span className="inline-flex items-center gap-1 text-accent-text">
                     <Users className="h-3 w-3" />
                     <span>
-                      {detectedSpeakersCount > 1
-                        ? `${detectedSpeakersCount} voices (${activeSpeakerLabel})`
-                        : activeSpeakerLabel}
+                      {isMicPaused
+                        ? 'Paused'
+                        : detectedSpeakersCount > 1
+                          ? `${detectedSpeakersCount} voices (${activeSpeakerLabel})`
+                          : activeSpeakerLabel}
                     </span>
                   </span>
                 )}
-                <span>{isListeningMic ? `· ${micLevel}%` : 'Ready'}</span>
+                <span>
+                  {isListeningMic ? (isMicPaused ? '· Hold' : `· ${micLevel}%`) : 'Ready'}
+                </span>
               </div>
             </div>
 
             <p className="text-xs leading-relaxed text-ink-muted">
-              Captures rapid speech continuously, separates multiple voices by acoustic timbre &amp; AI turn analysis, and suggests a semantic Auto-Folder when you tap Stop.
+              Captures rapid speech cleanly without hardware mic conflicts, tracks conversational turns, and runs Connected AI cleanup &amp; Auto-Folder filing when stopped.
             </p>
 
-            {/* Real Web Audio 16-bar Level Meter */}
+            {/* Speech Language Selector */}
+            <div className="space-y-1">
+              <label htmlFor="mic-lang-select" className="block text-xs font-medium text-ink-muted">
+                Recognition Language
+              </label>
+              <select
+                id="mic-lang-select"
+                value={micLang}
+                disabled={isListeningMic || isPolishingMic}
+                onChange={(e) => setMicLang(e.target.value)}
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-60"
+              >
+                {SPEECH_LANG_OPTIONS.map((opt) => (
+                  <option key={opt.code} value={opt.code}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Event-driven Live Signal Meter */}
             <div
               aria-label="Microphone audio signal meter"
               className="flex h-8 items-end gap-1 rounded-md border border-line bg-inset px-2.5 py-1.5"
             >
               {Array.from({length: 16}).map((_, idx) => {
                 const threshold = ((idx + 1) / 16) * 100;
-                const active = isListeningMic && micLevel >= threshold * 0.7;
+                const active = isListeningMic && !isMicPaused && micLevel >= threshold * 0.7;
                 return (
                   <div
                     key={idx}
@@ -1380,7 +1524,9 @@ export function CapturePanel({
                 )}
                 {isListeningMic && (
                   <div className="text-accent-text">
-                    {interimTranscript || 'Listening for speech…'}
+                    {isMicPaused
+                      ? 'Paused — tap Resume to continue capturing.'
+                      : interimTranscript || 'Listening for speech…'}
                   </div>
                 )}
                 {isPolishingMic && (
@@ -1392,33 +1538,56 @@ export function CapturePanel({
               </div>
             )}
 
-            <button
-              type="button"
-              disabled={!hasMicApi || isPolishingMic}
-              onClick={() => void handleToggleMic()}
-              className={`inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
-                isListeningMic
-                  ? 'bg-red-600 hover:bg-red-500'
-                  : 'bg-accent hover:bg-accent-hover'
-              }`}
-            >
-              {isPolishingMic ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : isListeningMic ? (
-                <MicOff className="h-4 w-4" />
-              ) : (
-                <Mic className="h-4 w-4" />
+            <div className="flex flex-wrap gap-2">
+              {isListeningMic && (
+                <button
+                  type="button"
+                  disabled={isPolishingMic}
+                  onClick={handleTogglePauseMic}
+                  className="inline-flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-md border border-line-strong bg-inset px-3.5 py-2 text-xs font-semibold text-ink hover:bg-elevated disabled:opacity-50"
+                >
+                  {isMicPaused ? (
+                    <>
+                      <Play className="h-4 w-4 text-accent-text" />
+                      <span>Resume</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="h-4 w-4 text-amber-400" />
+                      <span>Pause</span>
+                    </>
+                  )}
+                </button>
               )}
-              <span>
-                {!hasMicApi
-                  ? 'Speech API Unsupported Here'
-                  : isPolishingMic
-                    ? 'Polishing Transcript…'
-                    : isListeningMic
-                      ? 'Stop & AI Review Transcript'
-                      : 'Start Recording'}
-              </span>
-            </button>
+
+              <button
+                type="button"
+                disabled={!hasMicApi || isPolishingMic}
+                onClick={() => void handleToggleMic()}
+                className={`inline-flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
+                  isListeningMic
+                    ? 'bg-red-600 hover:bg-red-500'
+                    : 'bg-accent hover:bg-accent-hover'
+                }`}
+              >
+                {isPolishingMic ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : isListeningMic ? (
+                  <MicOff className="h-4 w-4" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+                <span>
+                  {!hasMicApi
+                    ? 'Speech API Unsupported Here'
+                    : isPolishingMic
+                      ? 'Polishing Transcript…'
+                      : isListeningMic
+                        ? 'Stop & AI Review'
+                        : 'Start Recording'}
+                </span>
+              </button>
+            </div>
           </div>
 
           {/* Screenshot OCR with ROI Crop + Fast Pass -> Preview Modal */}

@@ -70,18 +70,49 @@ export function setSessionGitHubToken(token: string): void {
   }
 }
 
+const GITHUB_SEGMENT_RE = /^[A-Za-z0-9_.-]{1,100}$/;
+
+function isValidGitHubSegment(value: string): boolean {
+  return GITHUB_SEGMENT_RE.test(value) && value !== '.' && value !== '..';
+}
+
+export function sanitizeRepoPath(rawPath: string): string {
+  const cleaned = String(rawPath || '').trim().replace(/\\/g, '/');
+  if (!cleaned || cleaned.startsWith('/') || cleaned.includes('\0')) {
+    throw new Error('Invalid repository file path.');
+  }
+  const segments = cleaned.split('/').filter((s) => s.length > 0);
+  if (segments.length === 0) {
+    throw new Error('Repository file path cannot be empty.');
+  }
+  for (const seg of segments) {
+    if (seg === '.' || seg === '..' || /[\r\n]/.test(seg)) {
+      throw new Error(`Unsafe repository file path segment: "${seg}"`);
+    }
+  }
+  return segments.join('/');
+}
+
 export function parseGitHubRepoInput(raw: string): ParsedGitHubRepo | null {
-  const cleaned = raw.trim().replace(/\.git$/i, '').replace(/\/+$/, '');
+  const withoutHashOrQuery = raw.trim().split(/[?#]/)[0];
+  const cleaned = withoutHashOrQuery.replace(/\.git$/i, '').replace(/\/+$/, '');
   if (!cleaned) return null;
 
   const urlMatch = cleaned.match(/github\.com\/([^/\s]+)\/([^/\s]+)/i);
   if (urlMatch) {
-    return {owner: urlMatch[1], repo: urlMatch[2]};
+    const [, owner, repo] = urlMatch;
+    if (isValidGitHubSegment(owner) && isValidGitHubSegment(repo)) {
+      return {owner, repo};
+    }
+    return null;
   }
 
-  const slashMatch = cleaned.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  const slashMatch = cleaned.match(/^([^/\s]+)\/([^/\s]+)$/);
   if (slashMatch) {
-    return {owner: slashMatch[1], repo: slashMatch[2]};
+    const [, owner, repo] = slashMatch;
+    if (isValidGitHubSegment(owner) && isValidGitHubSegment(repo)) {
+      return {owner, repo};
+    }
   }
 
   return null;
@@ -192,13 +223,18 @@ export async function fetchGitHubFileContent(
   isPrivate: boolean,
   token?: string,
 ): Promise<string> {
+  if (!isValidGitHubSegment(owner) || !isValidGitHubSegment(repo)) {
+    throw new Error('Invalid GitHub repository owner or name.');
+  }
+  const safePath = sanitizeRepoPath(path);
+
   // Public repos can fetch via raw.githubusercontent.com without consuming REST API rate limits
   if (!isPrivate) {
-    const encodedPath = path
+    const encodedPath = safePath
       .split('/')
       .map((seg) => encodeURIComponent(seg))
       .join('/');
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(branch)}/${encodedPath}`;
+    const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(branch)}/${encodedPath}`;
     const rawRes = await fetch(rawUrl);
     if (rawRes.ok) {
       return await rawRes.text();
@@ -248,6 +284,12 @@ export async function createPullRequestForApprovedSuggestion(params: {
   suggestionId: string;
   token: string;
 }): Promise<string> {
+  if (!isValidGitHubSegment(params.owner) || !isValidGitHubSegment(params.repo)) {
+    throw new Error('Invalid GitHub repository owner or name.');
+  }
+  const safePath = sanitizeRepoPath(params.filePath);
+  const safeSuggestionId = params.suggestionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 12) || 'edit';
+
   const token = params.token.trim();
   if (!token) {
     throw new Error('A session-only GitHub token with Pull Request permissions is required to open a PR.');
@@ -260,7 +302,7 @@ export async function createPullRequestForApprovedSuggestion(params: {
 
   // 1. Get base branch SHA
   const refRes = await fetch(
-    `https://api.github.com/repos/${params.owner}/${params.repo}/git/ref/heads/${encodeURIComponent(params.baseBranch)}`,
+    `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/ref/heads/${encodeURIComponent(params.baseBranch)}`,
     {headers},
   );
   if (!refRes.ok) {
@@ -273,9 +315,9 @@ export async function createPullRequestForApprovedSuggestion(params: {
   }
 
   // 2. Create a guarded feature branch
-  const branchName = `mantis/suggestion-${params.suggestionId.slice(0, 8)}`;
+  const branchName = `mantis/suggestion-${safeSuggestionId}`;
   const createBranchRes = await fetch(
-    `https://api.github.com/repos/${params.owner}/${params.repo}/git/refs`,
+    `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/refs`,
     {
       method: 'POST',
       headers,
@@ -290,13 +332,13 @@ export async function createPullRequestForApprovedSuggestion(params: {
   }
 
   // 3. Check if file already exists on that branch to include its blob SHA
-  const encodedPath = params.filePath
+  const encodedPath = safePath
     .split('/')
     .map((seg) => encodeURIComponent(seg))
     .join('/');
   let existingFileSha: string | undefined;
   const existingRes = await fetch(
-    `https://api.github.com/repos/${params.owner}/${params.repo}/contents/${encodedPath}?ref=${encodeURIComponent(branchName)}`,
+    `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branchName)}`,
     {headers},
   );
   if (existingRes.ok) {
@@ -306,7 +348,7 @@ export async function createPullRequestForApprovedSuggestion(params: {
 
   // 4. Commit updated file strictly to the new branch
   const putRes = await fetch(
-    `https://api.github.com/repos/${params.owner}/${params.repo}/contents/${encodedPath}`,
+    `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodedPath}`,
     {
       method: 'PUT',
       headers,
@@ -324,7 +366,7 @@ export async function createPullRequestForApprovedSuggestion(params: {
 
   // 5. Open Pull Request for user review/merge
   const prRes = await fetch(
-    `https://api.github.com/repos/${params.owner}/${params.repo}/pulls`,
+    `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/pulls`,
     {
       method: 'POST',
       headers,
@@ -340,5 +382,9 @@ export async function createPullRequestForApprovedSuggestion(params: {
     throw new Error(`Branch ${branchName} created, but opening Pull Request failed (${prRes.status}).`);
   }
   const prData = (await prRes.json()) as {html_url?: string};
-  return prData.html_url || `https://github.com/${params.owner}/${params.repo}/pulls`;
+  const fallbackPrUrl = `https://github.com/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/pulls`;
+  if (prData.html_url && /^https:\/\/github\.com\//i.test(prData.html_url)) {
+    return prData.html_url;
+  }
+  return fallbackPrUrl;
 }

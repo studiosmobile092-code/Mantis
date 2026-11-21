@@ -46,16 +46,152 @@ const OPENROUTER_FALLBACK_MODELS = [
   'google/gemma-3-27b-it:free',
 ];
 
+const ALLOWED_ORIGIN_EXACT = new Set([
+  'https://studiosmobile092-code.github.io',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
+const ALLOWED_ORIGIN_RE =
+  /^https:\/\/[a-z0-9-]+\.(aistudio\.google\.com|run\.app|googleusercontent\.com|github\.io)$/i;
+
+function resolveAllowedOrigin(origin) {
+  if (!origin || origin === '*') return 'https://studiosmobile092-code.github.io';
+  const clean = String(origin).trim();
+  if (ALLOWED_ORIGIN_EXACT.has(clean) || ALLOWED_ORIGIN_RE.test(clean)) {
+    return clean;
+  }
+  return 'https://studiosmobile092-code.github.io';
+}
+
+function corsHeaders(origin) {
+  return {
+    'Access-Control-Allow-Origin': resolveAllowedOrigin(origin),
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
+  };
+}
+
+function jsonResponse(data, status, origin) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...corsHeaders(origin),
+    },
+  });
+}
+
+async function fetchWithAbortTimeout(url, init = {}, timeoutMs = 8500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Upstream request timed out after ${Math.round(timeoutMs / 1000)}s`));
+  }, timeoutMs);
+  try {
+    return await fetch(url, {...init, signal: controller.signal});
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isPrivateOrDisallowedHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.localdomain') ||
+    host === 'metadata'
+  ) {
+    return true;
+  }
+
+  // Block IPv6 loopback, link-local, unique-local, unspecified, and IPv4-mapped ranges
+  if (host.includes(':')) {
+    if (
+      host === '::1' ||
+      host === '::' ||
+      host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      host.startsWith('fe80') ||
+      host.startsWith('::ffff:')
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // Block integer/hex/octal obfuscated IPv4 literals
+  if (/^(0x[0-9a-f]+|\d+)$/i.test(host)) {
+    return true;
+  }
+
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const a = Number(ipv4Match[1]);
+    const b = Number(ipv4Match[2]);
+    const c = Number(ipv4Match[3]);
+    const d = Number(ipv4Match[4]);
+    if (a > 255 || b > 255 || c > 255 || d > 255) return true;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 192 && b === 0 && c === 0) return true;
+    if (a >= 224) return true;
+  }
+
+  return false;
+}
+
+function isSafePublicHttpUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    if (isPrivateOrDisallowedHost(parsed.hostname)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safePublicFetch(rawUrl, init = {}, timeoutMs = 9500) {
+  let current = rawUrl;
+  for (let hop = 0; hop < 4; hop += 1) {
+    if (!isSafePublicHttpUrl(current)) {
+      throw new Error('Blocked unsafe or private network URL target.');
+    }
+    const res = await fetchWithAbortTimeout(current, {...init, redirect: 'manual'}, timeoutMs);
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location');
+      if (!loc) return res;
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    return res;
+  }
+  throw new Error('Too many redirects while fetching external URL.');
+}
+
 async function discoverLiveOpenRouterFreeModels() {
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/models');
+    const res = await fetchWithAbortTimeout('https://openrouter.ai/api/v1/models', {}, 4500);
     if (!res.ok) return [];
     const payload = await res.json();
     const freeIds = (payload.data || [])
       .map((m) => String(m.id || '').trim())
       .filter((id) => id.endsWith(':free') || id === 'openrouter/free');
     const preferred = freeIds.filter((id) => /coder|qwen|llama|deepseek|gemma/i.test(id));
-    return Array.from(new Set(['openrouter/free', ...preferred, ...freeIds])).slice(0, 6);
+    return Array.from(new Set(['openrouter/free', ...preferred, ...freeIds])).slice(0, 4);
   } catch {
     return [];
   }
@@ -85,25 +221,6 @@ function getWorkersAiCandidates(preferredModel) {
   ];
 }
 
-function corsHeaders(origin) {
-  return {
-    'Access-Control-Allow-Origin': origin || '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Max-Age': '86400',
-  };
-}
-
-function jsonResponse(data, status, origin) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      ...corsHeaders(origin),
-    },
-  });
-}
-
 async function verifySupabaseUser(request, env) {
   const authHeader = request.headers.get('Authorization') || '';
   if (!authHeader.startsWith('Bearer ')) {
@@ -117,12 +234,16 @@ async function verifySupabaseUser(request, env) {
   const supabaseUrl = (env.SUPABASE_URL || DEFAULT_SUPABASE_URL).replace(/\/+$/, '');
   const publishableKey = env.SUPABASE_PUBLISHABLE_KEY || DEFAULT_SUPABASE_PUBLISHABLE_KEY;
 
-  const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
-    headers: {
-      apikey: publishableKey,
-      Authorization: `Bearer ${token}`,
+  const res = await fetchWithAbortTimeout(
+    `${supabaseUrl}/auth/v1/user`,
+    {
+      headers: {
+        apikey: publishableKey,
+        Authorization: `Bearer ${token}`,
+      },
     },
-  });
+    6000,
+  );
 
   if (!res.ok) {
     return {ok: false, status: 401, error: 'Invalid or expired Supabase session.'};
@@ -147,16 +268,20 @@ async function tryOllama(env, messages, preferredModel, maxTokens, temperature) 
     headers.Authorization = `Bearer ${env.OLLAMA_API_KEY.trim()}`;
   }
 
-  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model,
-      messages,
-      max_tokens: maxTokens,
-      temperature,
-    }),
-  });
+  const res = await fetchWithAbortTimeout(
+    `${baseUrl}/v1/chat/completions`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+      }),
+    },
+    9000,
+  );
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`Ollama (${res.status}): ${errText.slice(0, 180)}`);
@@ -198,44 +323,52 @@ async function tryOpenAiCompatible(endpoint, apiKey, models, providerLabel, mess
   if (!key) return null;
 
   let lastErr = `${providerLabel} failed`;
-  for (const model of models) {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-        ...extraHeaders,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        max_tokens: maxTokens,
-        temperature,
-      }),
-    });
+  for (const model of models.slice(0, 3)) {
+    try {
+      const res = await fetchWithAbortTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'Content-Type': 'application/json',
+            ...extraHeaders,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            max_tokens: maxTokens,
+            temperature,
+          }),
+        },
+        8500,
+      );
 
-    if (res.ok) {
-      const payload = await res.json();
-      const msg = payload?.choices?.[0]?.message;
-      const text = (msg?.content || msg?.reasoning_content || '').trim();
-      if (text) {
-        return {text, model};
+      if (res.ok) {
+        const payload = await res.json();
+        const msg = payload?.choices?.[0]?.message;
+        const text = (msg?.content || msg?.reasoning_content || '').trim();
+        if (text) {
+          return {text, model};
+        }
+      } else {
+        const errText = await res.text();
+        if (res.status === 401) {
+          lastErr = `${providerLabel} key rejected (401 Unauthorized)`;
+          break;
+        }
+        if (res.status === 402) {
+          lastErr = `${providerLabel} credit limit reached (402 Payment Required)`;
+          break;
+        }
+        if (res.status === 403) {
+          lastErr = `${providerLabel} token lacks Inference permission (403 Forbidden)`;
+          break;
+        }
+        lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
       }
-    } else {
-      const errText = await res.text();
-      if (res.status === 401) {
-        lastErr = `${providerLabel} key rejected (401 Unauthorized)`;
-        break;
-      }
-      if (res.status === 402) {
-        lastErr = `${providerLabel} credit limit reached (402 Payment Required)`;
-        break;
-      }
-      if (res.status === 403) {
-        lastErr = `${providerLabel} token lacks Inference permission (403 Forbidden)`;
-        break;
-      }
-      lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
+    } catch (err) {
+      lastErr = `${providerLabel} ${model}: ${err instanceof Error ? err.message : 'Request timed out'}`;
     }
   }
   throw new Error(lastErr);
@@ -302,7 +435,9 @@ async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 14
       if (res) return res;
     } catch (firstErr) {
       const liveModels = await discoverLiveOpenRouterFreeModels();
-      const extraModels = liveModels.filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id));
+      const extraModels = liveModels
+        .filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id))
+        .slice(0, 2);
       if (extraModels.length > 0) {
         try {
           const retryRes = await tryOpenAiCompatible(
@@ -416,13 +551,29 @@ function extractBalancedJsonArray(source, startIndex) {
   return null;
 }
 
+function isAllowedYouTubeCaptionUrl(trackUrl) {
+  try {
+    const parsed = new URL(trackUrl);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'www.youtube.com' || host.endsWith('.youtube.com') || host.endsWith('.googlevideo.com');
+  } catch {
+    return false;
+  }
+}
+
 async function fetchCaptionTrackLines(trackUrl) {
-  const capRes = await fetch(trackUrl, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  if (!isAllowedYouTubeCaptionUrl(trackUrl)) return [];
+  const capRes = await fetchWithAbortTimeout(
+    trackUrl,
+    {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      },
     },
-  });
+    7000,
+  );
   if (!capRes.ok) return [];
   const raw = await capRes.text();
 
@@ -475,26 +626,30 @@ async function fetchYouTubeInnerTube(videoId) {
 
   for (const client of clients) {
     try {
-      const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': client.userAgent,
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        body: JSON.stringify({
-          videoId,
-          context: {
-            client: {
-              clientName: client.clientName,
-              clientVersion: client.clientVersion,
-              androidSdkVersion: client.androidSdkVersion,
-              hl: 'en',
-              gl: 'US',
-            },
+      const res = await fetchWithAbortTimeout(
+        'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': client.userAgent,
+            'Accept-Language': 'en-US,en;q=0.9',
           },
-        }),
-      });
+          body: JSON.stringify({
+            videoId,
+            context: {
+              client: {
+                clientName: client.clientName,
+                clientVersion: client.clientVersion,
+                androidSdkVersion: client.androidSdkVersion,
+                hl: 'en',
+                gl: 'US',
+              },
+            },
+          }),
+        },
+        7000,
+      );
       if (!res.ok) continue;
       const data = await res.json();
       const title = String(data?.videoDetails?.title || '').trim();
@@ -632,13 +787,18 @@ async function extractYouTubeTranscript(url, videoId) {
 }
 
 async function fetchJinaMarkdownFallback(url) {
+  if (!isSafePublicHttpUrl(url)) return null;
   const jinaUrl = `https://r.jina.ai/${url}`;
-  const res = await fetch(jinaUrl, {
-    headers: {
-      Accept: 'text/plain, text/markdown',
-      'X-Return-Format': 'markdown',
+  const res = await fetchWithAbortTimeout(
+    jinaUrl,
+    {
+      headers: {
+        Accept: 'text/plain, text/markdown',
+        'X-Return-Format': 'markdown',
+      },
     },
-  });
+    9500,
+  );
   if (!res.ok) return null;
   const raw = await res.text();
   if (!raw || raw.trim().length < 80) return null;
@@ -661,14 +821,21 @@ async function fetchJinaMarkdownFallback(url) {
 }
 
 async function extractWebArticle(url) {
+  if (!isSafePublicHttpUrl(url)) {
+    throw new Error('Blocked unsafe or private network URL target.');
+  }
   try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        Accept: 'text/html,text/plain,application/json,text/markdown',
+    const res = await safePublicFetch(
+      url,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Accept: 'text/html,text/plain,application/json,text/markdown',
+        },
       },
-    });
+      9500,
+    );
     if (res.ok) {
       const contentType = res.headers.get('content-type') || '';
       const raw = await res.text();
@@ -947,6 +1114,13 @@ export default {
         const targetUrl = String(body.url || '').trim();
         if (!/^https?:\/\//i.test(targetUrl)) {
           return jsonResponse({error: 'Enter a valid http:// or https:// URL.'}, 400, origin);
+        }
+        if (!isSafePublicHttpUrl(targetUrl)) {
+          return jsonResponse(
+            {error: 'Blocked unsafe or private network URL target.'},
+            400,
+            origin,
+          );
         }
         const ytId = extractYouTubeVideoId(targetUrl);
         const extracted = ytId

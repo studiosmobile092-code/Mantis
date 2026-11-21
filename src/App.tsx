@@ -230,6 +230,12 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTyping =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT';
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandPaletteOpen((prev) => !prev);
@@ -244,6 +250,21 @@ export default function App() {
           }
           return next;
         });
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        setRightPaneOpen((prev) => {
+          const next = !prev;
+          try {
+            window.localStorage.setItem('mantis_right_pane_v1', String(next));
+          } catch {
+            // ignore
+          }
+          return next;
+        });
+      } else if (e.altKey && !isTyping && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setStudioSubView('teach');
+        setActiveArea('studio');
       }
     };
     window.addEventListener('keydown', onKeyDown);

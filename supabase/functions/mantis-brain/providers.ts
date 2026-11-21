@@ -1,4 +1,4 @@
-import {getEnv} from './helpers.ts';
+import {fetchWithAbortTimeout, getEnv} from './helpers.ts';
 
 export const HF_FALLBACK_MODELS = [
   'Qwen/Qwen2.5-Coder-32B-Instruct',
@@ -19,14 +19,14 @@ const OPENROUTER_FALLBACK_MODELS = [
 
 async function discoverLiveOpenRouterFreeModels(): Promise<string[]> {
   try {
-    const res = await fetch('https://openrouter.ai/api/v1/models');
+    const res = await fetchWithAbortTimeout('https://openrouter.ai/api/v1/models', {}, 4500);
     if (!res.ok) return [];
     const payload = (await res.json()) as {data?: Array<{id?: string}>};
     const freeIds = (payload.data || [])
       .map((m) => String(m.id || '').trim())
       .filter((id) => id.endsWith(':free') || id === 'openrouter/free');
     const preferred = freeIds.filter((id) => /coder|qwen|llama|deepseek|gemma/i.test(id));
-    return Array.from(new Set(['openrouter/free', ...preferred, ...freeIds])).slice(0, 6);
+    return Array.from(new Set(['openrouter/free', ...preferred, ...freeIds])).slice(0, 4);
   } catch {
     return [];
   }
@@ -46,11 +46,15 @@ async function tryOllama(
   const ollamaKey = getEnv('OLLAMA_API_KEY');
   if (ollamaKey) headers.Authorization = `Bearer ${ollamaKey}`;
 
-  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({model, messages, max_tokens: maxTokens, temperature}),
-  });
+  const res = await fetchWithAbortTimeout(
+    `${baseUrl}/v1/chat/completions`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({model, messages, max_tokens: maxTokens, temperature}),
+    },
+    9000,
+  );
   if (!res.ok) throw new Error(`Ollama (${res.status}): ${(await res.text()).slice(0, 180)}`);
   const payload = (await res.json()) as {choices?: Array<{message?: {content?: string}}>};
   const text = (payload?.choices?.[0]?.message?.content || '').trim();
@@ -72,34 +76,42 @@ async function tryOpenAiCompatible(
   if (!key) return null;
 
   let lastErr = `${providerLabel} failed`;
-  for (const model of models) {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...extraHeaders},
-      body: JSON.stringify({model, messages, max_tokens: maxTokens, temperature}),
-    });
-    if (res.ok) {
-      const payload = (await res.json()) as {
-        choices?: Array<{message?: {content?: string; reasoning_content?: string}}>;
-      };
-      const msg = payload?.choices?.[0]?.message;
-      const text = (msg?.content || msg?.reasoning_content || '').trim();
-      if (text) return {text, model};
-    } else {
-      const errText = await res.text();
-      if (res.status === 401) {
-        lastErr = `${providerLabel} key rejected (401 Unauthorized)`;
-        break;
+  for (const model of models.slice(0, 3)) {
+    try {
+      const res = await fetchWithAbortTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          headers: {Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...extraHeaders},
+          body: JSON.stringify({model, messages, max_tokens: maxTokens, temperature}),
+        },
+        8500,
+      );
+      if (res.ok) {
+        const payload = (await res.json()) as {
+          choices?: Array<{message?: {content?: string; reasoning_content?: string}}>;
+        };
+        const msg = payload?.choices?.[0]?.message;
+        const text = (msg?.content || msg?.reasoning_content || '').trim();
+        if (text) return {text, model};
+      } else {
+        const errText = await res.text();
+        if (res.status === 401) {
+          lastErr = `${providerLabel} key rejected (401 Unauthorized)`;
+          break;
+        }
+        if (res.status === 402) {
+          lastErr = `${providerLabel} credit limit reached (402 Payment Required)`;
+          break;
+        }
+        if (res.status === 403) {
+          lastErr = `${providerLabel} token lacks permission (403 Forbidden)`;
+          break;
+        }
+        lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
       }
-      if (res.status === 402) {
-        lastErr = `${providerLabel} credit limit reached (402 Payment Required)`;
-        break;
-      }
-      if (res.status === 403) {
-        lastErr = `${providerLabel} token lacks permission (403 Forbidden)`;
-        break;
-      }
-      lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
+    } catch (err) {
+      lastErr = `${providerLabel} ${model}: ${err instanceof Error ? err.message : 'Request timed out'}`;
     }
   }
   throw new Error(lastErr);
@@ -160,7 +172,9 @@ export async function callProviderCascade(
       if (res) return res;
     } catch (firstErr) {
       const liveModels = await discoverLiveOpenRouterFreeModels();
-      const extraModels = liveModels.filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id));
+      const extraModels = liveModels
+        .filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id))
+        .slice(0, 2);
       if (extraModels.length > 0) {
         try {
           const retryRes = await tryOpenAiCompatible(

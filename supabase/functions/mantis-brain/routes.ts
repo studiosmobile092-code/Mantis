@@ -4,6 +4,7 @@ import {
   extractYouTubeTranscript,
   extractYouTubeVideoId,
   getEnv,
+  isSafePublicHttpUrl,
   jsonResponse,
   verifySupabaseUser,
 } from './helpers.ts';
@@ -225,6 +226,13 @@ export async function handleMantisRequest(request: Request): Promise<Response> {
       const targetUrl = String(body.url || '').trim();
       if (!/^https?:\/\//i.test(targetUrl)) {
         return jsonResponse({error: 'Enter a valid http:// or https:// URL.'}, 400, origin);
+      }
+      if (!isSafePublicHttpUrl(targetUrl)) {
+        return jsonResponse(
+          {error: 'Blocked unsafe or private network URL target.'},
+          400,
+          origin,
+        );
       }
       const ytId = extractYouTubeVideoId(targetUrl);
       const extracted = ytId

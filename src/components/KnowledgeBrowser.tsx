@@ -4,6 +4,7 @@ import {
   CheckSquare,
   Edit3,
   ExternalLink,
+  FileText,
   Folder,
   FolderPlus,
   PlusCircle,
@@ -13,8 +14,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import {type FormEvent, memo, useEffect, useMemo, useState} from 'react';
-import {getEntryStatus} from '../lib/knowledgeSync';
+import {type FormEvent, memo, useEffect, useMemo, useRef, useState} from 'react';
+import {getEntryStatus, sanitizeExternalHttpUrl} from '../lib/knowledgeSync';
 import {parseTagsInput} from '../lib/memory';
 import type {
   KnowledgeEntry,
@@ -83,6 +84,10 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isDeletingId, setIsDeletingId] = useState<string | null>(null);
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(
+    highlightedEntryId || entries[0]?.id || null,
+  );
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Bulk select & action state
   const [bulkMode, setBulkMode] = useState(false);
@@ -102,6 +107,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
       setSelectedFolderId('all');
       setSelectedTag('all');
       setSearchQuery('');
+      setSelectedEntryId(highlightedEntryId);
     }
   }, [highlightedEntryId]);
 
@@ -182,6 +188,54 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
         .map((e) => e.id),
     [filteredEntries, selectedIds],
   );
+
+  const activeEntry = useMemo(() => {
+    if (filteredEntries.length === 0) return null;
+    if (selectedEntryId) {
+      const match = filteredEntries.find((e) => e.id === selectedEntryId);
+      if (match) return match;
+    }
+    return filteredEntries[0];
+  }, [filteredEntries, selectedEntryId]);
+
+  useEffect(() => {
+    if (filteredEntries.length === 0) return;
+    if (!selectedEntryId || !filteredEntries.some((e) => e.id === selectedEntryId)) {
+      setSelectedEntryId(filteredEntries[0].id);
+    }
+  }, [filteredEntries, selectedEntryId]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isInputFocused =
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT';
+
+      if (event.key === '/' && !isInputFocused) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      if (isInputFocused || editingId || filteredEntries.length === 0) return;
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const curIdx = activeEntry
+          ? filteredEntries.findIndex((e) => e.id === activeEntry.id)
+          : 0;
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        const nextIdx =
+          (curIdx + delta + filteredEntries.length) % filteredEntries.length;
+        setSelectedEntryId(filteredEntries[nextIdx].id);
+        setConfirmDeleteId(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [filteredEntries, activeEntry, editingId]);
 
   function toggleSelectEntry(id: string) {
     setSelectedIds((prev) => ({...prev, [id]: !prev[id]}));
@@ -476,10 +530,12 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[240px_1fr]">
-        {/* Folders Column */}
-        <aside className="space-y-1.5">
-          <h2 className="px-2 pb-1 text-xs font-semibold text-ink-muted">Folders</h2>
+      <div className="grid gap-4 lg:grid-cols-[220px_300px_1fr]">
+        {/* Column 1: Folders Tree */}
+        <aside className="space-y-1.5 rounded-lg border border-line bg-surface p-3">
+          <h2 className="px-2 pb-1 text-xs font-semibold tracking-wide text-ink-muted uppercase">
+            Folders
+          </h2>
 
           <button
             type="button"
@@ -487,13 +543,13 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
               setSelectedFolderId('all');
               onClearHighlight();
             }}
-            className={`flex min-h-[44px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors ${
+            className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
               selectedFolderId === 'all'
-                ? 'bg-elevated font-medium text-ink'
-                : 'text-ink-muted hover:bg-surface hover:text-ink'
+                ? 'bg-elevated font-semibold text-ink'
+                : 'text-ink-muted hover:bg-inset hover:text-ink'
             }`}
           >
-            <span className="flex items-center gap-2.5 truncate">
+            <span className="flex items-center gap-2 truncate">
               <BookOpen className="h-4 w-4 shrink-0 text-ink-subtle" />
               <span className="truncate">All Entries</span>
             </span>
@@ -512,13 +568,13 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                     setConfirmDeleteFolderId(null);
                     onClearHighlight();
                   }}
-                  className={`flex min-h-[44px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                  className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
                     isSelected
-                      ? 'bg-elevated font-medium text-ink'
-                      : 'text-ink-muted hover:bg-surface hover:text-ink'
+                      ? 'bg-elevated font-semibold text-ink'
+                      : 'text-ink-muted hover:bg-inset hover:text-ink'
                   }`}
                 >
-                  <span className="flex items-center gap-2.5 truncate">
+                  <span className="flex items-center gap-2 truncate">
                     <Folder className="h-4 w-4 shrink-0 text-accent-text" />
                     <span className="truncate">{folder.name}</span>
                   </span>
@@ -538,14 +594,14 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                               setSelectedFolderId('all');
                             }
                           }}
-                          className="min-h-[36px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+                          className="min-h-[38px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
                         >
                           Remove Folder
                         </button>
                         <button
                           type="button"
                           onClick={() => setConfirmDeleteFolderId(null)}
-                          className="min-h-[36px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
+                          className="min-h-[38px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
                         >
                           Cancel
                         </button>
@@ -572,13 +628,13 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                 setSelectedFolderId('uncategorized');
                 onClearHighlight();
               }}
-              className={`flex min-h-[44px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors ${
+              className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
                 selectedFolderId === 'uncategorized'
-                  ? 'bg-elevated font-medium text-ink'
-                  : 'text-ink-muted hover:bg-surface hover:text-ink'
+                  ? 'bg-elevated font-semibold text-ink'
+                  : 'text-ink-muted hover:bg-inset hover:text-ink'
               }`}
             >
-              <span className="flex items-center gap-2.5 truncate">
+              <span className="flex items-center gap-2 truncate">
                 <Folder className="h-4 w-4 shrink-0 text-ink-subtle" />
                 <span className="truncate">Uncategorized</span>
               </span>
@@ -589,351 +645,411 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
           )}
         </aside>
 
-        {/* Entries List Column */}
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-1 rounded-md border border-line bg-surface p-1">
-              {(
-                [
-                  {id: 'all', label: `All (${entries.length})`},
-                  {id: 'trusted', label: `Trusted (${statusCounts.trusted})`},
-                  {id: 'reviewed', label: `Reviewed (${statusCounts.reviewed})`},
-                  {id: 'raw', label: `Raw (${statusCounts.raw})`},
-                ] as const
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setStatusFilter(tab.id)}
-                  className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
-                    statusFilter === tab.id
-                      ? 'bg-elevated text-ink'
-                      : 'text-ink-muted hover:text-ink'
-                  }`}
-                >
-                  {tab.label}
-                </button>
+        {/* Column 2: Searchable Compact Note List */}
+        <section
+          aria-label="Knowledge entries list"
+          className="flex flex-col gap-3 rounded-lg border border-line bg-surface p-3"
+        >
+          <div className="relative">
+            <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-subtle" />
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search notes… (press /)"
+              className="min-h-[42px] w-full rounded-md border border-line-strong bg-inset py-2 pr-3 pl-9 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-1 rounded-md border border-line bg-inset p-1">
+            {(
+              [
+                {id: 'all', label: `All (${entries.length})`},
+                {id: 'trusted', label: `Trusted (${statusCounts.trusted})`},
+                {id: 'reviewed', label: `Reviewed (${statusCounts.reviewed})`},
+                {id: 'raw', label: `Raw (${statusCounts.raw})`},
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setStatusFilter(tab.id)}
+                className={`min-h-[36px] rounded px-2 text-[11px] font-medium tabular-nums transition-colors ${
+                  statusFilter === tab.id
+                    ? 'bg-elevated text-ink'
+                    : 'text-ink-muted hover:text-ink'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {allTags.length > 0 && (
+            <select
+              aria-label="Filter by tag"
+              value={selectedTag}
+              onChange={(e) => setSelectedTag(e.target.value)}
+              className="min-h-[40px] rounded-md border border-line-strong bg-inset px-2.5 py-1.5 font-mono text-xs text-ink focus:border-accent focus:outline-none"
+            >
+              <option value="all">All Tags ({allTags.length})</option>
+              {allTags.map((tag) => (
+                <option key={tag} value={tag}>
+                  #{tag}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {isLoading ? (
+            <div className="space-y-2">
+              {[1, 2, 3, 4].map((n) => (
+                <div key={n} className="space-y-2 rounded-md border border-line bg-inset p-3">
+                  <div className="h-3.5 w-3/4 animate-pulse rounded bg-elevated" />
+                  <div className="h-2.5 w-1/2 animate-pulse rounded bg-elevated" />
+                </div>
               ))}
             </div>
+          ) : filteredEntries.length === 0 ? (
+            <div className="rounded-md border border-line bg-inset p-5 text-center">
+              <p className="text-xs font-medium text-ink">
+                {entries.length === 0 ? 'No knowledge saved yet' : 'No matching notes'}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (entries.length === 0) {
+                    onOpenTeach();
+                  } else {
+                    setSelectedFolderId('all');
+                    setSelectedTag('all');
+                    setStatusFilter('all');
+                    setSearchQuery('');
+                  }
+                }}
+                className="mt-3 inline-flex min-h-[40px] items-center rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-accent-text hover:bg-elevated"
+              >
+                {entries.length === 0 ? 'Teach First Entry' : 'Reset Filters'}
+              </button>
+            </div>
+          ) : (
+            <div className="max-h-[60vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-inset">
+              {filteredEntries.map((entry) => {
+                const entryStatus = getEntryStatus(entry);
+                const isSelected = activeEntry?.id === entry.id;
+                const isChecked = Boolean(selectedIds[entry.id]);
+                const folderName =
+                  (entry.folder_id && folderMap.get(entry.folder_id)?.name) || 'Uncategorized';
 
-            {saveFeedback && saveFeedback.state !== 'idle' ? (
+                return (
+                  <div
+                    key={entry.id}
+                    className={`flex items-start gap-2 p-2.5 transition-colors ${
+                      isSelected ? 'bg-accent-soft' : 'hover:bg-elevated/45'
+                    }`}
+                  >
+                    {bulkMode && (
+                      <button
+                        type="button"
+                        aria-label={`Select ${entry.title}`}
+                        onClick={() => toggleSelectEntry(entry.id)}
+                        className="mt-0.5 inline-flex min-h-[38px] min-w-[38px] shrink-0 items-center justify-center rounded border border-line-strong bg-surface text-accent-text hover:border-accent-border"
+                      >
+                        {isChecked ? (
+                          <CheckSquare className="h-4 w-4" />
+                        ) : (
+                          <Square className="h-4 w-4 text-ink-muted" />
+                        )}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedEntryId(entry.id);
+                        setEditingId(null);
+                        setConfirmDeleteId(null);
+                        if (highlightedEntryId && highlightedEntryId !== entry.id) {
+                          onClearHighlight();
+                        }
+                      }}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-semibold text-ink">
+                          {entry.title}
+                        </span>
+                        <span
+                          className={`shrink-0 font-mono text-[10px] font-semibold uppercase ${
+                            entryStatus === 'trusted'
+                              ? 'text-accent-text'
+                              : entryStatus === 'raw'
+                                ? 'text-amber-400'
+                                : 'text-ink-subtle'
+                          }`}
+                        >
+                          {entryStatus}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 truncate font-mono text-[11px] text-ink-muted">
+                        <span className="truncate">{folderName}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="shrink-0 tabular-nums">
+                          {new Date(entry.updated_at).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-subtle">
+                        {entry.content}
+                      </p>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="mt-auto flex items-center justify-between border-t border-line pt-2 font-mono text-[11px] text-ink-subtle">
+            <span>↑↓ select note · / search</span>
+            {saveFeedback && saveFeedback.state !== 'idle' && (
               <span
-                className={`font-mono text-xs ${
+                className={
                   saveFeedback.state === 'failed'
                     ? 'text-red-400'
                     : saveFeedback.state === 'saved'
                       ? 'text-accent-text'
                       : 'text-ink-muted'
-                }`}
+                }
               >
                 {saveFeedback.message}
               </span>
-            ) : (
-              <span className="font-mono text-[11px] text-ink-subtle">
-                AI uses Trusted (strong) &gt; Reviewed; Raw excluded by default
-              </span>
             )}
           </div>
+        </section>
 
-          <div className={`grid gap-2.5 ${allTags.length > 0 ? 'sm:grid-cols-[1fr_180px]' : ''}`}>
-            <div className="relative">
-              <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-ink-subtle" />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search titles, tags, or snippets..."
-                className="min-h-[44px] w-full rounded-md border border-line bg-surface py-2 pr-4 pl-10 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
-              />
-            </div>
-
-            {allTags.length > 0 && (
-              <select
-                aria-label="Filter by tag"
-                value={selectedTag}
-                onChange={(e) => setSelectedTag(e.target.value)}
-                className="min-h-[44px] rounded-md border border-line bg-surface px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
-              >
-                <option value="all">All Tags ({allTags.length})</option>
-                {allTags.map((tag) => (
-                  <option key={tag} value={tag}>
-                    #{tag}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
+        {/* Column 3: Focused Note Reader & Inline Editor */}
+        <section
+          aria-label="Note reader and editor"
+          className="rounded-lg border border-line bg-surface p-5"
+        >
           {isLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map((n) => (
-                <div
-                  key={n}
-                  className="space-y-3 rounded-lg border border-line bg-surface p-5"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="h-4 w-48 animate-pulse rounded bg-elevated" />
-                    <div className="h-7 w-24 animate-pulse rounded bg-elevated" />
-                  </div>
-                  <div className="h-3 w-64 animate-pulse rounded bg-elevated" />
-                  <div className="h-14 w-full animate-pulse rounded bg-inset" />
-                </div>
-              ))}
+            <div className="space-y-4">
+              <div className="h-6 w-2/3 animate-pulse rounded bg-elevated" />
+              <div className="h-4 w-1/3 animate-pulse rounded bg-elevated" />
+              <div className="h-44 w-full animate-pulse rounded bg-inset" />
             </div>
-          ) : filteredEntries.length === 0 ? (
-            <div className="rounded-lg border border-line bg-surface p-8 text-center">
-              <h3 className="text-sm font-semibold text-ink">
-                {entries.length === 0 ? 'No knowledge saved yet' : 'No matching entries'}
-              </h3>
-              <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-ink-muted">
-                {entries.length === 0
-                  ? 'Teach Mantis your first pattern, fact, or definition so it persists across devices.'
-                  : 'Try clearing your search filter or selecting All Entries.'}
-              </p>
-              <div className="mt-4 flex justify-center gap-2">
-                {entries.length === 0 ? (
-                  <button
-                    type="button"
-                    onClick={onOpenTeach}
-                    className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover"
-                  >
-                    <PlusCircle className="h-4 w-4" />
-                    <span>Teach First Entry</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedFolderId('all');
-                      setSelectedTag('all');
-                      setStatusFilter('all');
-                      setSearchQuery('');
-                    }}
-                    className="inline-flex min-h-[44px] items-center rounded-md border border-line-strong bg-elevated px-4 py-2 text-xs font-medium text-ink hover:opacity-90"
-                  >
-                    Reset Filters
-                  </button>
-                )}
+          ) : !activeEntry ? (
+            <div className="flex min-h-[280px] flex-col items-center justify-center space-y-3 text-center">
+              <FileText className="h-8 w-8 text-ink-subtle" />
+              <div className="space-y-1">
+                <h3 className="text-sm font-semibold text-ink">
+                  {entries.length === 0 ? 'Knowledge Explorer Ready' : 'Select a note to read'}
+                </h3>
+                <p className="max-w-sm text-xs leading-relaxed text-ink-muted">
+                  {entries.length === 0
+                    ? 'Teach Mantis your first rule, coding convention, or ingested link so it stays synced across devices.'
+                    : 'Choose any note on the left or press ↑ / ↓ to inspect, mark Trusted, or edit inline.'}
+                </p>
+              </div>
+              {entries.length === 0 && (
+                <button
+                  type="button"
+                  onClick={onOpenTeach}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover"
+                >
+                  <PlusCircle className="h-4 w-4" />
+                  <span>Teach First Entry</span>
+                </button>
+              )}
+            </div>
+          ) : editingId === activeEntry.id ? (
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm font-medium text-ink focus:border-accent focus:outline-none"
+                />
+                <select
+                  value={editFolderId}
+                  onChange={(e) => setEditFolderId(e.target.value)}
+                  className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                >
+                  <option value="">Uncategorized</option>
+                  {folders.map((folder) => (
+                    <option key={folder.id} value={folder.id}>
+                      {folder.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Entry trust status"
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value as KnowledgeStatus)}
+                  className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
+                >
+                  <option value="trusted">Trusted (Strong AI Weight)</option>
+                  <option value="reviewed">Reviewed (Medium Weight)</option>
+                  <option value="raw">Raw (Excluded by Default)</option>
+                </select>
+              </div>
+
+              <input
+                type="text"
+                value={editTagsRaw}
+                onChange={(e) => setEditTagsRaw(e.target.value)}
+                placeholder="Tags separated by commas"
+                className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
+              />
+
+              <textarea
+                rows={12}
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                className="w-full rounded-md border border-line-strong bg-inset p-3.5 font-mono text-xs leading-relaxed text-ink focus:border-accent focus:outline-none"
+              />
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingId(null)}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3.5 py-2 text-xs font-medium text-ink hover:bg-elevated"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  <span>Cancel</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingEdit}
+                  onClick={() => saveEdit(activeEntry.id)}
+                  className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  <span>{isSavingEdit ? 'Saving…' : 'Save Changes'}</span>
+                </button>
               </div>
             </div>
           ) : (
-            <div className="divide-y divide-line rounded-lg border border-line bg-surface">
-              {filteredEntries.map((entry) => {
-                const folderName =
-                  (entry.folder_id && folderMap.get(entry.folder_id)?.name) || 'Uncategorized';
-                const entryStatus = getEntryStatus(entry);
-                const isEditing = editingId === entry.id;
-                const isHighlighted = highlightedEntryId === entry.id;
-                const isChecked = Boolean(selectedIds[entry.id]);
+            (() => {
+              const entry = activeEntry;
+              const folderName =
+                (entry.folder_id && folderMap.get(entry.folder_id)?.name) || 'Uncategorized';
+              const entryStatus = getEntryStatus(entry);
+              const safeSourceUrl = sanitizeExternalHttpUrl(entry.source_url);
 
-                return (
-                  <article
-                    key={entry.id}
-                    className={`p-4 sm:p-5 ${
-                      isHighlighted || isChecked ? 'bg-accent-soft' : ''
-                    }`}
-                  >
-                    {isEditing ? (
-                      <div className="space-y-3">
-                        <div className="grid gap-3 sm:grid-cols-3">
-                          <input
-                            type="text"
-                            value={editTitle}
-                            onChange={(e) => setEditTitle(e.target.value)}
-                            className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm font-medium text-ink focus:border-accent focus:outline-none"
-                          />
-                          <select
-                            value={editFolderId}
-                            onChange={(e) => setEditFolderId(e.target.value)}
-                            className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
-                          >
-                            <option value="">Uncategorized</option>
-                            {folders.map((folder) => (
-                              <option key={folder.id} value={folder.id}>
-                                {folder.name}
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            aria-label="Entry trust status"
-                            value={editStatus}
-                            onChange={(e) => setEditStatus(e.target.value as KnowledgeStatus)}
-                            className="min-h-[44px] rounded-md border border-line-strong bg-inset px-3 py-2 text-sm text-ink focus:border-accent focus:outline-none"
-                          >
-                            <option value="trusted">Trusted (Strong AI Weight)</option>
-                            <option value="reviewed">Reviewed (Medium Weight)</option>
-                            <option value="raw">Raw (Excluded by Default)</option>
-                          </select>
-                        </div>
-
-                        <input
-                          type="text"
-                          value={editTagsRaw}
-                          onChange={(e) => setEditTagsRaw(e.target.value)}
-                          placeholder="Tags separated by commas"
-                          className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
-                        />
-
-                        <textarea
-                          rows={5}
-                          value={editContent}
-                          onChange={(e) => setEditContent(e.target.value)}
-                          className="w-full rounded-md border border-line-strong bg-inset p-3 font-mono text-xs leading-relaxed text-ink focus:border-accent focus:outline-none"
-                        />
-
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setEditingId(null)}
-                            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3.5 py-2 text-xs font-medium text-ink hover:bg-elevated"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                            <span>Cancel</span>
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isSavingEdit}
-                            onClick={() => saveEdit(entry.id)}
-                            className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md bg-accent px-3.5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                            <span>{isSavingEdit ? 'Saving…' : 'Save Changes'}</span>
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="flex items-start gap-2.5">
-                            {bulkMode && (
-                              <button
-                                type="button"
-                                aria-label={`Select ${entry.title}`}
-                                onClick={() => toggleSelectEntry(entry.id)}
-                                className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line-strong bg-inset text-accent-text hover:border-accent-border"
-                              >
-                                {isChecked ? (
-                                  <CheckSquare className="h-4 w-4" />
-                                ) : (
-                                  <Square className="h-4 w-4 text-ink-muted" />
-                                )}
-                              </button>
-                            )}
-                            <div className="space-y-1">
-                              <h3 className="text-base font-semibold text-ink">
-                                {entry.title}
-                              </h3>
-                              <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-ink-muted">
-                                <span
-                                  className={
-                                    entryStatus === 'trusted'
-                                      ? 'font-semibold text-accent-text'
-                                      : entryStatus === 'raw'
-                                        ? 'font-semibold text-amber-400'
-                                        : 'text-ink'
-                                  }
-                                >
-                                  {entryStatus === 'trusted'
-                                    ? 'Trusted'
-                                    : entryStatus === 'raw'
-                                      ? 'Raw'
-                                      : 'Reviewed'}
-                                </span>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-ink">{folderName}</span>
-                                {entry.tags.length > 0 && (
-                                  <>
-                                    <span aria-hidden="true">·</span>
-                                    <span>{entry.tags.join(', ')}</span>
-                                  </>
-                                )}
-                                <span aria-hidden="true">·</span>
-                                <span className="tabular-nums">
-                                  Updated {new Date(entry.updated_at).toLocaleDateString()}
-                                </span>
-                                {entry.source_url && (
-                                  <>
-                                    <span aria-hidden="true">·</span>
-                                    <a
-                                      href={entry.source_url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="inline-flex items-center gap-1 text-accent-text underline underline-offset-2 hover:opacity-85"
-                                    >
-                                      <ExternalLink className="h-3 w-3" />
-                                      <span>Source</span>
-                                    </a>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {entryStatus !== 'trusted' && (
-                              <button
-                                type="button"
-                                onClick={() => void onUpdateEntryStatus(entry.id, 'trusted')}
-                                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-accent-border bg-accent-soft px-3 py-1.5 text-xs font-semibold text-accent-text hover:opacity-90"
-                              >
-                                <ShieldCheck className="h-3.5 w-3.5" />
-                                <span>Mark as Trusted</span>
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => startEdit(entry)}
-                              aria-label={`Edit ${entry.title}`}
-                              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink hover:border-line-strong"
+              return (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+                    <div className="space-y-1.5">
+                      <h2 className="text-lg font-semibold text-ink">{entry.title}</h2>
+                      <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-ink-muted">
+                        <span
+                          className={
+                            entryStatus === 'trusted'
+                              ? 'font-semibold text-accent-text'
+                              : entryStatus === 'raw'
+                                ? 'font-semibold text-amber-400'
+                                : 'text-ink'
+                          }
+                        >
+                          {entryStatus === 'trusted'
+                            ? 'Trusted'
+                            : entryStatus === 'raw'
+                              ? 'Raw (Excluded from AI)'
+                              : 'Reviewed'}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-ink">{folderName}</span>
+                        {entry.tags.length > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>{entry.tags.map((t) => `#${t}`).join(' ')}</span>
+                          </>
+                        )}
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          Updated {new Date(entry.updated_at).toLocaleDateString()}
+                        </span>
+                        {safeSourceUrl && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <a
+                              href={safeSourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-accent-text underline underline-offset-2 hover:opacity-85"
                             >
-                              <Edit3 className="h-3.5 w-3.5" />
-                              <span>Edit</span>
-                            </button>
-
-                            {confirmDeleteId === entry.id ? (
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  disabled={isDeletingId === entry.id}
-                                  onClick={() => confirmDelete(entry.id)}
-                                  className="min-h-[40px] rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
-                                >
-                                  {isDeletingId === entry.id ? 'Deleting…' : 'Confirm Delete'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setConfirmDeleteId(null)}
-                                  className="min-h-[40px] rounded-md border border-line-strong px-2.5 py-1.5 text-xs text-ink-muted hover:bg-elevated"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteId(entry.id)}
-                                aria-label={`Delete ${entry.title}`}
-                                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-red-500/40 hover:text-red-400"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                                <span>Delete</span>
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-line bg-inset p-3 font-mono text-xs leading-relaxed text-ink">
-                          {entry.content}
-                        </pre>
+                              <ExternalLink className="h-3 w-3" />
+                              <span>Source Link</span>
+                            </a>
+                          </>
+                        )}
                       </div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {entryStatus !== 'trusted' && (
+                        <button
+                          type="button"
+                          onClick={() => void onUpdateEntryStatus(entry.id, 'trusted')}
+                          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-accent-border bg-accent-soft px-3.5 py-1.5 text-xs font-semibold text-accent-text hover:opacity-90"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          <span>Mark as Trusted</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => startEdit(entry)}
+                        aria-label={`Edit ${entry.title}`}
+                        className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3.5 py-1.5 text-xs font-medium text-ink hover:bg-elevated"
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                        <span>Edit</span>
+                      </button>
+
+                      {confirmDeleteId === entry.id ? (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isDeletingId === entry.id}
+                            onClick={() => confirmDelete(entry.id)}
+                            className="min-h-[42px] rounded-md bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                          >
+                            {isDeletingId === entry.id ? 'Deleting…' : 'Confirm Delete'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="min-h-[42px] rounded-md border border-line-strong px-2.5 py-1.5 text-xs text-ink-muted hover:bg-elevated"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(entry.id)}
+                          aria-label={`Delete ${entry.title}`}
+                          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-red-500/40 hover:text-red-400"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Delete</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="max-h-[55vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-inset p-4 font-sans text-sm leading-relaxed text-ink">
+                    {entry.content}
+                  </div>
+                </div>
+              );
+            })()
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

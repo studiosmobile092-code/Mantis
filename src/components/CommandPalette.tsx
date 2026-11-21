@@ -127,7 +127,7 @@ export function CommandPalette({
         id: 'act-teach',
         group: 'Quick Actions',
         label: 'Teach New Knowledge Rule',
-        subtitle: 'Add fact, pattern, or Auto-Folder note',
+        subtitle: 'Add fact, pattern, or Auto-Folder note (Alt+N)',
         icon: PlusCircle,
         run: onOpenTeach,
       },
@@ -143,7 +143,7 @@ export function CommandPalette({
         id: 'act-left-pane',
         group: 'Workspace Layout',
         label: 'Toggle Left Explorer Pane',
-        subtitle: 'Show or hide Knowledge & Repo explorer',
+        subtitle: 'Show or hide Knowledge & Repo explorer (Ctrl+B)',
         icon: PanelLeft,
         run: onToggleLeftPane,
       },
@@ -151,7 +151,7 @@ export function CommandPalette({
         id: 'act-right-pane',
         group: 'Workspace Layout',
         label: 'Toggle Right Monitor Pane',
-        subtitle: 'Show or hide Live Monitor & trust breakdown',
+        subtitle: 'Show or hide Live Monitor & trust breakdown (Ctrl+Shift+M)',
         icon: PanelRight,
         run: onToggleRightPane,
       },
@@ -337,9 +337,9 @@ export function CommandPalette({
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-line bg-inset px-4 py-2 font-mono text-[11px] text-ink-subtle">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-inset px-4 py-2 font-mono text-[11px] text-ink-subtle">
           <span>↑↓ navigate · Enter select · Esc close</span>
-          <span>Ctrl+K</span>
+          <span>Ctrl+K · Ctrl+B · Ctrl+Shift+M · Alt+N</span>
         </div>
       </div>
     </div>

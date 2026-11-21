@@ -77,7 +77,10 @@ export class SpeakerAcousticTracker {
     return normalizedLevel;
   }
 
-  public registerUtterance(nowMs = Date.now()): {
+  public registerUtterance(
+    nowMs = Date.now(),
+    rawText = '',
+  ): {
     speaker: string;
     centroidHz: number;
     pauseBeforeMs: number;
@@ -86,12 +89,12 @@ export class SpeakerAcousticTracker {
       this.lastSpeechTimestampMs > 0 ? Math.max(0, nowMs - this.lastSpeechTimestampMs) : 0;
     this.lastSpeechTimestampMs = nowMs;
 
-    const centroidHz =
-      this.recentCentroids.length > 0
-        ? Math.round(
-            this.recentCentroids.reduce((a, b) => a + b, 0) / this.recentCentroids.length,
-          )
-        : 650;
+    const hasAcousticSamples = this.recentCentroids.length > 0;
+    const centroidHz = hasAcousticSamples
+      ? Math.round(
+          this.recentCentroids.reduce((a, b) => a + b, 0) / this.recentCentroids.length,
+        )
+      : 650;
     const lowRatio =
       this.recentLowRatios.length > 0
         ? this.recentLowRatios.reduce((a, b) => a + b, 0) / this.recentLowRatios.length
@@ -110,6 +113,33 @@ export class SpeakerAcousticTracker {
       });
       this.activeSpeaker = 'Speaker 1';
       return {speaker: 'Speaker 1', centroidHz, pauseBeforeMs};
+    }
+
+    if (!hasAcousticSamples) {
+      const trimmed = rawText.trim();
+      const startsConversationalReply =
+        /^(hi|hey|hello|yes|yeah|yep|no|nope|sure|okay|ok|well|actually|wait|oh|thanks|thank you|sorry|excuse me)\b/i.test(
+          trimmed,
+        );
+      const isTurnBreak =
+        (pauseBeforeMs >= 1650 && trimmed.length >= 4) ||
+        (pauseBeforeMs >= 850 && startsConversationalReply);
+
+      if (isTurnBreak) {
+        if (this.profiles.length < 2) {
+          this.profiles.push({
+            label: 'Speaker 2',
+            avgCentroidHz: centroidHz,
+            avgLowBandRatio: lowRatio,
+            sampleCount: 1,
+          });
+          this.activeSpeaker = 'Speaker 2';
+        } else {
+          this.activeSpeaker =
+            this.activeSpeaker === 'Speaker 1' ? 'Speaker 2' : 'Speaker 1';
+        }
+      }
+      return {speaker: this.activeSpeaker, centroidHz, pauseBeforeMs};
     }
 
     // Score distance against all known acoustic profiles
@@ -163,6 +193,48 @@ export class SpeakerAcousticTracker {
   public getActiveSpeaker(): string {
     return this.activeSpeaker;
   }
+}
+
+export function normalizeSpeechCompareKey(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9 _-]{0,22}:\s*/i, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Safely appends finalized speech turns while avoiding duplicate echoes from
+ * Web Speech API restarts, without truncating distinct spoken sentences.
+ */
+export function appendDedupedSpeechTurn(
+  existingLines: string[],
+  formattedLine: string,
+): {mergedLines: string[]; appended: boolean} {
+  const cleanLine = formattedLine.replace(/\s+/g, ' ').trim();
+  const nextKey = normalizeSpeechCompareKey(cleanLine);
+  if (!cleanLine || !nextKey) {
+    return {mergedLines: existingLines, appended: false};
+  }
+
+  const tailSlice = existingLines.slice(-2);
+  for (const prev of tailSlice) {
+    const prevKey = normalizeSpeechCompareKey(prev);
+    if (!prevKey) continue;
+    if (prevKey === nextKey || prevKey.endsWith(nextKey)) {
+      return {mergedLines: existingLines, appended: false};
+    }
+    // If browser expanded an interrupted interim line into a longer final line, replace tail
+    if (nextKey.startsWith(prevKey) && nextKey.length > prevKey.length && prev === existingLines[existingLines.length - 1]) {
+      return {
+        mergedLines: [...existingLines.slice(0, -1), cleanLine],
+        appended: true,
+      };
+    }
+  }
+
+  return {mergedLines: [...existingLines, cleanLine], appended: true};
 }
 
 export function extractSpeakerLabels(transcript: string): string[] {

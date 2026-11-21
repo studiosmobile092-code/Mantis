@@ -213,15 +213,89 @@ function buildEndpointHeaders(endpointUrl: string, accessToken?: string): Record
   return headers;
 }
 
+export function isSafePublicTargetUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (
+      !host ||
+      host === 'localhost' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host.endsWith('.localdomain') ||
+      host === 'metadata'
+    ) {
+      return false;
+    }
+    if (host.includes(':')) {
+      if (
+        host === '::1' ||
+        host === '::' ||
+        host.startsWith('fc') ||
+        host.startsWith('fd') ||
+        host.startsWith('fe80') ||
+        host.startsWith('::ffff:')
+      ) {
+        return false;
+      }
+    }
+    if (/^(0x[0-9a-f]+|\d+)$/i.test(host)) return false;
+    const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      const a = Number(ipv4[1]);
+      const b = Number(ipv4[2]);
+      const c = Number(ipv4[3]);
+      if (a === 0 || a === 10 || a === 127) return false;
+      if (a === 100 && b >= 64 && b <= 127) return false;
+      if (a === 169 && b === 254) return false;
+      if (a === 172 && b >= 16 && b <= 31) return false;
+      if (a === 192 && b === 168) return false;
+      if (a === 192 && b === 0 && c === 0) return false;
+      if (a >= 224) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeFetchError(err: unknown, timeoutMs: number, endpointLabel?: string): Error {
+  const secs = Math.max(1, Math.round(timeoutMs / 1000));
+  const rawMsg = err instanceof Error ? err.message : String(err || '');
+  const lower = rawMsg.toLowerCase();
+  if (
+    (err instanceof Error && err.name === 'AbortError') ||
+    lower.includes('signal is aborted') ||
+    lower.includes('aborted') ||
+    lower.includes('timed out')
+  ) {
+    return new Error(
+      endpointLabel
+        ? `Timed out after ${secs}s waiting for ${endpointLabel}. Upstream AI provider may be slow or blocked on this network.`
+        : `Request timed out after ${secs}s while waiting for AI response.`,
+    );
+  }
+  return err instanceof Error ? err : new Error(rawMsg || 'Network request failed.');
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
   timeoutMs = 7500,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutReason = new Error(
+    `Request timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s`,
+  );
+  const timer = window.setTimeout(() => controller.abort(timeoutReason), timeoutMs);
   try {
     return await fetch(url, {...init, signal: controller.signal});
+  } catch (err) {
+    throw normalizeFetchError(err, timeoutMs);
   } finally {
     window.clearTimeout(timer);
   }
@@ -250,9 +324,10 @@ export async function testBrainConnection(
   if (!cleanUrl) {
     throw new Error('Enter your Cloudflare Worker, Supabase Edge Function, or Ollama URL.');
   }
+  let parsedUrl: URL;
   try {
-    const parsed = new URL(cleanUrl);
-    if (!parsed.hostname.includes('.') && parsed.hostname !== 'localhost') {
+    parsedUrl = new URL(cleanUrl);
+    if (!parsedUrl.hostname.includes('.') && parsedUrl.hostname !== 'localhost') {
       throw new Error('Invalid host');
     }
   } catch {
@@ -260,19 +335,15 @@ export async function testBrainConnection(
   }
 
   const isBackup = routeKindHint === 'backup-supabase' || isSupabaseEdgeUrl(cleanUrl);
+  const healthTimeoutMs = parsedUrl.hostname.endsWith('.workers.dev') ? 5000 : 7500;
   const start = performance.now();
   let res: Response;
   try {
     // Keep /health headerless (matching a direct browser GET) so expired JWTs or apikey headers never trigger gateway 401s.
-    res = await fetchWithTimeout(`${cleanUrl}/health`, {}, 6500);
+    res = await fetchWithTimeout(`${cleanUrl}/health`, {}, healthTimeoutMs);
   } catch (networkErr) {
-    const reason =
-      networkErr instanceof Error && networkErr.name === 'AbortError'
-        ? 'Timed out after 6.5s'
-        : networkErr instanceof Error
-          ? networkErr.message
-          : 'Network or .dev domain blocked';
-    throw new Error(`Could not reach ${cleanUrl}: ${reason}.`);
+    const normalized = normalizeFetchError(networkErr, healthTimeoutMs, parsedUrl.hostname);
+    throw new Error(`Could not reach ${cleanUrl}: ${normalized.message}`);
   }
 
   const latencyMs = Math.round(performance.now() - start);
@@ -289,19 +360,24 @@ export async function testBrainConnection(
         throw new Error('Connected to Ollama, but no models are installed yet (run e.g. `ollama pull qwen2.5-coder:7b`).');
       }
       const chosenOllamaModel = installed[0];
-      const pingRes = await fetchWithTimeout(
-        `${cleanUrl}/v1/chat/completions`,
-        {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            model: chosenOllamaModel,
-            messages: [{role: 'user', content: 'Reply with only READY.'}],
-            max_tokens: 16,
-          }),
-        },
-        10000,
-      );
+      let pingRes: Response;
+      try {
+        pingRes = await fetchWithTimeout(
+          `${cleanUrl}/v1/chat/completions`,
+          {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              model: chosenOllamaModel,
+              messages: [{role: 'user', content: 'Reply with only READY.'}],
+              max_tokens: 16,
+            }),
+          },
+          15000,
+        );
+      } catch (err) {
+        throw normalizeFetchError(err, 15000, 'local Ollama');
+      }
       if (!pingRes.ok) {
         throw new Error(`Ollama chat test returned HTTP ${pingRes.status}.`);
       }
@@ -373,18 +449,9 @@ export async function testBrainConnection(
     };
   }
 
-  let verifyRes = await fetchWithTimeout(
-    `${cleanUrl}/ai/verify`,
-    {
-      method: 'POST',
-      headers: buildEndpointHeaders(cleanUrl, liveToken),
-      body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
-    },
-    14000,
-  );
-
-  if (verifyRes.status === 401) {
-    liveToken = await resolveFreshAccessToken(liveToken, true);
+  const verifyTimeoutMs = 22000;
+  let verifyRes: Response;
+  try {
     verifyRes = await fetchWithTimeout(
       `${cleanUrl}/ai/verify`,
       {
@@ -392,26 +459,41 @@ export async function testBrainConnection(
         headers: buildEndpointHeaders(cleanUrl, liveToken),
         body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
       },
-      14000,
+      verifyTimeoutMs,
     );
-  }
 
-  if (verifyRes.status === 404) {
-    verifyRes = await fetchWithTimeout(
-      `${cleanUrl}/ai/chat`,
-      {
-        method: 'POST',
-        headers: buildEndpointHeaders(cleanUrl, liveToken),
-        body: JSON.stringify({
-          prompt: 'Reply with only the word READY.',
-          model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
-          knowledgeContext: [],
-          repoContext: [],
-          history: [],
-        }),
-      },
-      14000,
-    );
+    if (verifyRes.status === 401) {
+      liveToken = await resolveFreshAccessToken(liveToken, true);
+      verifyRes = await fetchWithTimeout(
+        `${cleanUrl}/ai/verify`,
+        {
+          method: 'POST',
+          headers: buildEndpointHeaders(cleanUrl, liveToken),
+          body: JSON.stringify({model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL}),
+        },
+        verifyTimeoutMs,
+      );
+    }
+
+    if (verifyRes.status === 404) {
+      verifyRes = await fetchWithTimeout(
+        `${cleanUrl}/ai/chat`,
+        {
+          method: 'POST',
+          headers: buildEndpointHeaders(cleanUrl, liveToken),
+          body: JSON.stringify({
+            prompt: 'Reply with only the word READY.',
+            model: preferredModel || data.defaultModel || DEFAULT_BRAIN_MODEL,
+            knowledgeContext: [],
+            repoContext: [],
+            history: [],
+          }),
+        },
+        verifyTimeoutMs,
+      );
+    }
+  } catch (err) {
+    throw normalizeFetchError(err, verifyTimeoutMs, `${parsedUrl.hostname} AI verification`);
   }
 
   const totalLatencyMs = Math.round(performance.now() - start);
@@ -617,12 +699,7 @@ async function postBrainEndpointWithFailover<T>(params: {
       });
       return {payload: json, endpointUsed: endpoint};
     } catch (err) {
-      lastError =
-        err instanceof Error && err.name === 'AbortError'
-          ? `Timeout reaching ${endpoint}`
-          : err instanceof Error
-            ? err.message
-            : 'Network blocked';
+      lastError = normalizeFetchError(err, params.timeoutMs ?? 20000, endpoint).message;
     }
   }
 
@@ -1106,6 +1183,9 @@ async function extractUrlClientFallback(
 } | null> {
   const isYt = /youtube\.com|youtu\.be/i.test(url);
   const extractedAt = new Date().toISOString();
+  if (!isSafePublicTargetUrl(url)) {
+    return null;
+  }
 
   try {
     const readerRes = await fetchWithTimeout(
@@ -1182,6 +1262,9 @@ export async function extractUrlViaBrain(params: {
   text: string;
   extractedAt: string;
 }> {
+  if (!isSafePublicTargetUrl(params.url)) {
+    throw new Error('Enter a valid public http:// or https:// website or YouTube URL.');
+  }
   const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   const extractedAt = new Date().toISOString();
 

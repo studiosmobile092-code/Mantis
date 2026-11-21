@@ -20,6 +20,7 @@ import {
   getSessionGitHubToken,
   setSessionGitHubToken,
 } from '../lib/github';
+import {sanitizeExternalHttpUrl} from '../lib/knowledgeSync';
 import {MANTIS_PHASE3_SCHEMA_SQL} from '../lib/schemaText';
 import type {
   CodeSuggestion,
@@ -631,19 +632,23 @@ export function SuggestionsPanel({
                         </div>
                       )}
 
-                      {s.pr_url && (
-                        <div className="flex items-center gap-2 font-mono text-xs text-accent-text">
-                          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                          <a
-                            href={s.pr_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="truncate underline underline-offset-2 hover:opacity-85"
-                          >
-                            Pull Request Opened: {s.pr_url}
-                          </a>
-                        </div>
-                      )}
+                      {(() => {
+                        const safePrUrl = sanitizeExternalHttpUrl(s.pr_url);
+                        if (!safePrUrl) return null;
+                        return (
+                          <div className="flex items-center gap-2 font-mono text-xs text-accent-text">
+                            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                            <a
+                              href={safePrUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="truncate underline underline-offset-2 hover:opacity-85"
+                            >
+                              Pull Request Opened: {safePrUrl}
+                            </a>
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import {useEffect, useMemo, useState} from 'react';
 import {AUTO_FOLDER_OPTION} from '../lib/autoFolders';
+import {sanitizeExternalHttpUrl} from '../lib/knowledgeSync';
 import {
   getOcrConfidenceLevel,
   type CaptureZone,
@@ -203,20 +204,24 @@ export function CaptureReviewModal({
         {/* Scrollable Body */}
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
           {/* Source URL bar for URL extractions */}
-          {draft.sourceUrl && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-inset px-3.5 py-2.5 text-xs">
-              <span className="truncate font-mono text-ink-muted">{draft.sourceUrl}</span>
-              <a
-                href={draft.sourceUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex shrink-0 items-center gap-1 font-medium text-accent-text hover:underline"
-              >
-                <span>Open Source</span>
-                <ExternalLink className="h-3.5 w-3.5" />
-              </a>
-            </div>
-          )}
+          {(() => {
+            const safeSourceUrl = sanitizeExternalHttpUrl(draft.sourceUrl);
+            if (!safeSourceUrl) return null;
+            return (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-inset px-3.5 py-2.5 text-xs">
+                <span className="truncate font-mono text-ink-muted">{safeSourceUrl}</span>
+                <a
+                  href={safeSourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex min-h-[40px] shrink-0 items-center gap-1 font-medium text-accent-text hover:underline"
+                >
+                  <span>Open Source</span>
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+              </div>
+            );
+          })()}
 
           {/* Voice Speaker Diarization & Rename Strip */}
           {draft.kind === 'mic' && (
@@ -262,7 +267,7 @@ export function CaptureReviewModal({
                               [label]: e.target.value,
                             }))
                           }
-                          className="min-h-[36px] w-28 rounded border border-line-strong bg-surface px-2 py-1 font-mono text-[11px] text-ink focus:border-accent focus:outline-none"
+                          className="min-h-[40px] w-28 rounded border border-line-strong bg-surface px-2.5 py-1 font-mono text-[11px] text-ink focus:border-accent focus:outline-none"
                         />
                         {changed && (
                           <button
@@ -283,7 +288,7 @@ export function CaptureReviewModal({
                                 return copy;
                               });
                             }}
-                            className="min-h-[36px] rounded bg-accent px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-accent-hover"
+                            className="min-h-[40px] rounded bg-accent px-3 py-1 text-[11px] font-semibold text-white hover:bg-accent-hover"
                           >
                             Apply
                           </button>

@@ -69,7 +69,7 @@ export function StudioExplorer({
               onClick={onCollapse}
               title="Collapse Explorer (Ctrl+B)"
               aria-label="Collapse Explorer pane"
-              className="hidden min-h-[36px] min-w-[36px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink xl:inline-flex"
+              className="hidden min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink xl:inline-flex"
             >
               <PanelLeftClose className="h-4 w-4" />
             </button>
@@ -81,7 +81,7 @@ export function StudioExplorer({
         <button
           type="button"
           onClick={onOpenTeach}
-          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-accent px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-accent-hover"
+          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-accent-hover"
         >
           <PlusCircle className="h-3.5 w-3.5" />
           <span>Teach Rule</span>
@@ -102,7 +102,7 @@ export function StudioExplorer({
                 key={folder.id}
                 type="button"
                 onClick={() => onSelectFolder(folder.id)}
-                className="flex min-h-[38px] w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs text-ink-muted transition-colors hover:bg-elevated/70 hover:text-ink"
+                className="flex min-h-[40px] w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs text-ink-muted transition-colors hover:bg-elevated/70 hover:text-ink"
               >
                 <span className="flex items-center gap-2 truncate">
                   <Folder className="h-3.5 w-3.5 shrink-0 text-accent-text" />
@@ -132,7 +132,7 @@ export function StudioExplorer({
                 key={concept.label}
                 type="button"
                 onClick={() => onQueryConcept(concept.label)}
-                className="flex min-h-[36px] w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-mono text-xs text-ink-muted transition-colors hover:bg-elevated/70 hover:text-accent-text"
+                className="flex min-h-[40px] w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-mono text-xs text-ink-muted transition-colors hover:bg-elevated/70 hover:text-accent-text"
               >
                 <span className="flex items-center gap-1.5 truncate">
                   <Hash className="h-3 w-3 shrink-0 text-ink-subtle" />
@@ -166,7 +166,7 @@ export function StudioExplorer({
                   key={file.id}
                   type="button"
                   onClick={() => onInspectRepoFile(file.path)}
-                  className="flex min-h-[34px] w-full items-center gap-1.5 rounded-md px-2 py-1 text-left font-mono text-[11px] text-ink-muted transition-colors hover:bg-elevated/70 hover:text-ink"
+                  className="flex min-h-[40px] w-full items-center gap-1.5 rounded-md px-2 py-1 text-left font-mono text-[11px] text-ink-muted transition-colors hover:bg-elevated/70 hover:text-ink"
                 >
                   <FileCode2 className="h-3 w-3 shrink-0 text-ink-subtle" />
                   <span className="truncate">{file.path}</span>

@@ -230,12 +230,105 @@ export function formatActionableError(error: unknown): string {
   return raw.length > 140 ? `${raw.slice(0, 137)}...` : raw;
 }
 
+const ALLOWED_OFFLINE_ENTRY_COLUMNS = new Set([
+  'id',
+  'user_id',
+  'folder_id',
+  'title',
+  'content',
+  'tags',
+  'source',
+  'status',
+  'source_url',
+  'extracted_at',
+]);
+
+/**
+ * Ensures any user-supplied or extracted URL uses only safe http: or https: schemes,
+ * blocking javascript:, data:, vbscript:, or malformed URIs before rendering href attributes.
+ */
+export function sanitizeExternalHttpUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeOfflinePayload(
+  kind: OfflineQueuedWrite['kind'],
+  rawPayload: unknown,
+): Record<string, unknown> | null {
+  if (typeof rawPayload !== 'object' || rawPayload === null || Array.isArray(rawPayload)) {
+    return null;
+  }
+  const sourceObj = rawPayload as Record<string, unknown>;
+  const safePayload: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(sourceObj)) {
+    if (!ALLOWED_OFFLINE_ENTRY_COLUMNS.has(key)) continue;
+    if (key === 'tags') {
+      safePayload.tags = Array.isArray(value)
+        ? value.map((t) => String(t).trim()).filter(Boolean).slice(0, 12)
+        : [];
+    } else if (key === 'status') {
+      if (value === 'raw' || value === 'reviewed' || value === 'trusted') {
+        safePayload.status = value;
+      }
+    } else if (key === 'source_url') {
+      safePayload.source_url = sanitizeExternalHttpUrl(typeof value === 'string' ? value : null);
+    } else if (key === 'folder_id' || key === 'extracted_at') {
+      safePayload[key] = value === null ? null : String(value);
+    } else if (typeof value === 'string') {
+      safePayload[key] = value;
+    }
+  }
+
+  if (kind === 'update_status') {
+    if (typeof safePayload.id !== 'string' || !safePayload.status) return null;
+  } else if (kind === 'update_entry') {
+    if (typeof safePayload.id !== 'string') return null;
+  } else if (kind === 'save_entry') {
+    if (typeof safePayload.title !== 'string' || typeof safePayload.content !== 'string') {
+      return null;
+    }
+  }
+  return safePayload;
+}
+
 export function loadOfflineWriteQueue(): OfflineQueuedWrite[] {
   try {
     const raw = window.localStorage.getItem(OFFLINE_QUEUE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    const valid: OfflineQueuedWrite[] = [];
+    for (const item of parsed) {
+      if (typeof item !== 'object' || item === null) continue;
+      const candidate = item as Record<string, unknown>;
+      const kind = candidate.kind;
+      if (kind !== 'save_entry' && kind !== 'update_entry' && kind !== 'update_status') {
+        continue;
+      }
+      if (typeof candidate.id !== 'string' || typeof candidate.createdAt !== 'string') {
+        continue;
+      }
+      const safePayload = sanitizeOfflinePayload(kind, candidate.payload);
+      if (!safePayload) continue;
+      valid.push({
+        id: candidate.id,
+        kind,
+        payload: safePayload,
+        createdAt: candidate.createdAt,
+      });
+    }
+    return valid;
   } catch {
     return [];
   }
@@ -243,10 +336,13 @@ export function loadOfflineWriteQueue(): OfflineQueuedWrite[] {
 
 export function enqueueOfflineWrite(item: Omit<OfflineQueuedWrite, 'id' | 'createdAt'>): OfflineQueuedWrite[] {
   const queue = loadOfflineWriteQueue();
+  const safePayload = sanitizeOfflinePayload(item.kind, item.payload);
+  if (!safePayload) return queue;
   const next: OfflineQueuedWrite[] = [
     ...queue,
     {
-      ...item,
+      kind: item.kind,
+      payload: safePayload,
       id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       createdAt: new Date().toISOString(),
     },
