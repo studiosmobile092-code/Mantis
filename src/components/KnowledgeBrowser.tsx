@@ -531,47 +531,48 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
       )}
 
       <div className="grid gap-4 lg:grid-cols-[220px_300px_1fr]">
-        {/* Column 1: Folders Tree */}
-        <aside className="space-y-1.5 rounded-lg border border-line bg-surface p-3">
-          <h2 className="px-2 pb-1 text-xs font-semibold tracking-wide text-ink-muted uppercase">
+        {/* Column 1: Folders Tree (Compact chip strip on tablet/mobile, vertical tree on desktop) */}
+        <aside className="space-y-2 rounded-lg border border-line bg-surface p-3">
+          <h2 className="px-1 text-xs font-semibold tracking-wide text-ink-muted uppercase lg:px-2 lg:pb-1">
             Folders
           </h2>
 
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedFolderId('all');
-              onClearHighlight();
-            }}
-            className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
-              selectedFolderId === 'all'
-                ? 'bg-elevated font-semibold text-ink'
-                : 'text-ink-muted hover:bg-inset hover:text-ink'
-            }`}
-          >
-            <span className="flex items-center gap-2 truncate">
-              <BookOpen className="h-4 w-4 shrink-0 text-ink-subtle" />
-              <span className="truncate">All Entries</span>
-            </span>
-            <span className="font-mono text-xs tabular-nums text-ink-subtle">{entries.length}</span>
-          </button>
+          <div className="flex flex-wrap gap-1.5 lg:block lg:space-y-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedFolderId('all');
+                onClearHighlight();
+              }}
+              className={`flex min-h-[40px] items-center justify-between gap-2 rounded-md px-3 py-1.5 text-left text-xs transition-colors lg:w-full lg:py-2 ${
+                selectedFolderId === 'all'
+                  ? 'bg-elevated font-semibold text-ink'
+                  : 'border border-line text-ink-muted hover:bg-inset hover:text-ink lg:border-0'
+              }`}
+            >
+              <span className="flex items-center gap-2 truncate">
+                <BookOpen className="h-4 w-4 shrink-0 text-ink-subtle" />
+                <span className="truncate">All Entries</span>
+              </span>
+              <span className="font-mono text-xs tabular-nums text-ink-subtle">{entries.length}</span>
+            </button>
 
-          {folders.map((folder) => {
-            const count = folderCounts.counts.get(folder.id) || 0;
-            const isSelected = selectedFolderId === folder.id;
-            return (
-              <div key={folder.id} className="space-y-1">
+            {folders.map((folder) => {
+              const count = folderCounts.counts.get(folder.id) || 0;
+              const isSelected = selectedFolderId === folder.id;
+              return (
                 <button
+                  key={folder.id}
                   type="button"
                   onClick={() => {
                     setSelectedFolderId(folder.id);
                     setConfirmDeleteFolderId(null);
                     onClearHighlight();
                   }}
-                  className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
+                  className={`flex min-h-[40px] items-center justify-between gap-2 rounded-md px-3 py-1.5 text-left text-xs transition-colors lg:w-full lg:py-2 ${
                     isSelected
                       ? 'bg-elevated font-semibold text-ink'
-                      : 'text-ink-muted hover:bg-inset hover:text-ink'
+                      : 'border border-line text-ink-muted hover:bg-inset hover:text-ink lg:border-0'
                   }`}
                 >
                   <span className="flex items-center gap-2 truncate">
@@ -580,69 +581,71 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                   </span>
                   <span className="font-mono text-xs tabular-nums text-ink-subtle">{count}</span>
                 </button>
+              );
+            })}
 
-                {isSelected && folders.length > 1 && (
-                  <div className="px-2 pb-1">
-                    {confirmDeleteFolderId === folder.id ? (
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const ok = await onDeleteFolder(folder.id);
-                            if (ok) {
-                              setConfirmDeleteFolderId(null);
-                              setSelectedFolderId('all');
-                            }
-                          }}
-                          className="min-h-[40px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
-                        >
-                          Remove Folder
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteFolderId(null)}
-                          className="min-h-[40px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteFolderId(folder.id)}
-                        className="inline-flex min-h-[40px] items-center px-1 text-[11px] text-ink-subtle hover:text-danger"
-                      >
-                        Remove folder (keeps notes)
-                      </button>
-                    )}
+            {folderCounts.uncategorized > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedFolderId('uncategorized');
+                  onClearHighlight();
+                }}
+                className={`flex min-h-[40px] items-center justify-between gap-2 rounded-md px-3 py-1.5 text-left text-xs transition-colors lg:w-full lg:py-2 ${
+                  selectedFolderId === 'uncategorized'
+                    ? 'bg-elevated font-semibold text-ink'
+                    : 'border border-line text-ink-muted hover:bg-inset hover:text-ink lg:border-0'
+                }`}
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <Folder className="h-4 w-4 shrink-0 text-ink-subtle" />
+                  <span className="truncate">Uncategorized</span>
+                </span>
+                <span className="font-mono text-xs tabular-nums text-ink-subtle">
+                  {folderCounts.uncategorized}
+                </span>
+              </button>
+            )}
+          </div>
+
+          {selectedFolderId !== 'all' &&
+            selectedFolderId !== 'uncategorized' &&
+            folders.length > 1 && (
+              <div className="border-t border-line pt-2">
+                {confirmDeleteFolderId === selectedFolderId ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await onDeleteFolder(selectedFolderId);
+                        if (ok) {
+                          setConfirmDeleteFolderId(null);
+                          setSelectedFolderId('all');
+                        }
+                      }}
+                      className="min-h-[40px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+                    >
+                      Remove Folder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteFolderId(null)}
+                      className="min-h-[40px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
+                    >
+                      Cancel
+                    </button>
                   </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteFolderId(selectedFolderId)}
+                    className="inline-flex min-h-[40px] items-center px-1 text-[11px] text-ink-subtle hover:text-danger"
+                  >
+                    Remove folder (keeps notes)
+                  </button>
                 )}
               </div>
-            );
-          })}
-
-          {folderCounts.uncategorized > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedFolderId('uncategorized');
-                onClearHighlight();
-              }}
-              className={`flex min-h-[42px] w-full items-center justify-between rounded-md px-3 py-2 text-left text-xs transition-colors ${
-                selectedFolderId === 'uncategorized'
-                  ? 'bg-elevated font-semibold text-ink'
-                  : 'text-ink-muted hover:bg-inset hover:text-ink'
-              }`}
-            >
-              <span className="flex items-center gap-2 truncate">
-                <Folder className="h-4 w-4 shrink-0 text-ink-subtle" />
-                <span className="truncate">Uncategorized</span>
-              </span>
-              <span className="font-mono text-xs tabular-nums text-ink-subtle">
-                {folderCounts.uncategorized}
-              </span>
-            </button>
-          )}
+            )}
         </aside>
 
         {/* Column 2: Searchable Compact Note List */}
@@ -734,7 +737,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
               </button>
             </div>
           ) : (
-            <div className="max-h-[60vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-inset">
+            <div className="max-h-[42vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-inset lg:max-h-[60vh]">
               {filteredEntries.map((entry) => {
                 const entryStatus = getEntryStatus(entry);
                 const isSelected = activeEntry?.id === entry.id;

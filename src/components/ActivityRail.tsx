@@ -84,7 +84,7 @@ export function ActivityRail({
       {/* Mobile / Phone Bottom Thumb Dock (<= 15% viewport cap, >= 48px touch targets) */}
       <nav
         aria-label="Mobile workspace navigation"
-        className="fixed inset-x-0 bottom-0 z-30 flex h-[52px] items-center justify-around border-t border-line bg-canvas/95 px-1 backdrop-blur-xs md:hidden"
+        className="fixed inset-x-0 bottom-0 z-30 flex min-h-[52px] items-center justify-around border-t border-line bg-canvas/95 px-1 pb-[env(safe-area-inset-bottom)] backdrop-blur-xs md:hidden"
       >
         {[...RAIL_ITEMS, {id: 'settings' as AreaId, label: 'Config', icon: Settings}].map((item) => {
           const Icon = item.icon;
@@ -95,12 +95,17 @@ export function ActivityRail({
               type="button"
               onClick={() => onSelectArea(item.id)}
               aria-label={item.label}
-              className={`flex min-h-[48px] min-w-[44px] flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium transition-colors ${
+              className={`relative flex min-h-[48px] min-w-[44px] flex-1 flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium transition-colors ${
                 isActive ? 'text-accent-text' : 'text-ink-muted hover:text-ink'
               }`}
             >
               <Icon className="h-4 w-4 shrink-0" />
               <span className="max-w-[52px] truncate whitespace-nowrap">{item.label}</span>
+              {item.id === 'github' && pendingSuggestionsCount > 0 && (
+                <span className="absolute top-1 right-1.5 rounded bg-accent px-1 font-mono text-[9px] font-semibold tabular-nums text-white">
+                  {pendingSuggestionsCount}
+                </span>
+              )}
             </button>
           );
         })}

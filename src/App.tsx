@@ -57,6 +57,11 @@ import {
   isMissingPhase6ColumnError,
   loadOfflineWriteQueue,
   markHashSaved,
+  markOfflineWriteForceOverwrite,
+  migrateEntryMetaFallback,
+  type OfflineQueuedWrite,
+  removeOfflineWriteById,
+  removeOfflineWritesForEntry,
   resolveGuaranteedFolderId,
   saveEntryMetaFallback,
   saveOfflineWriteQueue,
@@ -226,7 +231,10 @@ export default function App() {
     state: 'idle',
     message: '',
   });
-  const [offlineQueueCount, setOfflineQueueCount] = useState<number>(() => loadOfflineWriteQueue().length);
+  const [offlineQueueItems, setOfflineQueueItems] = useState<OfflineQueuedWrite[]>(() =>
+    loadOfflineWriteQueue(),
+  );
+  const offlineQueueCount = offlineQueueItems.length;
   const retrySaveFnRef = useRef<(() => Promise<void>) | null>(null);
   const feedbackClearTimerRef = useRef<number | null>(null);
 
@@ -569,44 +577,187 @@ export default function App() {
   const flushOfflineQueue = useCallback(async () => {
     if (!session) return;
     const queue = loadOfflineWriteQueue();
-    if (queue.length === 0) return;
+    if (queue.length === 0) {
+      setOfflineQueueItems([]);
+      return;
+    }
 
     const remaining = [...queue];
+    const deferred: OfflineQueuedWrite[] = [];
     let flushedCount = 0;
 
     while (remaining.length > 0) {
       const nextItem = remaining[0];
       try {
         if (nextItem.kind === 'save_entry') {
-          const {error} = await supabase.from('knowledge_entries').insert(nextItem.payload);
-          if (error && !isMissingPhase6ColumnError(error)) {
-            if (isLikelyOfflineError(error)) break;
+          let res = await supabase
+            .from('knowledge_entries')
+            .insert(nextItem.payload)
+            .select('id')
+            .single();
+
+          if (res.error && isMissingPhase6ColumnError(res.error)) {
+            setPhase6SchemaMissing(true);
+            const stripped = {...nextItem.payload};
+            delete stripped.status;
+            delete stripped.source_url;
+            delete stripped.extracted_at;
+            res = await supabase
+              .from('knowledge_entries')
+              .insert(stripped)
+              .select('id')
+              .single();
           }
+
+          if (res.error) {
+            if (isLikelyOfflineError(res.error)) break;
+            deferred.push({
+              ...nextItem,
+              retryCount: (nextItem.retryCount || 0) + 1,
+              lastError: formatActionableError(res.error),
+            });
+            remaining.shift();
+            continue;
+          }
+
+          if (nextItem.optimisticId && res.data?.id) {
+            migrateEntryMetaFallback(nextItem.optimisticId, String(res.data.id));
+          }
+          remaining.shift();
+          flushedCount += 1;
         } else if (nextItem.kind === 'update_entry') {
           const {id, ...fields} = nextItem.payload;
-          const {error} = await supabase
+          const entryId = String(id);
+
+          if (nextItem.baseUpdatedAt && !nextItem.forceOverwrite) {
+            const {data: serverRow, error: checkErr} = await supabase
+              .from('knowledge_entries')
+              .select('id,title,updated_at')
+              .eq('id', entryId)
+              .maybeSingle();
+
+            if (checkErr && isLikelyOfflineError(checkErr)) break;
+            if (
+              serverRow?.updated_at &&
+              Date.parse(String(serverRow.updated_at)) > Date.parse(nextItem.baseUpdatedAt) + 1500
+            ) {
+              deferred.push({
+                ...nextItem,
+                hasConflict: true,
+                conflictServerTitle: String(serverRow.title || ''),
+                conflictServerUpdatedAt: String(serverRow.updated_at),
+                lastError: 'Server note changed on another device since going offline.',
+              });
+              remaining.shift();
+              continue;
+            }
+          }
+
+          let {error} = await supabase
             .from('knowledge_entries')
             .update(fields)
-            .eq('id', String(id));
-          if (error && isLikelyOfflineError(error)) break;
+            .eq('id', entryId);
+
+          if (error && isMissingPhase6ColumnError(error)) {
+            setPhase6SchemaMissing(true);
+            const stripped = {...fields};
+            delete stripped.status;
+            const retryRes = await supabase
+              .from('knowledge_entries')
+              .update(stripped)
+              .eq('id', entryId);
+            error = retryRes.error;
+          }
+
+          if (error) {
+            if (isLikelyOfflineError(error)) break;
+            deferred.push({
+              ...nextItem,
+              retryCount: (nextItem.retryCount || 0) + 1,
+              lastError: formatActionableError(error),
+            });
+            remaining.shift();
+            continue;
+          }
+          remaining.shift();
+          flushedCount += 1;
         } else if (nextItem.kind === 'update_status') {
           const {id, status} = nextItem.payload;
+          const entryId = String(id);
+
+          if (nextItem.baseUpdatedAt && !nextItem.forceOverwrite) {
+            const {data: serverRow, error: checkErr} = await supabase
+              .from('knowledge_entries')
+              .select('id,title,updated_at')
+              .eq('id', entryId)
+              .maybeSingle();
+
+            if (checkErr && isLikelyOfflineError(checkErr)) break;
+            if (
+              serverRow?.updated_at &&
+              Date.parse(String(serverRow.updated_at)) > Date.parse(nextItem.baseUpdatedAt) + 1500
+            ) {
+              deferred.push({
+                ...nextItem,
+                hasConflict: true,
+                conflictServerTitle: String(serverRow.title || ''),
+                conflictServerUpdatedAt: String(serverRow.updated_at),
+                lastError: 'Server note changed on another device since going offline.',
+              });
+              remaining.shift();
+              continue;
+            }
+          }
+
           const {error} = await supabase
             .from('knowledge_entries')
             .update({status})
-            .eq('id', String(id));
-          if (error && !isMissingPhase6ColumnError(error) && isLikelyOfflineError(error)) break;
+            .eq('id', entryId);
+
+          if (error) {
+            if (isMissingPhase6ColumnError(error)) {
+              setPhase6SchemaMissing(true);
+              remaining.shift();
+              flushedCount += 1;
+              continue;
+            }
+            if (isLikelyOfflineError(error)) break;
+            deferred.push({
+              ...nextItem,
+              retryCount: (nextItem.retryCount || 0) + 1,
+              lastError: formatActionableError(error),
+            });
+            remaining.shift();
+            continue;
+          }
+          remaining.shift();
+          flushedCount += 1;
         }
-        remaining.shift();
-        flushedCount += 1;
       } catch (err) {
         if (isLikelyOfflineError(err)) break;
+        deferred.push({
+          ...nextItem,
+          retryCount: (nextItem.retryCount || 0) + 1,
+          lastError: formatActionableError(err),
+        });
         remaining.shift();
       }
     }
 
-    saveOfflineWriteQueue(remaining);
-    setOfflineQueueCount(remaining.length);
+    const persisted = [...deferred, ...remaining];
+    saveOfflineWriteQueue(persisted);
+    setOfflineQueueItems(persisted);
+
+    if (deferred.some((item) => item.hasConflict || item.lastError)) {
+      setTransientSaveFeedback(
+        {
+          state: 'queued',
+          message: `${deferred.length} queued ${deferred.length === 1 ? 'write needs' : 'writes need'} review in Settings`,
+        },
+        4500,
+      );
+    }
+
     if (flushedCount > 0) {
       setTransientSaveFeedback({
         state: 'saved',
@@ -834,8 +985,12 @@ export default function App() {
 
         if (res.error) {
           if (isLikelyOfflineError(res.error)) {
-            const nextQ = enqueueOfflineWrite({kind: 'save_entry', payload: baseInsert});
-            setOfflineQueueCount(nextQ.length);
+            const nextQ = enqueueOfflineWrite({
+              kind: 'save_entry',
+              optimisticId,
+              payload: insertPayload,
+            });
+            setOfflineQueueItems(nextQ);
             saveEntryMetaFallback(optimisticId, {
               status: desiredStatus,
               source_url: payload.sourceUrl ?? null,
@@ -883,8 +1038,17 @@ export default function App() {
         return true;
       } catch (err) {
         if (isLikelyOfflineError(err)) {
-          const nextQ = enqueueOfflineWrite({kind: 'save_entry', payload: baseInsert});
-          setOfflineQueueCount(nextQ.length);
+          const nextQ = enqueueOfflineWrite({
+            kind: 'save_entry',
+            optimisticId,
+            payload: baseInsert,
+          });
+          setOfflineQueueItems(nextQ);
+          saveEntryMetaFallback(optimisticId, {
+            status: desiredStatus,
+            source_url: payload.sourceUrl ?? null,
+            extracted_at: payload.extractedAt ?? null,
+          });
           setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
           return true;
         }
@@ -942,6 +1106,18 @@ export default function App() {
       tags: payload.tags,
     };
 
+    if (id.startsWith('optimistic-')) {
+      const nextQ = enqueueOfflineWrite({
+        kind: 'update_entry',
+        baseUpdatedAt: prevSnapshot.updated_at,
+        payload: {id, ...baseUpdate, ...(payload.status ? {status: payload.status} : {})},
+      });
+      setOfflineQueueItems(nextQ);
+      if (payload.status) saveEntryMetaFallback(id, {status: payload.status});
+      setTransientSaveFeedback({state: 'queued', message: 'Updated in offline queue ✓'});
+      return true;
+    }
+
     try {
       let res = await supabase
         .from('knowledge_entries')
@@ -968,9 +1144,10 @@ export default function App() {
         if (isLikelyOfflineError(res.error)) {
           const nextQ = enqueueOfflineWrite({
             kind: 'update_entry',
-            payload: {id, ...baseUpdate},
+            baseUpdatedAt: prevSnapshot.updated_at,
+            payload: {id, ...baseUpdate, ...(payload.status ? {status: payload.status} : {})},
           });
-          setOfflineQueueCount(nextQ.length);
+          setOfflineQueueItems(nextQ);
           if (payload.status) saveEntryMetaFallback(id, {status: payload.status});
           setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
           return true;
@@ -1007,8 +1184,13 @@ export default function App() {
       return true;
     } catch (err) {
       if (isLikelyOfflineError(err)) {
-        const nextQ = enqueueOfflineWrite({kind: 'update_entry', payload: {id, ...baseUpdate}});
-        setOfflineQueueCount(nextQ.length);
+        const nextQ = enqueueOfflineWrite({
+          kind: 'update_entry',
+          baseUpdatedAt: prevSnapshot.updated_at,
+          payload: {id, ...baseUpdate, ...(payload.status ? {status: payload.status} : {})},
+        });
+        setOfflineQueueItems(nextQ);
+        if (payload.status) saveEntryMetaFallback(id, {status: payload.status});
         setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
         return true;
       }
@@ -1036,7 +1218,21 @@ export default function App() {
     saveEntryMetaFallback(id, {status: nextStatus});
     setTransientSaveFeedback({state: 'saving', message: 'Saving…'}, 0);
 
-    if (id.startsWith('optimistic-') || phase6SchemaMissing) {
+    if (id.startsWith('optimistic-')) {
+      const nextQ = enqueueOfflineWrite({
+        kind: 'update_status',
+        baseUpdatedAt: prevSnapshot.updated_at,
+        payload: {id, status: nextStatus},
+      });
+      setOfflineQueueItems(nextQ);
+      setTransientSaveFeedback({
+        state: 'queued',
+        message: nextStatus === 'trusted' ? 'Trusted in offline queue ✓' : 'Queued ✓',
+      });
+      return true;
+    }
+
+    if (phase6SchemaMissing) {
       setTransientSaveFeedback({
         state: 'saved',
         message: nextStatus === 'trusted' ? 'Marked Trusted ✓' : 'Saved ✓',
@@ -1062,9 +1258,10 @@ export default function App() {
         if (isLikelyOfflineError(error)) {
           const nextQ = enqueueOfflineWrite({
             kind: 'update_status',
+            baseUpdatedAt: prevSnapshot.updated_at,
             payload: {id, status: nextStatus},
           });
-          setOfflineQueueCount(nextQ.length);
+          setOfflineQueueItems(nextQ);
           setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
           return true;
         }
@@ -1087,9 +1284,10 @@ export default function App() {
       if (isLikelyOfflineError(err)) {
         const nextQ = enqueueOfflineWrite({
           kind: 'update_status',
+          baseUpdatedAt: prevSnapshot.updated_at,
           payload: {id, status: nextStatus},
         });
-        setOfflineQueueCount(nextQ.length);
+        setOfflineQueueItems(nextQ);
         setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
         return true;
       }
@@ -1108,6 +1306,7 @@ export default function App() {
     setEntries((prev) => prev.filter((item) => item.id !== id));
 
     if (id.startsWith('optimistic-')) {
+      setOfflineQueueItems(removeOfflineWritesForEntry(id));
       return true;
     }
 
@@ -1121,6 +1320,7 @@ export default function App() {
       return false;
     }
 
+    setOfflineQueueItems(removeOfflineWritesForEntry(id));
     setTransientSaveFeedback({state: 'saved', message: 'Deleted ✓'});
     return true;
   }
@@ -1400,10 +1600,28 @@ export default function App() {
         for (const p of basePrepared) unmarkHashSaved(p.hash);
         if (isLikelyOfflineError(res.error)) {
           let latestQ = loadOfflineWriteQueue();
-          for (const p of basePrepared) {
-            latestQ = enqueueOfflineWrite({kind: 'save_entry', payload: p.baseRow});
+          for (let idx = 0; idx < basePrepared.length; idx += 1) {
+            const p = basePrepared[idx];
+            const optId = optimisticRows[idx]?.id;
+            if (optId) {
+              saveEntryMetaFallback(optId, {
+                status: desiredStatus,
+                source_url: meta?.sourceUrl ?? null,
+                extracted_at: meta?.extractedAt ?? null,
+              });
+            }
+            latestQ = enqueueOfflineWrite({
+              kind: 'save_entry',
+              optimisticId: optId,
+              payload: {
+                ...p.baseRow,
+                status: desiredStatus,
+                source_url: meta?.sourceUrl ?? null,
+                extracted_at: meta?.extractedAt ?? null,
+              },
+            });
           }
-          setOfflineQueueCount(latestQ.length);
+          setOfflineQueueItems(latestQ);
           setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
           return basePrepared.length;
         }
@@ -1442,6 +1660,33 @@ export default function App() {
       return hydratedSaved.length;
     } catch (err) {
       for (const p of basePrepared) unmarkHashSaved(p.hash);
+      if (isLikelyOfflineError(err)) {
+        let latestQ = loadOfflineWriteQueue();
+        for (let idx = 0; idx < basePrepared.length; idx += 1) {
+          const p = basePrepared[idx];
+          const optId = optimisticRows[idx]?.id;
+          if (optId) {
+            saveEntryMetaFallback(optId, {
+              status: desiredStatus,
+              source_url: meta?.sourceUrl ?? null,
+              extracted_at: meta?.extractedAt ?? null,
+            });
+          }
+          latestQ = enqueueOfflineWrite({
+            kind: 'save_entry',
+            optimisticId: optId,
+            payload: {
+              ...p.baseRow,
+              status: desiredStatus,
+              source_url: meta?.sourceUrl ?? null,
+              extracted_at: meta?.extractedAt ?? null,
+            },
+          });
+        }
+        setOfflineQueueItems(latestQ);
+        setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+        return basePrepared.length;
+      }
       const optIds = new Set(optimisticRows.map((o) => o.id));
       setEntries((prev) => prev.filter((item) => !optIds.has(item.id)));
       setErrorBanner(formatActionableError(err));
@@ -2676,7 +2921,7 @@ export default function App() {
 
   if (!authReady) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-canvas text-sm text-ink-muted">
+      <div className="flex min-h-[100dvh] items-center justify-center bg-canvas text-sm text-ink-muted">
         Loading Mantis Studio...
       </div>
     );
@@ -2696,7 +2941,7 @@ export default function App() {
           : 'xl:grid-cols-1';
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
+    <div className="flex h-[100dvh] flex-col overflow-hidden bg-canvas text-ink">
       <TopBar
         activeArea={activeArea}
         onSelectArea={(area) => {
@@ -3325,7 +3570,17 @@ export default function App() {
                   phase5SchemaMissing={phase5SchemaMissing}
                   phase6SchemaMissing={phase6SchemaMissing}
                   offlineQueueCount={offlineQueueCount}
+                  offlineQueueItems={offlineQueueItems}
                   onFlushOfflineQueue={() => void flushOfflineQueue()}
+                  onForceOverwriteOfflineWrite={(queueId) => {
+                    const updated = markOfflineWriteForceOverwrite(queueId);
+                    setOfflineQueueItems(updated);
+                    void flushOfflineQueue();
+                  }}
+                  onDiscardOfflineWrite={(queueId) => {
+                    const updated = removeOfflineWriteById(queueId);
+                    setOfflineQueueItems(updated);
+                  }}
                   brainUrl={brainUrl}
                   backupBrainUrl={backupBrainUrl}
                   brainModel={brainModel}

@@ -15,6 +15,14 @@ export interface OfflineQueuedWrite {
   kind: 'save_entry' | 'update_entry' | 'update_status';
   payload: Record<string, unknown>;
   createdAt: string;
+  optimisticId?: string;
+  baseUpdatedAt?: string;
+  retryCount?: number;
+  lastError?: string | null;
+  hasConflict?: boolean;
+  conflictServerTitle?: string;
+  conflictServerUpdatedAt?: string;
+  forceOverwrite?: boolean;
 }
 
 const recentSaveHashes = new Map<string, number>();
@@ -130,6 +138,19 @@ export function saveEntryMetaFallback(entryId: string, meta: FallbackEntryMeta):
   try {
     const map = readMetaFallbackMap();
     map[entryId] = {...(map[entryId] || {}), ...meta};
+    window.localStorage.setItem(META_FALLBACK_KEY, JSON.stringify(map));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function migrateEntryMetaFallback(fromId: string, toId: string): void {
+  if (!fromId || !toId || fromId === toId) return;
+  try {
+    const map = readMetaFallbackMap();
+    if (!map[fromId]) return;
+    map[toId] = {...map[fromId], ...(map[toId] || {})};
+    delete map[fromId];
     window.localStorage.setItem(META_FALLBACK_KEY, JSON.stringify(map));
   } catch {
     // ignore storage errors
@@ -326,6 +347,24 @@ export function loadOfflineWriteQueue(): OfflineQueuedWrite[] {
         kind,
         payload: safePayload,
         createdAt: candidate.createdAt,
+        optimisticId: typeof candidate.optimisticId === 'string' ? candidate.optimisticId : undefined,
+        baseUpdatedAt:
+          typeof candidate.baseUpdatedAt === 'string' ? candidate.baseUpdatedAt : undefined,
+        retryCount:
+          typeof candidate.retryCount === 'number' && Number.isFinite(candidate.retryCount)
+            ? candidate.retryCount
+            : 0,
+        lastError: typeof candidate.lastError === 'string' ? candidate.lastError : null,
+        hasConflict: Boolean(candidate.hasConflict),
+        conflictServerTitle:
+          typeof candidate.conflictServerTitle === 'string'
+            ? candidate.conflictServerTitle
+            : undefined,
+        conflictServerUpdatedAt:
+          typeof candidate.conflictServerUpdatedAt === 'string'
+            ? candidate.conflictServerUpdatedAt
+            : undefined,
+        forceOverwrite: Boolean(candidate.forceOverwrite),
       });
     }
     return valid;
@@ -334,25 +373,131 @@ export function loadOfflineWriteQueue(): OfflineQueuedWrite[] {
   }
 }
 
-export function enqueueOfflineWrite(item: Omit<OfflineQueuedWrite, 'id' | 'createdAt'>): OfflineQueuedWrite[] {
+export function enqueueOfflineWrite(
+  item: Omit<OfflineQueuedWrite, 'id' | 'createdAt'>,
+): OfflineQueuedWrite[] {
   const queue = loadOfflineWriteQueue();
   const safePayload = sanitizeOfflinePayload(item.kind, item.payload);
   if (!safePayload) return queue;
+
+  const targetId = typeof safePayload.id === 'string' ? safePayload.id : null;
+  const nowIso = new Date().toISOString();
+
+  // Coalesce edits/status changes on an offline-created optimistic entry directly into its save_entry write
+  if (targetId && (item.kind === 'update_entry' || item.kind === 'update_status')) {
+    const optimisticIdx = queue.findIndex(
+      (q) => q.kind === 'save_entry' && q.optimisticId === targetId,
+    );
+    if (optimisticIdx >= 0) {
+      const target = queue[optimisticIdx];
+      const mergedPayload = {...target.payload};
+      if (item.kind === 'update_status') {
+        mergedPayload.status = safePayload.status;
+      } else {
+        if (typeof safePayload.title === 'string') mergedPayload.title = safePayload.title;
+        if (typeof safePayload.content === 'string') mergedPayload.content = safePayload.content;
+        if ('folder_id' in safePayload) mergedPayload.folder_id = safePayload.folder_id;
+        if (Array.isArray(safePayload.tags)) mergedPayload.tags = safePayload.tags;
+        if (safePayload.status) mergedPayload.status = safePayload.status;
+      }
+      const next = queue.map((q, idx) =>
+        idx === optimisticIdx
+          ? {...q, payload: mergedPayload, lastError: null, hasConflict: false}
+          : q,
+      );
+      saveOfflineWriteQueue(next);
+      return next;
+    }
+
+    // Coalesce repeated update_entry / update_status on the same real DB row
+    const existingIdx = queue.findIndex(
+      (q) =>
+        (q.kind === 'update_entry' || q.kind === 'update_status') &&
+        q.payload.id === targetId &&
+        q.kind === item.kind,
+    );
+    if (existingIdx >= 0) {
+      const existing = queue[existingIdx];
+      const next = queue.map((q, idx) =>
+        idx === existingIdx
+          ? {
+              ...existing,
+              payload: {...existing.payload, ...safePayload},
+              baseUpdatedAt: existing.baseUpdatedAt || item.baseUpdatedAt,
+              lastError: null,
+              hasConflict: false,
+              createdAt: nowIso,
+            }
+          : q,
+      );
+      saveOfflineWriteQueue(next);
+      return next;
+    }
+  }
+
   const next: OfflineQueuedWrite[] = [
     ...queue,
     {
       kind: item.kind,
       payload: safePayload,
       id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      createdAt: new Date().toISOString(),
+      createdAt: nowIso,
+      optimisticId: item.optimisticId,
+      baseUpdatedAt: item.baseUpdatedAt,
+      retryCount: 0,
+      lastError: null,
+      hasConflict: false,
+      forceOverwrite: false,
     },
   ].slice(-40);
-  try {
-    window.localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(next));
-  } catch {
-    // ignore storage quota errors
-  }
+  saveOfflineWriteQueue(next);
   return next;
+}
+
+export function removeOfflineWriteById(queueId: string): OfflineQueuedWrite[] {
+  const next = loadOfflineWriteQueue().filter((item) => item.id !== queueId);
+  saveOfflineWriteQueue(next);
+  return next;
+}
+
+export function removeOfflineWritesForEntry(entryId: string): OfflineQueuedWrite[] {
+  const next = loadOfflineWriteQueue().filter(
+    (item) => item.optimisticId !== entryId && item.payload.id !== entryId,
+  );
+  saveOfflineWriteQueue(next);
+  return next;
+}
+
+export function markOfflineWriteForceOverwrite(queueId: string): OfflineQueuedWrite[] {
+  const next = loadOfflineWriteQueue().map((item) =>
+    item.id === queueId
+      ? {...item, forceOverwrite: true, hasConflict: false, lastError: null}
+      : item,
+  );
+  saveOfflineWriteQueue(next);
+  return next;
+}
+
+export function describeOfflineWrite(item: OfflineQueuedWrite): {
+  kindLabel: string;
+  label: string;
+} {
+  if (item.kind === 'save_entry') {
+    return {
+      kindLabel: 'New Note',
+      label: String(item.payload.title || 'Untitled offline note'),
+    };
+  }
+  if (item.kind === 'update_entry') {
+    return {
+      kindLabel: 'Edit Note',
+      label: String(item.payload.title || `Entry ${String(item.payload.id || '').slice(0, 8)}`),
+    };
+  }
+  return {
+    kindLabel: 'Trust Status',
+    label: `Set status "${String(item.payload.status || 'reviewed')}" on entry ${String(item.payload.id || '').slice(0, 8)}`,
+  };
 }
 
 export function saveOfflineWriteQueue(queue: OfflineQueuedWrite[]): void {

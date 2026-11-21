@@ -10,7 +10,7 @@ import {
   Terminal,
   XCircle,
 } from 'lucide-react';
-import {useMemo, useState} from 'react';
+import {useEffect, useMemo, useState} from 'react';
 import {
   buildDpoJsonl,
   buildPortableBrainBundle,
@@ -59,6 +59,10 @@ export function ExportStudioPanel({
     null,
   );
 
+  useEffect(() => {
+    setDraft(modelCard);
+  }, [modelCard]);
+
   const liveBundle = useMemo(
     () =>
       buildPortableBrainBundle({
@@ -87,7 +91,7 @@ export function ExportStudioPanel({
   }
 
   function handleRunSmokeTest() {
-    const res = runExportedBundleSmokeTest(liveBundle);
+    const res = runExportedBundleSmokeTest(liveBundle, {sftJsonl, dpoJsonl});
     setSmokeResult(res);
   }
 

@@ -76,7 +76,7 @@ export function AuthGate({onAuthenticated}: AuthGateProps) {
   }
 
   return (
-    <div className="min-h-screen bg-canvas px-4 py-10 text-ink sm:px-6">
+    <div className="min-h-[100dvh] bg-canvas px-4 py-10 text-ink sm:px-6">
       <div className="mx-auto max-w-xl space-y-6">
         <div className="space-y-2 border-b border-line pb-6">
           <div className="flex items-center justify-between">

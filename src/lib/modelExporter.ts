@@ -9,6 +9,7 @@ import type {
 } from '../types/mantis';
 import {getEntryStatus} from './knowledgeSync';
 import {loadScratchSkills} from './scratchEngine';
+import {scrubTrainingText} from './trainingStore';
 import {computeContentHash, encodeDenseVector384, quantizeInt8} from './vectorStore';
 
 const MODEL_CARD_KEY = 'mantis_model_card_v1';
@@ -31,6 +32,15 @@ export function sanitizeModelSlug(raw: string): string {
     .replace(/\s+/g, '-')
     .replace(/[^a-zA-Z0-9._-]/g, '');
   return cleaned || 'Mantis-Custom-v1';
+}
+
+function escapeHtml(raw: string): string {
+  return String(raw)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export function loadModelCard(): ModelCardConfig {
@@ -66,22 +76,37 @@ export function buildPortableBrainBundle(params: {
   latestEval?: EvalRunSummary | null;
 }): PortableBrainBundle {
   const folderMap = new Map(params.folders.map((f) => [f.id, f.name]));
-  const skills = params.skills ?? loadScratchSkills();
+  const rawSkills = params.skills ?? loadScratchSkills();
+  const skills: ScratchSkillRule[] = rawSkills.map((skill) => ({
+    ...skill,
+    triggers: skill.triggers.map((t) => scrubTrainingText(t)),
+    responses: skill.responses.map((r) => scrubTrainingText(r)),
+  }));
+
+  const safeCard: ModelCardConfig = {
+    ...params.modelCard,
+    modelName: sanitizeModelSlug(params.modelCard.modelName),
+    personaPrompt: scrubTrainingText(params.modelCard.personaPrompt),
+    tagline: scrubTrainingText(params.modelCard.tagline),
+    author: scrubTrainingText(params.modelCard.author),
+  };
 
   const filteredEntries = params.entries.filter((e) => {
     const st = getEntryStatus(e);
-    return params.modelCard.includeOnlyTrusted ? st === 'trusted' : st !== 'raw';
+    return safeCard.includeOnlyTrusted ? st === 'trusted' : st !== 'raw';
   });
 
   const knowledge = filteredEntries.map((entry) => {
+    const safeTitle = scrubTrainingText(entry.title);
+    const safeContent = scrubTrainingText(entry.content);
     const vec = encodeDenseVector384(
-      `${entry.title} ${entry.tags.join(' ')} ${entry.content.slice(0, 1200)}`,
+      `${safeTitle} ${entry.tags.join(' ')} ${safeContent.slice(0, 1200)}`,
     );
     const q = quantizeInt8(vec);
     return {
       id: entry.id,
-      title: entry.title,
-      content: entry.content,
+      title: safeTitle,
+      content: safeContent,
       folder: (entry.folder_id && folderMap.get(entry.folder_id)) || 'General',
       tags: entry.tags,
       status: getEntryStatus(entry),
@@ -94,7 +119,7 @@ export function buildPortableBrainBundle(params: {
   return {
     schema: 'mantis-brain-bundle/v1',
     exportedAt: new Date().toISOString(),
-    modelCard: {...params.modelCard, modelName: sanitizeModelSlug(params.modelCard.modelName)},
+    modelCard: safeCard,
     evalSummary: {
       passRate: params.latestEval?.passRate ?? null,
       totalCases: params.latestEval?.totalCases ?? 0,
@@ -104,30 +129,281 @@ export function buildPortableBrainBundle(params: {
   };
 }
 
+function tryEvalPortableMath(input: string): {expr: string; formatted: string} | null {
+  const cleaned = input
+    .trim()
+    .replace(/^(what is|what's|calculate|compute|solve|eval|evaluate)\s+/i, '')
+    .replace(/[?=]+$/g, '')
+    .replace(/(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?|\([^)]+\))/gi, '($1 / 100) * $2')
+    .replace(/\bplus\b/gi, '+')
+    .replace(/\bminus\b/gi, '-')
+    .replace(/\btimes\b|\bmultiplied by\b/gi, '*')
+    .replace(/\bdivided by\b/gi, '/')
+    .replace(/×/g, '*')
+    .replace(/÷/g, '/')
+    .trim();
+  const stripped = cleaned.replace(/\b(?:sqrt|abs|round)\(/gi, '(');
+  if (!cleaned || !/^[0-9+\-*/%^().\s]+$/.test(stripped)) return null;
+  if (!/\d/.test(cleaned) || !/[+\-*/%^]|(?:sqrt|abs|round)\(/i.test(cleaned)) return null;
+
+  let pos = 0;
+  const src = cleaned.replace(/\s+/g, '');
+  const peek = () => src[pos] || '';
+  const consume = (ch?: string) => {
+    const c = src[pos] || '';
+    if (ch && c !== ch) throw new Error('bad');
+    pos += 1;
+    return c;
+  };
+  const parseExpr = (): number => {
+    let left = parseTerm();
+    while (peek() === '+' || peek() === '-') {
+      const op = consume();
+      const right = parseTerm();
+      left = op === '+' ? left + right : left - right;
+    }
+    return left;
+  };
+  const parseTerm = (): number => {
+    let left = parsePower();
+    while (peek() === '*' || peek() === '/' || peek() === '%') {
+      const op = consume();
+      const right = parsePower();
+      if (op === '*') left *= right;
+      else if (op === '/') {
+        if (right === 0) throw new Error('div0');
+        left /= right;
+      } else {
+        if (right === 0) throw new Error('div0');
+        left %= right;
+      }
+    }
+    return left;
+  };
+  const parsePower = (): number => {
+    const base = parseUnary();
+    if (peek() === '^') {
+      consume('^');
+      return Math.pow(base, parsePower());
+    }
+    return base;
+  };
+  const parseUnary = (): number => {
+    if (peek() === '+') {
+      consume();
+      return parseUnary();
+    }
+    if (peek() === '-') {
+      consume();
+      return -parseUnary();
+    }
+    return parsePrimary();
+  };
+  const parsePrimary = (): number => {
+    const rest = src.slice(pos).toLowerCase();
+    for (const fn of ['sqrt', 'abs', 'round']) {
+      if (rest.startsWith(`${fn}(`)) {
+        pos += fn.length;
+        consume('(');
+        const val = parseExpr();
+        consume(')');
+        if (fn === 'sqrt') return Math.sqrt(val);
+        if (fn === 'abs') return Math.abs(val);
+        return Math.round(val);
+      }
+    }
+    if (peek() === '(') {
+      consume('(');
+      const val = parseExpr();
+      consume(')');
+      return val;
+    }
+    const start = pos;
+    let dots = 0;
+    while (/[\d.]/.test(peek())) {
+      if (peek() === '.') dots += 1;
+      if (dots > 1) throw new Error('badnum');
+      pos += 1;
+    }
+    if (start === pos) throw new Error('nan');
+    const n = Number(src.slice(start, pos));
+    if (!Number.isFinite(n)) throw new Error('inf');
+    return n;
+  };
+
+  try {
+    const val = parseExpr();
+    if (pos !== src.length || !Number.isFinite(val)) return null;
+    const formatted = Number.isInteger(val) ? String(val) : String(Number(val.toFixed(6)));
+    return {expr: cleaned, formatted};
+  } catch {
+    return null;
+  }
+}
+
+function escapeRegExp(raw: string): string {
+  return raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesTriggerSafely(lowerPrompt: string, triggerRaw: string): boolean {
+  const trig = triggerRaw.trim().toLowerCase();
+  if (!trig) return false;
+  if (lowerPrompt === trig) return true;
+  if (trig.length <= 4) {
+    return new RegExp(`(?:^|\\b)${escapeRegExp(trig)}(?:\\b|$)`, 'i').test(lowerPrompt);
+  }
+  return lowerPrompt.includes(trig);
+}
+
 /**
- * In-app Round-Trip Smoke Test: simulates loading the compiled .mantisbrain.json inside
- * an isolated runtime so the user verifies portability before downloading.
+ * Pure TypeScript equivalent of the exported chatroom runtime (`createMantisRuntime`),
+ * allowing in-app verification of exact exported behavior without eval/Function.
  */
-export function runExportedBundleSmokeTest(bundle: PortableBrainBundle): {
+export function executePortableRuntimeQuery(
+  bundle: PortableBrainBundle,
+  prompt: string,
+): {reply: string; sources: string[]; engine: string} {
+  const clean = String(prompt || '').trim();
+  const lower = clean.toLowerCase().replace(/[!?.,]+$/g, '').trim();
+
+  // 1. Exact zero-eval arithmetic reasoning
+  const mathRes = tryEvalPortableMath(clean);
+  if (mathRes) {
+    return {
+      reply: `${mathRes.expr} = ${mathRes.formatted}`,
+      sources: ['Arithmetic Engine'],
+      engine: 'math-parser',
+    };
+  }
+
+  // 2. Teacher-distilled conversational & domain skills with word-boundary guard
+  for (const skill of bundle.skills || []) {
+    if (skill.triggers.some((t) => matchesTriggerSafely(lower, t))) {
+      const picked = skill.responses[0] || '';
+      if (picked) {
+        return {reply: picked, sources: [skill.folderName], engine: 'distilled-skill'};
+      }
+    }
+  }
+
+  // 3. Hybrid subword + bigram cosine retrieval over Int8 quantized memory
+  const qVec = encodeDenseVector384(clean);
+  const ranked = (bundle.knowledge || [])
+    .map((k) => {
+      let dot = 0;
+      const len = Math.min(384, k.vectorInt8.length);
+      for (let i = 0; i < len; i += 1) dot += qVec[i] * k.vectorInt8[i];
+      const vecSim = dot * k.vectorScale;
+      const exactBoost =
+        lower.length >= 3 && k.title.toLowerCase().includes(lower) ? 0.45 : 0;
+      const trustBoost = k.status === 'trusted' ? 1.35 : 1.0;
+      return {item: k, score: (vecSim + exactBoost) * trustBoost};
+    })
+    .filter((x) => x.score > 0.22)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  if (ranked.length > 0) {
+    return {
+      reply: ranked
+        .map((r, idx) => `${idx + 1}. ${r.item.title} [${r.item.folder}]\n${r.item.content}`)
+        .join('\n\n'),
+      sources: ranked.map((r) => r.item.title),
+      engine: 'int8-hybrid-rag',
+    };
+  }
+
+  // 4. Baseline starter greeting
+  if (/^(hi|hello|hey|yo|greetings|good morning|good afternoon|good evening)$/i.test(lower)) {
+    return {
+      reply: `Hello! I'm ${bundle.modelCard.modelName} (v${bundle.modelCard.version}). Loaded ${bundle.knowledge.length} memories and ${bundle.skills.length} skills offline. Ask me anything or try math like 1+1.`,
+      sources: ['Starter Persona'],
+      engine: 'starter-greeting',
+    };
+  }
+
+  return {
+    reply: `[${bundle.modelCard.modelName}] I don't have a trained rule for "${clean}" yet. Teach me or add more Knowledge notes in Mantis Studio.`,
+    sources: [],
+    engine: 'fallback',
+  };
+}
+
+function validateJsonlLines(jsonl: string): {valid: boolean; count: number} {
+  if (!jsonl.trim()) return {valid: true, count: 0};
+  const lines = jsonl.split('\n').filter((l) => l.trim().length > 0);
+  try {
+    for (const line of lines) {
+      JSON.parse(line);
+    }
+    return {valid: true, count: lines.length};
+  } catch {
+    return {valid: false, count: lines.length};
+  }
+}
+
+/**
+ * In-app Round-Trip Smoke Test: verifies schema integrity, Int8 vectors, math & word-boundary
+ * runtime execution, retrieval round-trip, JSONL validity, Colab notebook validity, XSS escaping,
+ * and zero secret leakage before downloading.
+ */
+export function runExportedBundleSmokeTest(
+  bundle: PortableBrainBundle,
+  datasets?: {sftJsonl?: string; dpoJsonl?: string},
+): {
   passed: boolean;
   checks: Array<{label: string; passed: boolean; detail: string}>;
 } {
   const checks: Array<{label: string; passed: boolean; detail: string}> = [];
 
+  let colabValid = false;
+  try {
+    const nb = JSON.parse(generateColabQloraNotebook(bundle.modelCard)) as {
+      nbformat?: number;
+      cells?: unknown[];
+    };
+    colabValid = nb.nbformat === 4 && Array.isArray(nb.cells) && nb.cells.length >= 5;
+  } catch {
+    colabValid = false;
+  }
+
   checks.push({
-    label: 'Schema & Model Name Valid',
+    label: 'Schema, Slug & Colab Notebook Valid',
     passed:
       bundle.schema === 'mantis-brain-bundle/v1' &&
-      /^[a-zA-Z0-9._-]+$/.test(bundle.modelCard.modelName),
-    detail: `${bundle.modelCard.modelName} v${bundle.modelCard.version}`,
+      /^[a-zA-Z0-9._-]+$/.test(bundle.modelCard.modelName) &&
+      colabValid,
+    detail: `${bundle.modelCard.modelName} v${bundle.modelCard.version} · Colab QLoRA nbformat v4`,
   });
 
   checks.push({
-    label: 'Int8 Quantized Vector Integrity',
+    label: 'Int8 Quantized Vector Integrity (384-d)',
     passed: bundle.knowledge.every(
-      (k) => Array.isArray(k.vectorInt8) && k.vectorInt8.length === 384 && Number.isFinite(k.vectorScale),
+      (k) =>
+        Array.isArray(k.vectorInt8) &&
+        k.vectorInt8.length === 384 &&
+        Number.isFinite(k.vectorScale),
     ),
-    detail: `${bundle.knowledge.length} entries vectorized at 384-d Int8`,
+    detail: `${bundle.knowledge.length} entries quantized at 384-d Int8`,
+  });
+
+  // Execute portable runtime verification tests
+  const mathCheck = executePortableRuntimeQuery(bundle, '1+1');
+  const greetingCheck = executePortableRuntimeQuery(bundle, 'hi');
+  const falseBoundaryCheck = executePortableRuntimeQuery(bundle, 'this machine test ignores substring');
+  const mathPassed = mathCheck.engine === 'math-parser' && mathCheck.reply.includes('2');
+  const boundaryPassed =
+    greetingCheck.reply.length > 0 &&
+    falseBoundaryCheck.engine !== 'starter-greeting' &&
+    (!bundle.skills.some((s) => s.triggers.some((t) => t.toLowerCase() === 'hi')) ||
+      falseBoundaryCheck.engine !== 'distilled-skill');
+
+  checks.push({
+    label: 'Portable Math (1+1 = 2) & Boundary Guard',
+    passed: mathPassed && boundaryPassed,
+    detail: mathPassed
+      ? `"1+1" → "${mathCheck.reply}"; "hi" word-boundary verified`
+      : `Math failed ("${mathCheck.reply}")`,
   });
 
   // Simulated isolated retrieval query on top note or skill
@@ -135,6 +411,7 @@ export function runExportedBundleSmokeTest(bundle: PortableBrainBundle): {
     bundle.skills[0]?.triggers[0] ||
     bundle.knowledge[0]?.title ||
     'hello';
+  const roundTrip = executePortableRuntimeQuery(bundle, sampleQuery);
   const qVec = encodeDenseVector384(sampleQuery);
   let topScore = 0;
   for (const k of bundle.knowledge.slice(0, 80)) {
@@ -145,18 +422,48 @@ export function runExportedBundleSmokeTest(bundle: PortableBrainBundle): {
   }
 
   checks.push({
-    label: 'Isolated Query Round-Trip Test',
-    passed: bundle.knowledge.length === 0 || bundle.skills.length > 0 || topScore > 0.12,
+    label: 'Isolated Memory / Skill Round-Trip',
+    passed:
+      (bundle.knowledge.length === 0 && bundle.skills.length === 0) ||
+      roundTrip.engine === 'distilled-skill' ||
+      roundTrip.engine === 'int8-hybrid-rag' ||
+      topScore > 0.12,
     detail:
       bundle.knowledge.length === 0 && bundle.skills.length === 0
-        ? 'Empty starter brain (will still answer greetings & math)'
-        : `Query "${sampleQuery.slice(0, 30)}" recalled at ${(topScore * 100).toFixed(0)}% cosine similarity`,
+        ? 'Starter brain ready (handles greetings & math offline)'
+        : `Query "${sampleQuery.slice(0, 26)}" via ${roundTrip.engine} (${(topScore * 100).toFixed(0)}% cosine)`,
   });
 
+  const sftValidation = validateJsonlLines(datasets?.sftJsonl || '');
+  const dpoValidation = validateJsonlLines(datasets?.dpoJsonl || '');
+  const jsonlPassed = sftValidation.valid && dpoValidation.valid;
+
   checks.push({
-    label: 'Zero Exposed Secrets',
-    passed: !/(sb_secret_|hf_[A-Za-z0-9]{12,}|ghp_[A-Za-z0-9]{12,})/i.test(JSON.stringify(bundle)),
-    detail: 'Verified clean JSON payload',
+    label: 'SFT & DPO Dataset JSONL Validity',
+    passed: jsonlPassed,
+    detail: jsonlPassed
+      ? `${sftValidation.count} SFT rows · ${dpoValidation.count} DPO pairs valid JSONL`
+      : 'Malformed JSONL line detected',
+  });
+
+  const htmlPreview = generateDropInChatHtml(bundle);
+  const hasRawSecrets =
+    /(sb_secret_[A-Za-z0-9_-]{6,}|hf_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._-]{16,})/i.test(
+      `${JSON.stringify(bundle)}\n${datasets?.sftJsonl || ''}\n${datasets?.dpoJsonl || ''}`,
+    );
+  const safeHtmlExport =
+    !htmlPreview.includes('.innerHTML') &&
+    !/<\/script/i.test(
+      htmlPreview.slice(htmlPreview.indexOf('<script id="bundle-data"'), htmlPreview.indexOf('</script><script>')),
+    );
+
+  checks.push({
+    label: 'Zero Secrets & Safe HTML Export',
+    passed: !hasRawSecrets && safeHtmlExport,
+    detail:
+      !hasRawSecrets && safeHtmlExport
+        ? 'All bundles redacted & HTML uses safe DOM text nodes'
+        : 'Security or script-escape issue detected',
   });
 
   return {
@@ -169,12 +476,7 @@ export function generateStandaloneChatroomSdkCode(bundle: PortableBrainBundle): 
   const safeName = sanitizeModelSlug(bundle.modelCard.modelName);
   return `// ${safeName} v${bundle.modelCard.version} — Portable Mantis Chatroom Runtime SDK
 // Drop this module + your ${safeName}.mantisbrain.json into ANY web, React, or Node chatroom app!
-// Zero API keys, zero external servers required.
-
-export interface MantisMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+// Zero API keys, zero eval(), zero external servers required.
 
 export function createMantisRuntime(bundle) {
   const DIMS = 384;
@@ -188,13 +490,29 @@ export function createMantisRuntime(bundle) {
     return h >>> 0;
   }
 
+  // Exact bit-for-bit parity with Mantis encodeDenseVector384 (unigrams + char trigrams + token bigrams)
   function encode(text) {
     const vec = new Float32Array(DIMS);
-    const tokens = text.toLowerCase().replace(/[^a-z0-9_.-/+#\\s]/g, ' ').trim().split(/\\s+/).filter((t) => t.length >= 2);
-    for (const tok of tokens) {
-      vec[hashToken(tok, 2166136261) % DIMS] += 2.2;
+    const clean = String(text || '').toLowerCase().replace(/[^a-z0-9_.\\-/+#\\s]/g, ' ').trim();
+    if (!clean) return vec;
+    const tokens = clean.split(/\\s+/).filter((t) => t.length >= 2);
+    for (let tIdx = 0; tIdx < tokens.length; tIdx++) {
+      const tok = tokens[tIdx];
+      const h1 = hashToken(tok, 2166136261);
       const h2 = hashToken(tok, 1315423911);
+      vec[h1 % DIMS] += 2.2;
       vec[h2 % DIMS] += (h2 & 1) === 0 ? 1.4 : -1.4;
+      if (tok.length >= 4) {
+        const padded = '_' + tok + '_';
+        for (let i = 0; i <= padded.length - 3; i++) {
+          const th = hashToken(padded.slice(i, i + 3), 2654435761);
+          vec[th % DIMS] += (th & 1) === 0 ? 0.65 : -0.65;
+        }
+      }
+      if (tIdx + 1 < tokens.length) {
+        const bh = hashToken(tok + ' ' + tokens[tIdx + 1], 3141592653);
+        vec[bh % DIMS] += 1.6;
+      }
     }
     let norm = 0;
     for (let i = 0; i < DIMS; i++) norm += vec[i] * vec[i];
@@ -203,18 +521,125 @@ export function createMantisRuntime(bundle) {
     return vec;
   }
 
+  function tryEvalMath(input) {
+    const cleaned = String(input || '')
+      .trim()
+      .replace(/^(what is|what's|calculate|compute|solve|eval|evaluate)\\s+/i, '')
+      .replace(/[?=]+$/g, '')
+      .replace(/(\\d+(?:\\.\\d+)?)\\s*%\\s*of\\s*(\\d+(?:\\.\\d+)?|\\([^)]+\\))/gi, '($1 / 100) * $2')
+      .replace(/\\bplus\\b/gi, '+')
+      .replace(/\\bminus\\b/gi, '-')
+      .replace(/\\btimes\\b|\\bmultiplied by\\b/gi, '*')
+      .replace(/\\bdivided by\\b/gi, '/')
+      .replace(/×/g, '*')
+      .replace(/÷/g, '/')
+      .trim();
+    const stripped = cleaned.replace(/\\b(?:sqrt|abs|round)\\(/gi, '(');
+    if (!cleaned || !/^[0-9+\\-*/%^().\\s]+$/.test(stripped)) return null;
+    if (!/\\d/.test(cleaned) || !/[+\\-*/%^]|(?:sqrt|abs|round)\\(/i.test(cleaned)) return null;
+    let pos = 0;
+    const src = cleaned.replace(/\\s+/g, '');
+    const peek = () => src[pos] || '';
+    const consume = (ch) => {
+      const c = src[pos] || '';
+      if (ch && c !== ch) throw new Error('bad');
+      pos += 1;
+      return c;
+    };
+    const parseExpr = () => {
+      let left = parseTerm();
+      while (peek() === '+' || peek() === '-') {
+        const op = consume();
+        const right = parseTerm();
+        left = op === '+' ? left + right : left - right;
+      }
+      return left;
+    };
+    const parseTerm = () => {
+      let left = parsePower();
+      while (peek() === '*' || peek() === '/' || peek() === '%') {
+        const op = consume();
+        const right = parsePower();
+        if (op === '*') left *= right;
+        else if (op === '/') { if (right === 0) throw new Error('div0'); left /= right; }
+        else { if (right === 0) throw new Error('div0'); left %= right; }
+      }
+      return left;
+    };
+    const parsePower = () => {
+      const base = parseUnary();
+      if (peek() === '^') { consume('^'); return Math.pow(base, parsePower()); }
+      return base;
+    };
+    const parseUnary = () => {
+      if (peek() === '+') { consume(); return parseUnary(); }
+      if (peek() === '-') { consume(); return -parseUnary(); }
+      return parsePrimary();
+    };
+    const parsePrimary = () => {
+      const rest = src.slice(pos).toLowerCase();
+      for (const fn of ['sqrt', 'abs', 'round']) {
+        if (rest.startsWith(fn + '(')) {
+          pos += fn.length;
+          consume('(');
+          const v = parseExpr();
+          consume(')');
+          return fn === 'sqrt' ? Math.sqrt(v) : fn === 'abs' ? Math.abs(v) : Math.round(v);
+        }
+      }
+      if (peek() === '(') { consume('('); const v = parseExpr(); consume(')'); return v; }
+      const start = pos;
+      let dots = 0;
+      while (/[\\d.]/.test(peek())) {
+        if (peek() === '.') dots += 1;
+        if (dots > 1) throw new Error('badnum');
+        pos += 1;
+      }
+      if (start === pos) throw new Error('nan');
+      const n = Number(src.slice(start, pos));
+      if (!Number.isFinite(n)) throw new Error('inf');
+      return n;
+    };
+    try {
+      const val = parseExpr();
+      if (pos !== src.length || !Number.isFinite(val)) return null;
+      const formatted = Number.isInteger(val) ? String(val) : String(Number(val.toFixed(6)));
+      return { expr: cleaned, formatted };
+    } catch {
+      return null;
+    }
+  }
+
+  function matchesTrigger(lowerPrompt, rawTrig) {
+    const trig = String(rawTrig || '').trim().toLowerCase();
+    if (!trig) return false;
+    if (lowerPrompt === trig) return true;
+    if (trig.length <= 4) {
+      const esc = trig.replace(/[.*+?^$()|[\\]\\\\{}]/g, '\\\\$&');
+      return new RegExp('(?:^|\\\\b)' + esc + '(?:\\\\b|$)', 'i').test(lowerPrompt);
+    }
+    return lowerPrompt.includes(trig);
+  }
+
   return {
     name: bundle.modelCard.modelName,
     version: bundle.modelCard.version,
     ask(prompt) {
       const clean = String(prompt || '').trim();
-      const lower = clean.toLowerCase().replace(/[!?.,]+$/g, '');
+      const lower = clean.toLowerCase().replace(/[!?.,]+$/g, '').trim();
+
+      const mathRes = tryEvalMath(clean);
+      if (mathRes) {
+        return { reply: mathRes.expr + ' = ' + mathRes.formatted, sources: ['Arithmetic Engine'], engine: 'math-parser' };
+      }
 
       // 1. Check Teacher-distilled conversational / domain skills
       for (const skill of bundle.skills || []) {
-        if (skill.triggers.some((t) => t.toLowerCase() === lower || (lower.length > 3 && lower.includes(t.toLowerCase())))) {
-          const picked = skill.responses[Math.floor(Math.random() * skill.responses.length)] || skill.responses[0];
-          return { reply: picked, sources: [skill.folderName], engine: 'distilled-skill' };
+        if (skill.triggers.some((t) => matchesTrigger(lower, t))) {
+          const picked = skill.responses[0] || '';
+          if (picked) {
+            return { reply: picked, sources: [skill.folderName], engine: 'distilled-skill' };
+          }
         }
       }
 
@@ -225,7 +650,7 @@ export function createMantisRuntime(bundle) {
           let dot = 0;
           for (let i = 0; i < DIMS; i++) dot += qVec[i] * k.vectorInt8[i];
           const vecSim = dot * k.vectorScale;
-          const exactBoost = k.title.toLowerCase().includes(lower) ? 0.45 : 0;
+          const exactBoost = lower.length >= 3 && k.title.toLowerCase().includes(lower) ? 0.45 : 0;
           const trustBoost = k.status === 'trusted' ? 1.35 : 1.0;
           return { item: k, score: (vecSim + exactBoost) * trustBoost };
         })
@@ -233,18 +658,26 @@ export function createMantisRuntime(bundle) {
         .sort((a, b) => b.score - a.score)
         .slice(0, 3);
 
-      if (ranked.length === 0) {
+      if (ranked.length > 0) {
         return {
-          reply: \`[\${bundle.modelCard.modelName}] I don't have a trained rule for "\${clean}" yet. Teach me or add more Knowledge notes in Mantis Studio.\`,
-          sources: [],
-          engine: 'fallback',
+          reply: ranked.map((r, idx) => (idx + 1) + '. ' + r.item.title + ' [' + r.item.folder + ']\\n' + r.item.content).join('\\n\\n'),
+          sources: ranked.map((r) => r.item.title),
+          engine: 'int8-hybrid-rag',
+        };
+      }
+
+      if (/^(hi|hello|hey|yo|greetings|good morning|good afternoon|good evening)$/i.test(lower)) {
+        return {
+          reply: 'Hello! I am ' + bundle.modelCard.modelName + ' (v' + bundle.modelCard.version + '). Ready with ' + (bundle.knowledge || []).length + ' memories & ' + (bundle.skills || []).length + ' skills offline.',
+          sources: ['Starter Persona'],
+          engine: 'starter-greeting',
         };
       }
 
       return {
-        reply: ranked.map((r, idx) => \`\${idx + 1}. \${r.item.title} [\${r.item.folder}]\\n\${r.item.content}\`).join('\\n\\n'),
-        sources: ranked.map((r) => r.item.title),
-        engine: 'int8-hybrid-rag',
+        reply: '[' + bundle.modelCard.modelName + '] I do not have a trained rule for "' + clean + '" yet. Teach me or add more Knowledge notes in Mantis Studio.',
+        sources: [],
+        engine: 'fallback',
       };
     },
   };
@@ -254,46 +687,59 @@ export function createMantisRuntime(bundle) {
 
 export function generateDropInChatHtml(bundle: PortableBrainBundle): string {
   const safeName = sanitizeModelSlug(bundle.modelCard.modelName);
+  const safeEscName = escapeHtml(safeName);
+  const safeEscVersion = escapeHtml(bundle.modelCard.version);
   const embeddedJson = JSON.stringify(bundle).replace(/<\/script/gi, '<\\/script');
-  const sdkBody = generateStandaloneChatroomSdkCode(bundle).replace(/export /g, '');
+  const sdkBody = generateStandaloneChatroomSdkCode(bundle)
+    .replace(/export /g, '')
+    .replace(/<\/script/gi, '<\\/script');
+  const starterSample = escapeHtml(bundle.skills[0]?.triggers[0] || bundle.knowledge[0]?.title || 'hi');
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${safeName} — Portable Chatroom</title>
+  <title>${safeEscName} — Portable Chatroom</title>
   <style>
-    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0b0f17; color: #f1f5f9; display: flex; flex-direction: column; height: 100vh; }
-    header { padding: 14px 20px; border-bottom: 1px solid #1e293b; display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
-    main { flex: 1; overflow-y: auto; padding: 20px; max-width: 780px; width: 100%; margin: 0 auto; box-sizing: border-box; }
-    .turn { padding: 14px 0; border-bottom: 1px solid #1e293b; line-height: 1.6; white-space: pre-wrap; font-size: 14px; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0b0f17; color: #f1f5f9; display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+    header { padding: 12px 16px; border-bottom: 1px solid #1e293b; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; font-size: 14px; }
+    main { flex: 1; overflow-y: auto; padding: 16px; max-width: 780px; width: 100%; margin: 0 auto; }
+    .turn { padding: 14px 0; border-bottom: 1px solid #1e293b; line-height: 1.6; white-space: pre-wrap; font-size: 14px; word-break: break-word; }
     .role { font-size: 11px; font-family: monospace; color: #10b981; margin-bottom: 4px; text-transform: uppercase; }
     .role.user { color: #94a3b8; }
-    form { max-width: 780px; width: 100%; margin: 0 auto 18px; padding: 0 20px; box-sizing: border-box; display: flex; gap: 8px; }
-    input { flex: 1; background: #111827; border: 1px solid #334155; color: #f1f5f9; border-radius: 8px; padding: 12px 14px; font-size: 14px; }
-    button { background: #10b981; color: #052e16; font-weight: 600; border: 0; border-radius: 8px; padding: 0 18px; cursor: pointer; }
+    .meta { margin-top: 6px; font-size: 11px; font-family: monospace; color: #64748b; }
+    .chips { max-width: 780px; width: 100%; margin: 8px auto 0; padding: 0 16px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { min-height: 36px; background: #111827; border: 1px solid #1e293b; color: #cbd5e1; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    form { max-width: 780px; width: 100%; margin: 8px auto 14px; padding: 0 16px; display: flex; gap: 8px; }
+    input { flex: 1; min-height: 44px; background: #111827; border: 1px solid #334155; color: #f1f5f9; border-radius: 8px; padding: 10px 14px; font-size: 14px; }
+    button[type="submit"] { min-height: 44px; background: #10b981; color: #052e16; font-weight: 600; border: 0; border-radius: 8px; padding: 0 18px; cursor: pointer; }
   </style>
 </head>
 <body>
   <header>
-    <strong>${safeName} <span style="color:#64748b;font-weight:400">v${bundle.modelCard.version}</span></strong>
+    <strong>${safeEscName} <span style="color:#64748b;font-weight:400">v${safeEscVersion}</span></strong>
     <span style="color:#94a3b8;font-size:12px">${bundle.knowledge.length} memories · ${bundle.skills.length} skills (Offline Portable)</span>
   </header>
   <main id="log"></main>
+  <div class="chips">
+    <button type="button" class="chip" data-q="hi">hi</button>
+    <button type="button" class="chip" data-q="1+1">1+1</button>
+    <button type="button" class="chip" data-q="${starterSample}">${starterSample}</button>
+  </div>
   <form id="chat-form">
-    <input id="prompt" placeholder="Message ${safeName}..." autocomplete="off" />
+    <input id="prompt" placeholder="Message ${safeEscName}..." autocomplete="off" />
     <button type="submit">Send</button>
   </form>
-  <script id="bundle-data" type="application/json">${embeddedJson}</script>
-  <script>
+  <script id="bundle-data" type="application/json">${embeddedJson}</script><script>
     ${sdkBody}
     const bundle = JSON.parse(document.getElementById('bundle-data').textContent);
     const bot = createMantisRuntime(bundle);
     const log = document.getElementById('log');
     const form = document.getElementById('chat-form');
     const input = document.getElementById('prompt');
-    function appendTurn(role, text) {
+    function appendTurn(role, text, metaText) {
       const div = document.createElement('div');
       div.className = 'turn';
       const r = document.createElement('div');
@@ -302,18 +748,32 @@ export function generateDropInChatHtml(bundle: PortableBrainBundle): string {
       const body = document.createElement('div');
       body.textContent = text;
       div.append(r, body);
+      if (metaText) {
+        const m = document.createElement('div');
+        m.className = 'meta';
+        m.textContent = metaText;
+        div.appendChild(m);
+      }
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
-    appendTurn('assistant', bundle.modelCard.tagline || (bundle.modelCard.modelName + ' ready.'));
-    form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      const q = input.value.trim();
+    function sendPrompt(raw) {
+      const q = String(raw || '').trim();
       if (!q) return;
-      input.value = '';
       appendTurn('user', q);
       const res = bot.ask(q);
-      appendTurn('assistant', res.reply);
+      const meta = res.sources && res.sources.length ? res.engine + ' · ' + res.sources.join(', ') : res.engine;
+      appendTurn('assistant', res.reply, meta);
+    }
+    appendTurn('assistant', bundle.modelCard.tagline || (bundle.modelCard.modelName + ' ready.'), 'offline-runtime');
+    document.querySelectorAll('.chip').forEach((btn) => {
+      btn.addEventListener('click', () => sendPrompt(btn.getAttribute('data-q')));
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const q = input.value;
+      input.value = '';
+      sendPrompt(q);
     });
   </script>
 </body>
@@ -326,15 +786,16 @@ export function buildSftJsonl(
   modelCard: ModelCardConfig,
 ): string {
   const lines: string[] = [];
+  const cleanSystemPrompt = scrubTrainingText(modelCard.personaPrompt);
   const approvedSft = samples.filter((s) => s.format === 'sft' && s.status !== 'rejected');
 
   for (const s of approvedSft) {
     lines.push(
       JSON.stringify({
         messages: [
-          {role: 'system', content: modelCard.personaPrompt},
-          {role: 'user', content: s.prompt},
-          {role: 'assistant', content: s.chosenResponse},
+          {role: 'system', content: cleanSystemPrompt},
+          {role: 'user', content: scrubTrainingText(s.prompt)},
+          {role: 'assistant', content: scrubTrainingText(s.chosenResponse)},
         ],
       }),
     );
@@ -346,9 +807,9 @@ export function buildSftJsonl(
     lines.push(
       JSON.stringify({
         messages: [
-          {role: 'system', content: modelCard.personaPrompt},
-          {role: 'user', content: `Apply rule/knowledge: ${e.title}`},
-          {role: 'assistant', content: e.content},
+          {role: 'system', content: cleanSystemPrompt},
+          {role: 'user', content: `Apply rule/knowledge: ${scrubTrainingText(e.title)}`},
+          {role: 'assistant', content: scrubTrainingText(e.content)},
         ],
       }),
     );
@@ -362,9 +823,9 @@ export function buildDpoJsonl(samples: TrainingSample[]): string {
     .filter((s) => s.format === 'dpo' && s.rejectedResponse && s.status !== 'rejected')
     .map((s) =>
       JSON.stringify({
-        prompt: s.prompt,
-        chosen: s.chosenResponse,
-        rejected: s.rejectedResponse,
+        prompt: scrubTrainingText(s.prompt),
+        chosen: scrubTrainingText(s.chosenResponse),
+        rejected: scrubTrainingText(s.rejectedResponse || ''),
       }),
     )
     .join('\n');
@@ -372,13 +833,14 @@ export function buildDpoJsonl(samples: TrainingSample[]): string {
 
 export function generateOllamaModelfile(modelCard: ModelCardConfig): string {
   const safeName = sanitizeModelSlug(modelCard.modelName);
+  const cleanPersona = scrubTrainingText(modelCard.personaPrompt);
   return `# Modelfile for ${safeName} (generated by Mantis Studio)
 # Usage: ollama create ${safeName} -f Modelfile && ollama run ${safeName}
 
 FROM ${safeName}.gguf
 PARAMETER temperature ${modelCard.temperature}
 PARAMETER num_ctx 8192
-SYSTEM """${modelCard.personaPrompt.replace(/"/g, '\\"')}"""
+SYSTEM """${cleanPersona.replace(/"/g, '\\"')}"""
 `;
 }
 

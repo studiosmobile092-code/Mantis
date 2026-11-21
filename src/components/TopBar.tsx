@@ -171,7 +171,7 @@ export function TopBar({
             </button>
 
             {statusOpen && (
-              <div className="mantis-modal-in absolute right-0 mt-2 w-80 rounded-lg border border-line-strong bg-elevated p-3.5 shadow-2xl">
+              <div className="mantis-modal-in absolute right-0 mt-2 w-[min(20rem,calc(100vw-2rem))] rounded-lg border border-line-strong bg-elevated p-3.5 shadow-2xl">
                 <div className="space-y-2.5 text-xs">
                   <div className="flex items-center justify-between border-b border-line pb-2">
                     <span className="font-semibold text-ink">Engine & Compute</span>

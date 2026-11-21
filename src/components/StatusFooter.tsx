@@ -86,9 +86,13 @@ export function StatusFooter({
         </span>
 
         {pendingOfflineCount > 0 && (
-          <span className="whitespace-nowrap text-warn">
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="whitespace-nowrap text-warn underline underline-offset-2 hover:text-ink"
+          >
             {pendingOfflineCount} queued
-          </span>
+          </button>
         )}
       </div>
     </footer>
