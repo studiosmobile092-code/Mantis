@@ -127,7 +127,20 @@ export function normalizeExternalUrl(raw: string): string {
 }
 
 export function normalizeBrainUrl(raw: string): string {
-  return normalizeExternalUrl(raw).replace(/\/+$/, '');
+  const normalized = normalizeExternalUrl(raw).replace(/\/+$/, '');
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    if (
+      parsed.hostname.endsWith('.supabase.co') &&
+      (parsed.pathname === '' || parsed.pathname === '/')
+    ) {
+      return `${parsed.origin}/functions/v1/mantis-brain`;
+    }
+  } catch {
+    // return normalized string so caller validation surfaces URL error
+  }
+  return normalized;
 }
 
 export function getLocalBrainMode(): 'worker' | 'ollama' {
