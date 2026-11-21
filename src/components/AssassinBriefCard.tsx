@@ -46,7 +46,7 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
             onClick={() => onReject(brief)}
             className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:text-ink disabled:opacity-50"
           >
-            <X className="h-3.5 w-3.5 text-red-400" />
+            <X className="h-3.5 w-3.5 text-danger" />
             <span>Reject &amp; Log DPO</span>
           </button>
 
@@ -117,7 +117,7 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
                   {check.passed ? (
                     <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent-text" />
                   ) : (
-                    <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                    <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
                   )}
                   <div>
                     <div className="font-medium text-ink">{check.label}</div>
@@ -126,7 +126,7 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
                 </div>
                 <span
                   className={`shrink-0 font-mono text-[10px] uppercase ${
-                    check.passed ? 'text-accent-text' : 'text-amber-400'
+                    check.passed ? 'text-accent-text' : 'text-warn'
                   }`}
                 >
                   {check.passed ? 'Pass' : 'Warn'}

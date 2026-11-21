@@ -159,10 +159,10 @@ export function SuggestionsPanel({
 
   if (phase3SchemaMissing) {
     return (
-      <section className="rounded-lg border border-amber-500/40 bg-surface p-5">
+      <section className="rounded-lg border border-warn-border bg-surface p-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1.5">
-            <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
+            <div className="flex items-center gap-2 text-sm font-semibold text-warn">
               <Database className="h-4 w-4 shrink-0" />
               <span>One-Time Phase 3 SQL Migration Needed</span>
             </div>
@@ -220,7 +220,7 @@ export function SuggestionsPanel({
             <button
               type="button"
               onClick={() => setMode('improve')}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium transition-colors ${
                 mode === 'improve'
                   ? 'bg-elevated text-ink'
                   : 'text-ink-muted hover:text-ink'
@@ -231,7 +231,7 @@ export function SuggestionsPanel({
             <button
               type="button"
               onClick={() => setMode('new')}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium transition-colors ${
                 mode === 'new'
                   ? 'bg-elevated text-ink'
                   : 'text-ink-muted hover:text-ink'
@@ -313,7 +313,7 @@ export function SuggestionsPanel({
       {actionError && (
         <div
           role="alert"
-          className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-400"
+          className="rounded-md border border-danger-border bg-danger-soft px-4 py-3 text-xs text-danger"
         >
           {actionError}
         </div>
@@ -334,7 +334,7 @@ export function SuggestionsPanel({
               key={tab.id}
               type="button"
               onClick={() => setStatusFilter(tab.id)}
-              className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+              className={`min-h-[40px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
                 statusFilter === tab.id
                   ? 'bg-elevated text-ink'
                   : 'text-ink-muted hover:text-ink'
@@ -346,7 +346,7 @@ export function SuggestionsPanel({
         </div>
 
         <div className="flex items-center gap-2 text-xs text-ink-muted">
-          <ShieldAlert className="h-4 w-4 text-amber-400" />
+          <ShieldAlert className="h-4 w-4 text-warn" />
           <span>Direct unreviewed commits are blocked; PRs require approval.</span>
         </div>
       </div>
@@ -374,8 +374,8 @@ export function SuggestionsPanel({
               s.status === 'approved'
                 ? 'text-accent-text'
                 : s.status === 'rejected'
-                  ? 'text-red-400'
-                  : 'text-amber-400';
+                  ? 'text-danger'
+                  : 'text-warn';
 
             return (
               <article
@@ -424,7 +424,7 @@ export function SuggestionsPanel({
                       type="button"
                       onClick={() => void onDeleteSuggestion(s.id)}
                       aria-label={`Delete ${s.title}`}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-red-500/40 hover:text-red-400"
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-danger-border hover:text-danger"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       <span>Remove</span>
@@ -505,8 +505,8 @@ export function SuggestionsPanel({
                         }
                         className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-md border px-4 py-2 text-xs font-semibold transition-colors ${
                           s.status === 'rejected'
-                            ? 'border-red-500 bg-red-500/15 text-red-400'
-                            : 'border-line-strong bg-inset text-ink hover:border-red-500/50 hover:text-red-400'
+                            ? 'border-danger-border bg-danger-soft text-danger'
+                            : 'border-line-strong bg-inset text-ink hover:border-danger-border hover:text-danger'
                         }`}
                       >
                         <XCircle className="h-4 w-4" />

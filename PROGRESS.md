@@ -203,3 +203,24 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   2. In **Studio Workbench**, type `hi` and `1+1` (`Scratch Leads` mode) and confirm instant math parsing & Teacher-to-Scratch distillation; switch to **Concept Graph** tab to inspect linked Folders, Concepts, and Repo nodes.
   3. Run `/execute Improve error handling in App.tsx` to preview parallel context + static checks inside **Smart-Assassin Execution Brief**, then click **Approve & Stage Diff** or **Reject & Log DPO**.
   4. Open **Training** (`DPO Arena`, `Eval Bench → Run All Evals`, `RAM & Self-Opt`), then open **Export**, customize your Model Name, click **Verify Export Bundle**, and download **Standalone Chatroom App (.html)** to test your named model in any browser tab completely offline.
+
+---
+
+## Debug, Polish & Daily-Driver Upgrade Plan (3 Phases)
+
+### Phase 1 out of 3 — Core Reliability, Compute Pipeline, Advanced Speech Studio & Theme/Touch Polish
+- **Status**: Completed & Verified
+- **Summary**:
+  - **Compute, WebGPU (Vulkan Dawn) & Memory Store (`src/lib/gpuCompute.ts`, `src/lib/vectorStore.ts`, `src/lib/computeWorker.ts`, `src/lib/workerClient.ts`)**: Reused cached IndexedDB connections, added incremental vector `put()` updates and bounded LRU eviction, deduplicated WebGPU device initialization with `requestAdapterInfo()` fallback and `WeakMap` pipeline caching, added worker delta tracking + transferable `matrixBuffer`, and wired `webGpuBatchCosine` onto hybrid search (`>= 64` entries).
+  - **AI Resilience, Retrieval, Math & Deterministic Training (`src/lib/aiBrain.ts`, `src/lib/memory.ts`, `src/lib/scratchEngine.ts`, `src/lib/textDistiller.ts`, `src/lib/trainingStore.ts`, `src/App.tsx`)**: Normalized silent `AbortError` failures and replaced brittle JSON parsing with `parseJsonObjectFromAiReply`; retained 2-letter technical tokens (`ai`, `ui`, `db`, `ts`) while filtering English filler stopwords; tightened natural-language math regex/percentage/number-word parsing; passed `recordUsage: false` on automated evals/duels; fixed deterministic proposal IDs (`opt-dup`, `opt-raw`), universal folder inference, `foldersRef` stale closures, optimistic-ID skip in memory reinforcement, and dead DPO rejection storage overwrite.
+  - **Advanced Multi-Voice Speech Studio (`src/lib/speechEngine.ts`, `src/components/CapturePanel.tsx`)**: Fixed short-turn deduplication, added manual + Auto Detect multi-voice speaker switching, HiDPI `<canvas>` live spectrum/cadence visualizer with automatic Android/Chromebook `audio-capture` fallback, domain-lexicon alternative reranker, browser locale auto-initialization across 13 locales, recording duration clock, word counter, and `localStorage` draft recovery.
+  - **Semantic Light/Dim/Dark Contrast & 40px+ Touch Ergonomics (`src/index.css`, `src/components/*`)**: Added `--m-warn*`, `--m-danger*`, and `--m-info*` tokens across Light/Dim/Dark themes, updated `ConceptGraphCanvas` theme compliance and `Plus Jakarta Sans` / `JetBrains Mono` typography, upgraded inline chat prose formatting, and raised interactive controls across the UI to `>= 40px` touch targets.
+
+### Phase 2 out of 3 — Learning Loop & Daily-Driver Retrieval Upgrade
+- **Status**: Queued (Not Started)
+- **Planned Scope**: Multi-turn Teacher–Student curriculum drills, automatic low-confidence feedback prompting, cross-note contradiction resolution workflows, and richer inline workspace command ergonomics.
+
+### Phase 3 out of 3 — Final Daily-Driver Hardening, Mobile Tablet Polish & Export Verification
+- **Status**: Queued (Not Started)
+- **Planned Scope**: End-to-end daily-driver regression pass on Galaxy Tab A9+ & Chromebook viewport breakpoints, offline queue conflict resolution polish, and extended portable export runtime validation.
+

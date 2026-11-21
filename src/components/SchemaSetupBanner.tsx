@@ -21,10 +21,10 @@ export function SchemaSetupBanner({onRetry, isChecking}: SchemaSetupBannerProps)
   }
 
   return (
-    <section className="rounded-lg border border-amber-500/40 bg-surface p-5">
+    <section className="rounded-lg border border-warn-border bg-surface p-5">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1.5">
-          <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
+          <div className="flex items-center gap-2 text-sm font-semibold text-warn">
             <Database className="h-4 w-4 shrink-0" />
             <span>Supabase Table Setup or Permission Grant Needed</span>
           </div>

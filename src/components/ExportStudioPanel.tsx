@@ -130,7 +130,7 @@ export function ExportStudioPanel({
           className={`space-y-2 rounded-lg border p-4 ${
             smokeResult.passed
               ? 'border-accent-border bg-accent-soft/40'
-              : 'border-amber-500/40 bg-amber-950/20'
+              : 'border-warn-border bg-warn-soft'
           }`}
         >
           <div className="flex items-center justify-between text-xs font-semibold text-ink">
@@ -151,7 +151,7 @@ export function ExportStudioPanel({
                 {c.passed ? (
                   <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent-text" />
                 ) : (
-                  <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+                  <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
                 )}
                 <div>
                   <div className="font-medium text-ink">{c.label}</div>
@@ -173,7 +173,7 @@ export function ExportStudioPanel({
             <button
               type="button"
               onClick={handleSaveCard}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white hover:bg-accent-hover"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white hover:bg-accent-hover"
             >
               {savedNotice ? <Check className="h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
               <span>{savedNotice ? 'Saved Identity ✓' : 'Save Model Name'}</span>
@@ -240,7 +240,7 @@ export function ExportStudioPanel({
                 type="checkbox"
                 checked={draft.includeOnlyTrusted}
                 onChange={(e) => setDraft({...draft, includeOnlyTrusted: e.target.checked})}
-                className="h-4 w-4 accent-emerald-500"
+                className="h-4 w-4 accent-[var(--m-accent)]"
               />
               <span>Export strictly Trusted rules only</span>
             </label>
@@ -256,7 +256,7 @@ export function ExportStudioPanel({
                 onChange={(e) =>
                   setDraft({...draft, temperature: Number(e.target.value) || 0.2})
                 }
-                className="min-h-[34px] w-16 rounded border border-line-strong bg-inset px-2 text-center text-xs tabular-nums text-ink"
+                className="min-h-[40px] w-16 rounded border border-line-strong bg-inset px-2 text-center text-xs tabular-nums text-ink"
               />
             </label>
           </div>

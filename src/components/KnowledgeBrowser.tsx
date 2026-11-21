@@ -520,7 +520,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                 type="button"
                 disabled={isBulkBusy || selectedEntryIds.length === 0}
                 onClick={() => setConfirmBulkDelete(true)}
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-red-500/40 hover:text-red-400 disabled:opacity-50"
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-danger-border hover:text-danger disabled:opacity-50"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span>Delete Selected</span>
@@ -594,14 +594,14 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                               setSelectedFolderId('all');
                             }
                           }}
-                          className="min-h-[38px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+                          className="min-h-[40px] rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
                         >
                           Remove Folder
                         </button>
                         <button
                           type="button"
                           onClick={() => setConfirmDeleteFolderId(null)}
-                          className="min-h-[38px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
+                          className="min-h-[40px] rounded border border-line-strong px-2 py-1 text-[11px] text-ink-muted hover:bg-elevated"
                         >
                           Cancel
                         </button>
@@ -610,7 +610,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                       <button
                         type="button"
                         onClick={() => setConfirmDeleteFolderId(folder.id)}
-                        className="text-[11px] text-ink-subtle hover:text-red-400"
+                        className="inline-flex min-h-[40px] items-center px-1 text-[11px] text-ink-subtle hover:text-danger"
                       >
                         Remove folder (keeps notes)
                       </button>
@@ -675,7 +675,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                 key={tab.id}
                 type="button"
                 onClick={() => setStatusFilter(tab.id)}
-                className={`min-h-[36px] rounded px-2 text-[11px] font-medium tabular-nums transition-colors ${
+                className={`min-h-[40px] rounded px-2 text-[11px] font-medium tabular-nums transition-colors ${
                   statusFilter === tab.id
                     ? 'bg-elevated text-ink'
                     : 'text-ink-muted hover:text-ink'
@@ -754,7 +754,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                         type="button"
                         aria-label={`Select ${entry.title}`}
                         onClick={() => toggleSelectEntry(entry.id)}
-                        className="mt-0.5 inline-flex min-h-[38px] min-w-[38px] shrink-0 items-center justify-center rounded border border-line-strong bg-surface text-accent-text hover:border-accent-border"
+                        className="mt-0.5 inline-flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded border border-line-strong bg-surface text-accent-text hover:border-accent-border"
                       >
                         {isChecked ? (
                           <CheckSquare className="h-4 w-4" />
@@ -785,7 +785,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                             entryStatus === 'trusted'
                               ? 'text-accent-text'
                               : entryStatus === 'raw'
-                                ? 'text-amber-400'
+                                ? 'text-warn'
                                 : 'text-ink-subtle'
                           }`}
                         >
@@ -815,7 +815,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
               <span
                 className={
                   saveFeedback.state === 'failed'
-                    ? 'text-red-400'
+                    ? 'text-danger'
                     : saveFeedback.state === 'saved'
                       ? 'text-accent-text'
                       : 'text-ink-muted'
@@ -949,7 +949,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                             entryStatus === 'trusted'
                               ? 'font-semibold text-accent-text'
                               : entryStatus === 'raw'
-                                ? 'font-semibold text-amber-400'
+                                ? 'font-semibold text-warn'
                                 : 'text-ink'
                           }
                         >
@@ -1033,7 +1033,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                           type="button"
                           onClick={() => setConfirmDeleteId(entry.id)}
                           aria-label={`Delete ${entry.title}`}
-                          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-red-500/40 hover:text-red-400"
+                          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted hover:border-danger-border hover:text-danger"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                           <span>Delete</span>

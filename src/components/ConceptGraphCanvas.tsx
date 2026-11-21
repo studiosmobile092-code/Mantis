@@ -308,12 +308,17 @@ export function ConceptGraphCanvas({
       ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, rect.width, rect.height);
 
-      // Subtle architectural grid
+      // Theme-aware architectural graph palette (supports Light, Dim, Dark & all 5 accents)
       const cs = getComputedStyle(document.documentElement);
-      const borderColor = cs.getPropertyValue('--mantis-line').trim() || '#1c2538';
-      const inkColor = cs.getPropertyValue('--mantis-ink').trim() || '#f1f5f9';
-      const mutedColor = cs.getPropertyValue('--mantis-ink-muted').trim() || '#94a3b8';
-      const accentColor = cs.getPropertyValue('--mantis-accent').trim() || '#10b981';
+      const borderColor = cs.getPropertyValue('--m-border').trim() || '#1c2538';
+      const borderStrong = cs.getPropertyValue('--m-border-strong').trim() || '#2d3b55';
+      const surfaceColor = cs.getPropertyValue('--m-surface').trim() || '#0e1420';
+      const inkColor = cs.getPropertyValue('--m-text').trim() || '#f1f5f9';
+      const mutedColor = cs.getPropertyValue('--m-text-muted').trim() || '#94a3b8';
+      const accentColor = cs.getPropertyValue('--m-accent').trim() || '#059669';
+      const accentSoft = cs.getPropertyValue('--m-accent-soft').trim() || 'rgba(16, 185, 129, 0.14)';
+      const infoColor = cs.getPropertyValue('--m-info').trim() || '#60a5fa';
+      const infoSoft = cs.getPropertyValue('--m-info-soft').trim() || 'rgba(59, 130, 246, 0.14)';
 
       const cx = rect.width / 2 + panRef.current.x;
       const cy = rect.height / 2 + panRef.current.y;
@@ -333,7 +338,7 @@ export function ConceptGraphCanvas({
         const highlighted =
           selectedNodeId === s.id || selectedNodeId === t.id;
         ctx.strokeStyle = highlighted ? accentColor : borderColor;
-        ctx.globalAlpha = highlighted ? 0.78 : 0.45;
+        ctx.globalAlpha = highlighted ? 0.82 : 0.55;
         ctx.beginPath();
         ctx.moveTo(s.x, s.y);
         ctx.lineTo(t.x, t.y);
@@ -357,21 +362,24 @@ export function ConceptGraphCanvas({
         ctx.beginPath();
         ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
         if (n.kind === 'folder') {
-          ctx.fillStyle = isSelected ? accentColor : '#10b98133';
+          ctx.fillStyle = isSelected ? accentColor : accentSoft;
           ctx.strokeStyle = accentColor;
         } else if (n.kind === 'repo') {
-          ctx.fillStyle = isSelected ? '#60a5fa' : '#3b82f630';
-          ctx.strokeStyle = '#60a5fa';
+          ctx.fillStyle = isSelected ? infoColor : infoSoft;
+          ctx.strokeStyle = infoColor;
         } else {
-          ctx.fillStyle = isSelected ? accentColor : '#161f30';
-          ctx.strokeStyle = isSelected ? '#ffffff' : '#475569';
+          ctx.fillStyle = isSelected ? accentColor : surfaceColor;
+          ctx.strokeStyle = isSelected ? inkColor : borderStrong;
         }
-        ctx.lineWidth = isSelected ? 2 : 1.2;
+        ctx.lineWidth = isSelected ? 2 : 1.25;
         ctx.fill();
         ctx.stroke();
 
-        // Crisp label
-        ctx.font = n.kind === 'folder' ? '600 11px Inter, system-ui, sans-serif' : '500 10px ui-monospace, monospace';
+        // Crisp label matching Plus Jakarta Sans / JetBrains Mono
+        ctx.font =
+          n.kind === 'folder'
+            ? '600 11px "Plus Jakarta Sans", system-ui, sans-serif'
+            : '500 10px "JetBrains Mono", ui-monospace, monospace';
         ctx.fillStyle = isSelected || n.kind === 'folder' ? inkColor : mutedColor;
         ctx.textAlign = 'center';
         ctx.fillText(n.label, n.x, n.y + radius + 12);
@@ -437,7 +445,7 @@ export function ConceptGraphCanvas({
               onChange={(e) => setFilterText(e.target.value)}
               placeholder="Filter node..."
               aria-label="Filter concept graph node"
-              className="min-h-[36px] w-40 rounded-md border border-line bg-inset pr-2.5 pl-8 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+              className="min-h-[40px] w-40 rounded-md border border-line bg-inset pr-2.5 pl-8 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
           </div>
 
@@ -452,7 +460,7 @@ export function ConceptGraphCanvas({
                 setIsPaused(true);
               }
             }}
-            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
           >
             {isPaused || isSettled ? (
               <>
@@ -471,7 +479,7 @@ export function ConceptGraphCanvas({
             type="button"
             onClick={() => setZoom((z) => Math.min(2.2, Number((z + 0.2).toFixed(1))))}
             aria-label="Zoom in"
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
           >
             <Maximize2 className="h-3.5 w-3.5" />
           </button>
@@ -479,7 +487,7 @@ export function ConceptGraphCanvas({
             type="button"
             onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.2).toFixed(1))))}
             aria-label="Zoom out"
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
           >
             <Minimize2 className="h-3.5 w-3.5" />
           </button>
@@ -494,7 +502,7 @@ export function ConceptGraphCanvas({
             }}
             title="Reset viewport"
             aria-label="Reset viewport"
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line bg-surface text-ink-muted hover:text-ink"
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
@@ -573,15 +581,15 @@ export function ConceptGraphCanvas({
           {/* Legend */}
           <div className="pointer-events-none absolute bottom-2.5 left-3 flex flex-wrap items-center gap-3 rounded border border-line bg-canvas/90 px-2.5 py-1 font-mono text-[10px] text-ink-muted">
             <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+              <span className="inline-block h-2 w-2 rounded-full bg-accent" />
               Folder
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full bg-slate-400" />
+              <span className="inline-block h-2 w-2 rounded-full bg-ink-muted" />
               Concept
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full bg-blue-400" />
+              <span className="inline-block h-2 w-2 rounded-full bg-info" />
               Repo File
             </span>
           </div>
@@ -653,7 +661,7 @@ export function ConceptGraphCanvas({
 
           {graphData.orphans.length > 0 && (
             <div className="border-t border-line pt-3">
-              <div className="flex items-center gap-1.5 text-[11px] font-medium text-amber-400">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-warn">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span className="tabular-nums">
                   {graphData.orphans.length} unlinked / thin notes

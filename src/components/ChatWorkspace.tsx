@@ -84,7 +84,7 @@ function deriveChatTitle(text: string): string {
 }
 
 function renderInlineProse(text: string) {
-  const tokens = text.split(/(`[^`\n]+`)/g);
+  const tokens = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|_[^_\n]+_)/g);
   return tokens.map((part, i) => {
     if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
       return (
@@ -94,6 +94,20 @@ function renderInlineProse(text: string) {
         >
           {part.slice(1, -1)}
         </code>
+      );
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
+      return (
+        <strong key={i} className="font-semibold text-ink">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith('_') && part.endsWith('_') && part.length >= 3) {
+      return (
+        <em key={i} className="italic text-ink-muted">
+          {part.slice(1, -1)}
+        </em>
       );
     }
     return <span key={i}>{part}</span>;
@@ -135,7 +149,7 @@ function RichMessageContent({content}: {content: string}) {
   }
 
   return (
-    <div className="space-y-3 text-[14px] leading-relaxed text-ink">
+    <div className="mantis-prose space-y-3 text-[14px] leading-relaxed text-ink">
       {blocks.map((block, idx) =>
         block.type === 'code' ? (
           <div
@@ -149,7 +163,7 @@ function RichMessageContent({content}: {content: string}) {
               <button
                 type="button"
                 onClick={() => void handleCopyCode(block.text, idx)}
-                className="inline-flex min-h-[32px] items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-0.5 text-xs font-medium text-ink-muted hover:bg-elevated hover:text-ink"
               >
                 {copiedIndex === idx ? (
                   <Check className="h-3 w-3 text-accent-text" />
@@ -352,7 +366,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={() => onChangeTab('stream')}
-            className={`inline-flex min-h-[38px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
               activeTab === 'stream'
                 ? 'bg-elevated text-ink border border-line-strong'
                 : 'text-ink-muted hover:text-ink'
@@ -365,7 +379,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={() => onChangeTab('graph')}
-            className={`inline-flex min-h-[38px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
               activeTab === 'graph'
                 ? 'bg-elevated text-ink border border-line-strong'
                 : 'text-ink-muted hover:text-ink'
@@ -380,7 +394,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={onOpenIngest}
-            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
           >
             <Radio className="h-3.5 w-3.5 text-accent-text" />
             <span>Capture</span>
@@ -388,7 +402,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={onOpenTeach}
-            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
           >
             <PlusCircle className="h-3.5 w-3.5 text-accent-text" />
             <span>Teach</span>
@@ -396,9 +410,9 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={onOpenSuggestions}
-            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
           >
-            <GitPullRequest className="h-3.5 w-3.5 text-amber-400" />
+            <GitPullRequest className="h-3.5 w-3.5 text-warn" />
             <span>Diffs</span>
           </button>
           {messages.length > 0 && activeTab === 'stream' && (
@@ -408,14 +422,14 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                   type="button"
                   disabled={isClearing}
                   onClick={handleConfirmClear}
-                  className="min-h-[36px] rounded bg-red-600 px-2.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                  className="min-h-[40px] rounded bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                 >
                   {isClearing ? 'Clearing…' : 'Confirm'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setConfirmClear(false)}
-                  className="min-h-[36px] rounded border border-line px-2 text-xs text-ink-muted hover:text-ink"
+                  className="min-h-[40px] rounded border border-line px-2.5 text-xs text-ink-muted hover:text-ink"
                 >
                   Cancel
                 </button>
@@ -425,7 +439,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                 type="button"
                 onClick={() => setConfirmClear(true)}
                 aria-label="Clear stream"
-                className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-md border border-line bg-surface px-2.5 text-xs text-ink-muted hover:border-line-strong hover:text-ink"
+                className="inline-flex min-h-[40px] shrink-0 items-center gap-1 rounded-md border border-line bg-surface px-3 text-xs text-ink-muted hover:border-line-strong hover:text-ink"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Clear</span>
@@ -508,7 +522,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                         <button
                           type="button"
                           onClick={() => setVisibleCount((c) => c + 60)}
-                          className="min-h-[36px] rounded-md border border-line bg-inset px-3 text-xs font-medium text-ink-muted hover:text-ink"
+                          className="min-h-[40px] rounded-md border border-line bg-inset px-3.5 text-xs font-medium text-ink-muted hover:text-ink"
                         >
                           Load earlier turns ({messages.length - visibleCount} older)
                         </button>
@@ -565,7 +579,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     type="button"
                                     disabled={isStoringThis || Boolean(storedFolder)}
                                     onClick={() => void handleQuickStore(msg)}
-                                    className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors ${
+                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
                                       storedFolder
                                         ? 'text-accent-text'
                                         : 'text-ink-subtle hover:text-ink'
@@ -589,7 +603,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   onClick={() =>
                                     onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
                                   }
-                                  className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium text-ink-subtle hover:text-ink"
+                                  className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
                                 >
                                   <BookmarkPlus className="h-3 w-3" />
                                   <span>Rule</span>
@@ -604,7 +618,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     type="button"
                                     disabled={isEscalating || isSending}
                                     onClick={() => void onEscalateMessageToCloud(msg.id)}
-                                    className="inline-flex min-h-[34px] items-center gap-1 rounded border border-line bg-surface px-2 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
+                                    className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-surface px-2.5 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
                                   >
                                     <Sparkles className="h-3 w-3" />
                                     <span>{isEscalating ? 'Assisting…' : 'Cloud Assist'}</span>
@@ -616,7 +630,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     type="button"
                                     disabled={isDistilling || isSending}
                                     onClick={() => void onDistillMessageWithTeacher(msg.id)}
-                                    className="inline-flex min-h-[34px] items-center gap-1 rounded border border-line bg-surface px-2 text-[11px] font-medium text-ink-muted hover:border-line-strong hover:text-ink disabled:opacity-50"
+                                    className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-surface px-2.5 text-[11px] font-medium text-ink-muted hover:border-line-strong hover:text-ink disabled:opacity-50"
                                   >
                                     <GraduationCap className="h-3 w-3 text-accent-text" />
                                     <span>{isDistilling ? 'Teaching…' : 'Teach Scratch'}</span>
@@ -627,7 +641,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   <button
                                     type="button"
                                     onClick={() => onSendToArena(prevUserMsg.content)}
-                                    className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium text-ink-subtle hover:text-ink"
+                                    className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
                                   >
                                     <Scale className="h-3 w-3" />
                                     <span>Arena</span>
@@ -642,7 +656,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                       setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
                                       await onReinforceEntries(citedEntries.map((e) => e.id));
                                     }}
-                                    className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors ${
+                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
                                       reinforcedMsgIds[msg.id]
                                         ? 'text-accent-text'
                                         : 'text-ink-subtle hover:text-ink'
@@ -658,7 +672,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     type="button"
                                     disabled={isStoringThis || Boolean(storedFolder)}
                                     onClick={() => void handleQuickStore(msg)}
-                                    className={`inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium transition-colors ${
+                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
                                       storedFolder
                                         ? 'text-accent-text'
                                         : 'text-ink-subtle hover:text-ink'
@@ -683,7 +697,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   onClick={() =>
                                     onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
                                   }
-                                  className="inline-flex min-h-[34px] items-center gap-1 rounded px-2 text-[11px] font-medium text-ink-subtle hover:text-ink"
+                                  className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
                                 >
                                   <BookmarkPlus className="h-3 w-3" />
                                   <span>Edit</span>
@@ -706,7 +720,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   key={cited.id}
                                   type="button"
                                   onClick={() => onInspectEntry(cited.id)}
-                                  className="inline-flex min-h-[32px] items-center gap-1 rounded border border-line bg-inset px-2 py-0.5 text-xs font-medium text-accent-text hover:border-accent-border"
+                                  className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-inset px-2.5 py-0.5 text-xs font-medium text-accent-text hover:border-accent-border"
                                 >
                                   <span>{cited.title}</span>
                                   <ArrowUpRight className="h-3 w-3" />
@@ -717,7 +731,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   key={repoPath}
                                   type="button"
                                   onClick={() => onInspectRepoFile(repoPath)}
-                                  className="inline-flex min-h-[32px] items-center gap-1 rounded border border-line bg-inset px-2 py-0.5 font-mono text-[11px] text-ink hover:border-accent-border"
+                                  className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-inset px-2.5 py-0.5 font-mono text-[11px] text-ink hover:border-accent-border"
                                 >
                                   <FileCode2 className="h-3 w-3 text-accent-text" />
                                   <span>{repoPath}</span>
@@ -738,7 +752,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
               <button
                 type="button"
                 onClick={jumpToLatest}
-                className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-accent-border bg-surface/95 px-3 py-1 text-xs font-semibold text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
+                className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-accent-border bg-surface/95 px-3 py-1 text-xs font-semibold text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
               >
                 <ArrowDown className="h-3.5 w-3.5" />
                 <span>Latest</span>
@@ -790,7 +804,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                         if (mode.id === 'scratch') onTogglePreferBuiltIn(true);
                         if (mode.id === 'cloud') onTogglePreferBuiltIn(false);
                       }}
-                      className={`inline-flex min-h-[36px] shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2.5 text-[11px] font-medium transition-colors ${
+                      className={`inline-flex min-h-[40px] shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2.5 text-[11px] font-medium transition-colors ${
                         active
                           ? 'bg-accent-soft text-accent-text border border-accent-border'
                           : 'text-ink-muted hover:bg-elevated hover:text-ink'
@@ -808,7 +822,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                   <button
                     type="button"
                     onClick={onOpenSettings}
-                    className="ml-1 font-mono text-[11px] text-amber-400 underline underline-offset-2 hover:opacity-90"
+                    className="ml-1 min-h-[40px] font-mono text-[11px] text-warn underline underline-offset-2 hover:opacity-90"
                   >
                     Connect Cloud ({brainModel.split('/').pop()})
                   </button>

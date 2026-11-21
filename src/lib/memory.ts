@@ -35,6 +35,8 @@ export const STARTER_FOLDERS: Array<{name: string; description: string}> = [
 
 const STOPWORDS = new Set([
   'a',
+  'ah',
+  'am',
   'an',
   'and',
   'are',
@@ -47,14 +49,19 @@ const STOPWORDS = new Set([
   'for',
   'from',
   'have',
+  'he',
   'how',
   'i',
+  'if',
   'in',
   'is',
   'it',
   'me',
   'my',
+  'no',
   'of',
+  'oh',
+  'ok',
   'on',
   'or',
   'repo',
@@ -63,7 +70,11 @@ const STOPWORDS = new Set([
   'the',
   'this',
   'to',
+  'um',
+  'up',
+  'us',
   'use',
+  'we',
   'what',
   'when',
   'where',
@@ -92,7 +103,7 @@ export function tokenizeQuery(input: string): string[] {
     .replace(/[^a-z0-9_.\-/+#\s]/g, ' ')
     .split(/\s+/)
     .map((t) => t.trim())
-    .filter((t) => t.length >= 3 && !STOPWORDS.has(t) && !GREETINGS.has(t));
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t) && !GREETINGS.has(t));
   return Array.from(new Set(raw));
 }
 

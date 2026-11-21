@@ -152,12 +152,12 @@ export function TopBar({
               onClick={() => setStatusOpen((prev) => !prev)}
               aria-expanded={statusOpen}
               aria-label="System and compute details"
-              className="inline-flex min-h-[36px] items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1 text-xs font-medium text-ink transition-colors hover:border-line-strong"
+              className="inline-flex min-h-[40px] items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1 text-xs font-medium text-ink transition-colors hover:border-line-strong"
             >
               {connectionState === 'offline' ? (
-                <WifiOff className="h-3.5 w-3.5 text-red-400" />
+                <WifiOff className="h-3.5 w-3.5 text-danger" />
               ) : connectionState === 'degraded' ? (
-                <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                <AlertTriangle className="h-3.5 w-3.5 text-warn" />
               ) : (
                 <CheckCircle2 className="h-3.5 w-3.5 text-accent-text" />
               )}
@@ -222,7 +222,7 @@ export function TopBar({
                   </div>
 
                   {routeStatus.failoverReason && (
-                    <p className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-snug text-amber-300">
+                    <p className="rounded border border-warn-border bg-warn-soft px-2.5 py-1.5 text-[11px] leading-snug text-warn">
                       {routeStatus.failoverReason}
                     </p>
                   )}
@@ -258,7 +258,7 @@ export function TopBar({
             type="button"
             onClick={onOpenCommandPalette}
             aria-label="Open Command Palette"
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md border border-line bg-surface px-2 text-xs text-ink-muted transition-colors hover:border-line-strong hover:text-ink lg:hidden"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line bg-surface px-2 text-xs text-ink-muted transition-colors hover:border-line-strong hover:text-ink lg:hidden"
           >
             <Search className="h-3.5 w-3.5" />
           </button>
@@ -268,7 +268,7 @@ export function TopBar({
             onClick={onCycleTheme}
             title={`Theme: ${theme}`}
             aria-label={`Switch theme from ${theme}`}
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md border border-line bg-surface text-xs text-ink-muted transition-colors hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md border border-line bg-surface text-xs text-ink-muted transition-colors hover:border-line-strong hover:text-ink"
           >
             {theme === 'light' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
           </button>
@@ -277,7 +277,7 @@ export function TopBar({
             type="button"
             onClick={onSync}
             disabled={isSyncing}
-            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line-strong bg-surface px-3 py-1 text-xs font-medium text-ink transition-colors hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line-strong bg-surface px-3 py-1 text-xs font-medium text-ink transition-colors hover:bg-elevated disabled:cursor-not-allowed disabled:opacity-60"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline">{isSyncing ? 'Syncing' : 'Sync'}</span>

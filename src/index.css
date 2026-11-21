@@ -15,6 +15,14 @@
   --m-text-subtle: #64748b;
   --m-scrollbar-thumb: #2d3b55;
   --m-scrollbar-hover: #475569;
+  --m-warn: #fbbf24;
+  --m-warn-soft: rgba(245, 158, 11, 0.14);
+  --m-warn-border: rgba(245, 158, 11, 0.4);
+  --m-danger: #f87171;
+  --m-danger-soft: rgba(239, 68, 68, 0.14);
+  --m-danger-border: rgba(239, 68, 68, 0.42);
+  --m-info: #60a5fa;
+  --m-info-soft: rgba(59, 130, 246, 0.14);
 }
 
 :root[data-theme="dim"] {
@@ -30,6 +38,14 @@
   --m-text-subtle: #6b7892;
   --m-scrollbar-thumb: #313b52;
   --m-scrollbar-hover: #475569;
+  --m-warn: #fbbf24;
+  --m-warn-soft: rgba(245, 158, 11, 0.14);
+  --m-warn-border: rgba(245, 158, 11, 0.4);
+  --m-danger: #f87171;
+  --m-danger-soft: rgba(239, 68, 68, 0.14);
+  --m-danger-border: rgba(239, 68, 68, 0.42);
+  --m-info: #60a5fa;
+  --m-info-soft: rgba(59, 130, 246, 0.14);
 }
 
 :root[data-theme="light"] {
@@ -45,6 +61,14 @@
   --m-text-subtle: #64748b;
   --m-scrollbar-thumb: #cbd5e1;
   --m-scrollbar-hover: #94a3b8;
+  --m-warn: #b45309;
+  --m-warn-soft: rgba(217, 119, 6, 0.1);
+  --m-warn-border: rgba(217, 119, 6, 0.35);
+  --m-danger: #b91c1c;
+  --m-danger-soft: rgba(220, 38, 38, 0.08);
+  --m-danger-border: rgba(220, 38, 38, 0.35);
+  --m-info: #1d4ed8;
+  --m-info-soft: rgba(37, 99, 235, 0.1);
 }
 
 :root,
@@ -135,6 +159,14 @@
   --color-accent-text: var(--m-accent-text);
   --color-accent-soft: var(--m-accent-soft);
   --color-accent-border: var(--m-accent-border);
+  --color-warn: var(--m-warn);
+  --color-warn-soft: var(--m-warn-soft);
+  --color-warn-border: var(--m-warn-border);
+  --color-danger: var(--m-danger);
+  --color-danger-soft: var(--m-danger-soft);
+  --color-danger-border: var(--m-danger-border);
+  --color-info: var(--m-info);
+  --color-info-soft: var(--m-info-soft);
 }
 
 @layer base {
@@ -196,6 +228,11 @@
 .mantis-virtual-item {
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
+}
+
+.mantis-prose {
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 @keyframes mantisFadeIn {

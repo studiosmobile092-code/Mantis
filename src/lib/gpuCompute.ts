@@ -21,6 +21,12 @@ interface GPUAdapterLike {
     description?: string;
   };
   isFallbackAdapter?: boolean;
+  requestAdapterInfo?: () => Promise<{
+    vendor?: string;
+    architecture?: string;
+    device?: string;
+    description?: string;
+  }>;
   requestDevice: () => Promise<GPUDeviceLike>;
 }
 
@@ -71,6 +77,14 @@ const GPU_BUFFER_USAGE = {
 
 let cachedProbe: WebGpuProbeResult | null = null;
 let cachedDevice: GPUDeviceLike | null = null;
+let deviceInitPromise: Promise<GPUDeviceLike | null> | null = null;
+const pipelineCache = new WeakMap<
+  GPUDeviceLike,
+  {
+    pipeline: {getBindGroupLayout: (i: number) => unknown};
+    bindGroupLayout: unknown;
+  }
+>();
 
 /**
  * Probes Chrome's WebGPU adapter (backed by Vulkan via Dawn on Android & ChromeOS).
@@ -102,7 +116,21 @@ export async function probeWebGpuHardware(): Promise<WebGpuProbeResult> {
       return cachedProbe;
     }
 
-    const info = adapter.info || {};
+    let info = adapter.info || {};
+    if (
+      !info.vendor &&
+      !info.architecture &&
+      !info.description &&
+      !info.device &&
+      typeof adapter.requestAdapterInfo === 'function'
+    ) {
+      try {
+        info = (await adapter.requestAdapterInfo()) || {};
+      } catch {
+        // ignore fallback info failure
+      }
+    }
+
     const parts = [info.vendor, info.architecture, info.description || info.device]
       .filter(Boolean)
       .map((s) => String(s).trim());
@@ -130,20 +158,30 @@ export async function probeWebGpuHardware(): Promise<WebGpuProbeResult> {
 
 async function getOrCreateGpuDevice(): Promise<GPUDeviceLike | null> {
   if (cachedDevice) return cachedDevice;
+  if (deviceInitPromise) return deviceInitPromise;
   const nav = typeof navigator !== 'undefined' ? (navigator as unknown as GpuNavigatorLike) : undefined;
   if (!nav?.gpu) return null;
-  try {
-    const adapter = await nav.gpu.requestAdapter({powerPreference: 'low-power'});
-    if (!adapter) return null;
-    const device = await adapter.requestDevice();
-    cachedDevice = device;
-    void device.lost.then(() => {
-      cachedDevice = null;
-    });
-    return device;
-  } catch {
-    return null;
-  }
+
+  deviceInitPromise = (async () => {
+    try {
+      const adapter = await nav.gpu!.requestAdapter({powerPreference: 'low-power'});
+      if (!adapter) return null;
+      const device = await adapter.requestDevice();
+      cachedDevice = device;
+      void device.lost.then(() => {
+        if (cachedDevice === device) {
+          cachedDevice = null;
+        }
+      });
+      return device;
+    } catch {
+      return null;
+    } finally {
+      deviceInitPromise = null;
+    }
+  })();
+
+  return deviceInitPromise;
 }
 
 const COSINE_WGSL = /* wgsl */ `
@@ -220,14 +258,22 @@ export async function webGpuBatchCosine(
     });
     buffersToDestroy.push(outputBuffer, readbackBuffer);
 
-    const shaderModule = device.createShaderModule({code: COSINE_WGSL});
-    const pipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: {module: shaderModule, entryPoint: 'main'},
-    }) as {getBindGroupLayout: (i: number) => unknown};
+    let cachedPipeline = pipelineCache.get(device);
+    if (!cachedPipeline) {
+      const shaderModule = device.createShaderModule({code: COSINE_WGSL});
+      const pipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: {module: shaderModule, entryPoint: 'main'},
+      }) as {getBindGroupLayout: (i: number) => unknown};
+      cachedPipeline = {
+        pipeline,
+        bindGroupLayout: pipeline.getBindGroupLayout(0),
+      };
+      pipelineCache.set(device, cachedPipeline);
+    }
 
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout: cachedPipeline.bindGroupLayout,
       entries: [
         {binding: 0, resource: {buffer: paramBuffer}},
         {binding: 1, resource: {buffer: queryBuffer}},
@@ -238,7 +284,7 @@ export async function webGpuBatchCosine(
 
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
+    pass.setPipeline(cachedPipeline.pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.ceil(rowCount / 64));
     pass.end();

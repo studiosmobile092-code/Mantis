@@ -11,7 +11,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react';
-import {type FormEvent, useState} from 'react';
+import {type FormEvent, useEffect, useState} from 'react';
 import {MANTIS_PHASE4_SCHEMA_SQL} from '../lib/schemaText';
 import {DEFAULT_MANTIS_REPO} from '../lib/selfImprove';
 import type {
@@ -56,6 +56,12 @@ export function SelfImprovePanel({
   const [stagingId, setStagingId] = useState<string | null>(null);
   const [auditError, setAuditError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (connection) {
+      setRepoTarget(`${connection.owner}/${connection.repo}`);
+    }
+  }, [connection]);
+
   async function handleCopySql() {
     try {
       await navigator.clipboard.writeText(MANTIS_PHASE4_SCHEMA_SQL);
@@ -91,10 +97,10 @@ export function SelfImprovePanel({
   return (
     <div className="space-y-6">
       {phase4SchemaMissing && (
-        <section className="rounded-lg border border-amber-500/40 bg-surface p-5">
+        <section className="rounded-lg border border-warn-border bg-surface p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1.5">
-              <div className="flex items-center gap-2 text-sm font-semibold text-amber-400">
+              <div className="flex items-center gap-2 text-sm font-semibold text-warn">
                 <Database className="h-4 w-4 shrink-0" />
                 <span>Optional Phase 4 SQL Migration (Audit History)</span>
               </div>
@@ -217,7 +223,7 @@ export function SelfImprovePanel({
         {auditError && (
           <div
             role="alert"
-            className="rounded-md border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400"
+            className="rounded-md border border-danger-border bg-danger-soft px-3.5 py-2.5 text-xs text-danger"
           >
             {auditError}
           </div>
@@ -254,8 +260,8 @@ export function SelfImprovePanel({
                     latestReport.healthScore >= 85
                       ? 'text-accent-text'
                       : latestReport.healthScore >= 60
-                        ? 'text-amber-400'
-                        : 'text-red-400'
+                        ? 'text-warn'
+                        : 'text-danger'
                   }`}
                 >
                   {latestReport.healthScore} / 100
@@ -281,9 +287,9 @@ export function SelfImprovePanel({
                 );
                 const severityClass =
                   finding.severity === 'high'
-                    ? 'text-red-400'
+                    ? 'text-danger'
                     : finding.severity === 'medium'
-                      ? 'text-amber-400'
+                      ? 'text-warn'
                       : 'text-accent-text';
 
                 return (
@@ -310,7 +316,7 @@ export function SelfImprovePanel({
                               <span aria-hidden="true" className="text-ink-subtle">
                                 ·
                               </span>
-                              <span className="inline-flex items-center gap-1 text-amber-400">
+                              <span className="inline-flex items-center gap-1 text-warn">
                                 <AlertTriangle className="h-3 w-3" />
                                 <span>HIGH-GUARD</span>
                               </span>
@@ -391,7 +397,7 @@ export function SelfImprovePanel({
                   </div>
                   <div className="flex items-center gap-3 font-mono tabular-nums">
                     <span className="text-ink-muted">{run.files_scanned} files</span>
-                    <span className="text-amber-400">{run.findings_count} findings</span>
+                    <span className="text-warn">{run.findings_count} findings</span>
                     <span className="font-semibold text-accent-text">{run.health_score}/100</span>
                     <span className="text-ink-subtle">
                       {new Date(run.created_at).toLocaleDateString()}

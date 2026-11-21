@@ -11,20 +11,77 @@ import {retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
 
 const SCRATCH_SKILLS_KEY = 'mantis_scratch_skills_v1';
 
+const WORD_TENS: Record<string, number> = {
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+};
+
+const WORD_UNITS: Record<string, number> = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+};
+
+function replaceSpokenNumbers(text: string): string {
+  let out = text.replace(
+    /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[\s-]+(one|two|three|four|five|six|seven|eight|nine)\b/gi,
+    (_, tens: string, unit: string) =>
+      String((WORD_TENS[tens.toLowerCase()] || 0) + (WORD_UNITS[unit.toLowerCase()] || 0)),
+  );
+  out = out.replace(
+    /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/gi,
+    (tok) => {
+      const low = tok.toLowerCase();
+      if (low in WORD_TENS) return String(WORD_TENS[low]);
+      if (low in WORD_UNITS) return String(WORD_UNITS[low]);
+      return tok;
+    },
+  );
+  return out;
+}
+
 /**
  * Safe recursive-descent mathematical expression evaluator (ZERO eval / ZERO new Function).
- * Handles natural phrasing ("what is 1+1", "solve (12 * 4) / 3", "2^10", "sqrt(144)").
+ * Handles natural phrasing ("what is 1+1", "two plus three", "15% of 80", "2^10", "sqrt(144)").
  */
 export function tryEvaluateMathExpression(input: string): {
   expression: string;
   result: number;
   formatted: string;
 } | null {
-  const cleaned = input
-    .trim()
-    .replace(/^(what is|what's|calculate|compute|solve|eval|evaluate)\s+/i, '')
-    .replace(/[?=]+$/g, '')
-    .replace(/\bplus\b/gi, '+')
+  const preNormalized = replaceSpokenNumbers(
+    input
+      .trim()
+      .replace(/^(what is|what's|calculate|compute|solve|eval|evaluate)\s+/i, '')
+      .replace(/[?=]+$/g, ''),
+  );
+
+  const cleaned = preNormalized
+    .replace(/(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?|\([^)]+\))/gi, '($1 / 100) * $2')
+    .replace(/\bplus\b|\band\b/gi, '+')
     .replace(/\bminus\b/gi, '-')
     .replace(/\btimes\b|\bmultiplied by\b/gi, '*')
     .replace(/\bdivided by\b|\bover\b/gi, '/')
@@ -32,10 +89,11 @@ export function tryEvaluateMathExpression(input: string): {
     .replace(/÷/g, '/')
     .trim();
 
-  if (!cleaned || !/^[0-9+\-*/%^().\ssqrtabound]+$/i.test(cleaned)) {
+  const strippedFns = cleaned.replace(/\b(?:sqrt|abs|round)\(/gi, '(');
+  if (!cleaned || !/^[0-9+\-*/%^().\s]+$/.test(strippedFns)) {
     return null;
   }
-  if (!/\d/.test(cleaned) || !/[+\-*/%^]|sqrt\(/i.test(cleaned)) {
+  if (!/\d/.test(cleaned) || !/[+\-*/%^]|(?:sqrt|abs|round)\(/i.test(cleaned)) {
     return null;
   }
 
@@ -287,6 +345,7 @@ export function synthesizeScratchWithHybrid(params: {
   repoFiles: RepoFile[];
   repoLabel: string | null;
   growth: KnowledgeGrowthStats;
+  recordUsage?: boolean;
 }): ScratchSynthesisResult {
   const {prompt, hybridMatches, entries, folders, repoFiles, repoLabel, growth} = params;
   const trimmed = prompt.trim();
@@ -309,12 +368,14 @@ export function synthesizeScratchWithHybrid(params: {
   const skills = loadScratchSkills();
   const skillHit = matchScratchSkill(trimmed, skills);
   if (skillHit && skillHit.score >= 0.72) {
-    recordSkillUsage(skillHit.skill.id);
+    if (params.recordUsage !== false) {
+      recordSkillUsage(skillHit.skill.id);
+    }
     const variants = skillHit.skill.responses;
     const picked = variants[skillHit.skill.usageCount % variants.length] || variants[0];
     const altNote =
       variants.length > 1
-        ? `\n\n_Trained Scratch Skill (${skillHit.skill.folderName} · ${variants.length} learned response variants)_`
+        ? `\n\nTrained Scratch Skill (${skillHit.skill.folderName} · ${variants.length} learned response variants)`
         : '';
     return {
       replyText: `${picked}${altNote}`,

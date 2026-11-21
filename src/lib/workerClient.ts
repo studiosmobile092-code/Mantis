@@ -28,6 +28,7 @@ import {
 let workerInstance: Worker | null = null;
 let workerFailed = false;
 let vectorMapCache: Map<string, QuantizedVectorRecord> | null = null;
+const workerSyncedHashes = new Map<string, string>();
 const pendingCallbacks = new Map<
   string,
   {resolve: (res: WorkerResponse) => void; reject: (err: Error) => void; timer: number}
@@ -100,6 +101,7 @@ function getOrCreateWorker(): Worker | null {
     worker.onerror = () => {
       workerFailed = true;
       workerInstance = null;
+      workerSyncedHashes.clear();
       notifyStatus({workerActive: false});
       for (const [, cb] of pendingCallbacks) {
         window.clearTimeout(cb.timer);
@@ -148,6 +150,24 @@ export async function runHybridRetrievalAsync(params: {
   const includeRaw = params.includeRaw ?? false;
   const reqId = `hs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
+  const activeEntryIds = new Set(params.entries.map((e) => e.id));
+  const pruneIds: string[] = [];
+  for (const cachedId of workerSyncedHashes.keys()) {
+    if (!activeEntryIds.has(cachedId)) {
+      pruneIds.push(cachedId);
+      workerSyncedHashes.delete(cachedId);
+    }
+  }
+  const vectorDeltas: QuantizedVectorRecord[] = [];
+  for (const [id, rec] of vectorMapCache.entries()) {
+    if (workerSyncedHashes.get(id) !== rec.contentHash) {
+      vectorDeltas.push(rec);
+    }
+  }
+
+  const wantsGpu =
+    currentComputeStatus.backend.startsWith('webgpu') && params.entries.length >= 64;
+
   let result: {matches: RetrievalMatch[]; newVectors: QuantizedVectorRecord[]};
   try {
     const res = await dispatchWorker({
@@ -157,12 +177,39 @@ export async function runHybridRetrievalAsync(params: {
         query: params.query,
         entries: params.entries,
         folders: params.folders,
-        cachedVectors: Array.from(vectorMapCache.entries()),
+        vectorDeltas,
+        pruneIds,
+        includeMatrixForGpu: wantsGpu,
         limit,
         includeRaw,
       },
     });
     if (res.ok && res.type === 'HYBRID_SEARCH') {
+      for (const delta of vectorDeltas) {
+        workerSyncedHashes.set(delta.id, delta.contentHash);
+      }
+      for (const rec of res.newVectors) {
+        workerSyncedHashes.set(rec.id, rec.contentHash);
+      }
+      if (res.matrixBuffer && res.usedEntryIds.length >= 64) {
+        const qVec = encodeDenseVector384(params.query);
+        const gpuScores = await webGpuBatchCosine(
+          qVec,
+          res.matrixBuffer,
+          res.usedEntryIds.length,
+          EMBEDDING_DIMS,
+        );
+        if (gpuScores) {
+          const gpuScoreMap = new Map<string, number>();
+          res.usedEntryIds.forEach((id, idx) => gpuScoreMap.set(id, gpuScores[idx]));
+          for (const m of res.matches) {
+            const s = gpuScoreMap.get(m.entry.id);
+            if (typeof s === 'number') {
+              m.vectorScore = Math.round(s * 100) / 100;
+            }
+          }
+        }
+      }
       result = {matches: res.matches, newVectors: res.newVectors};
     } else {
       throw new Error('Fallback');

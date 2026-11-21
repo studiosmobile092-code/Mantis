@@ -16,7 +16,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
-import {type ClipboardEvent, type FormEvent, useEffect, useRef, useState} from 'react';
+import {type ClipboardEvent, type FormEvent, useEffect, useMemo, useRef, useState} from 'react';
 import {
   distillWithAiBrain,
   enhanceSpeechTranscriptWithAi,
@@ -40,7 +40,9 @@ import {
 } from '../lib/ocrCapture';
 import {
   appendDedupedSpeechTurn,
+  formatTranscriptLocally,
   normalizeSpeechCompareKey,
+  rerankSpeechAlternatives,
   SpeakerAcousticTracker,
   type SpeechTurnSegment,
 } from '../lib/speechEngine';
@@ -110,14 +112,75 @@ interface SpeechRecognitionLike {
   abort?: () => void;
 }
 
+const MIC_RECOVERY_KEY = 'mantis_mic_recovery_v1';
+
 const SPEECH_LANG_OPTIONS = [
   {code: 'en-US', label: 'English (US)'},
   {code: 'en-GB', label: 'English (UK)'},
-  {code: 'es-ES', label: 'Spanish'},
+  {code: 'en-AU', label: 'English (AU)'},
+  {code: 'en-IN', label: 'English (India)'},
+  {code: 'es-ES', label: 'Spanish (Spain)'},
+  {code: 'es-MX', label: 'Spanish (Mexico)'},
   {code: 'fr-FR', label: 'French'},
   {code: 'de-DE', label: 'German'},
+  {code: 'it-IT', label: 'Italian'},
+  {code: 'pt-BR', label: 'Portuguese (Brazil)'},
   {code: 'ja-JP', label: 'Japanese'},
+  {code: 'ko-KR', label: 'Korean'},
+  {code: 'zh-CN', label: 'Chinese (Simplified)'},
 ];
+
+function resolveInitialSpeechLang(): string {
+  if (typeof navigator === 'undefined') return 'en-US';
+  const navLang = (navigator.language || '').trim();
+  const exact = SPEECH_LANG_OPTIONS.find((o) => o.code.toLowerCase() === navLang.toLowerCase());
+  if (exact) return exact.code;
+  const prefix = navLang.split('-')[0]?.toLowerCase();
+  const byPrefix = SPEECH_LANG_OPTIONS.find((o) => o.code.toLowerCase().startsWith(`${prefix}-`));
+  return byPrefix?.code || 'en-US';
+}
+
+function formatDurationClock(totalSeconds: number): string {
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+interface StoredMicRecovery {
+  lines: string[];
+  turns: SpeechTurnSegment[];
+  title: string;
+  savedAt: string;
+}
+
+function readMicRecoveryDraft(): StoredMicRecovery | null {
+  try {
+    const raw = window.localStorage.getItem(MIC_RECOVERY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredMicRecovery>;
+    if (!Array.isArray(parsed.lines) || parsed.lines.length === 0) return null;
+    return {
+      lines: parsed.lines.map((l) => String(l)),
+      turns: Array.isArray(parsed.turns) ? (parsed.turns as SpeechTurnSegment[]) : [],
+      title: typeof parsed.title === 'string' ? parsed.title : '',
+      savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeMicRecoveryDraft(draft: StoredMicRecovery | null): void {
+  try {
+    if (!draft || draft.lines.length === 0) {
+      window.localStorage.removeItem(MIC_RECOVERY_KEY);
+    } else {
+      window.localStorage.setItem(MIC_RECOVERY_KEY, JSON.stringify(draft));
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 interface LinkIngestRecord {
   id: string;
@@ -221,13 +284,35 @@ export function CapturePanel({
   const [isOcrImageBusy, setIsOcrImageBusy] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
   const [isMicPaused, setIsMicPaused] = useState(false);
-  const [micLang, setMicLang] = useState('en-US');
+  const [micLang, setMicLang] = useState<string>(() => resolveInitialSpeechLang());
   const [isPolishingMic, setIsPolishingMic] = useState(false);
   const [micLines, setMicLines] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [micLevel, setMicLevel] = useState(0);
   const [detectedSpeakersCount, setDetectedSpeakersCount] = useState(1);
   const [activeSpeakerLabel, setActiveSpeakerLabel] = useState('Speaker 1');
+  const [isManualSpeakerMode, setIsManualSpeakerMode] = useState(false);
+  const [acousticMode, setAcousticMode] = useState<'acoustic' | 'cadence'>('cadence');
+  const [micElapsedSeconds, setMicElapsedSeconds] = useState(0);
+  const [recoverableMicDraft, setRecoverableMicDraft] = useState<StoredMicRecovery | null>(() =>
+    readMicRecoveryDraft(),
+  );
+
+  const speechLexicon = useMemo(() => {
+    const terms: string[] = [];
+    for (const e of entries.slice(0, 180)) {
+      terms.push(e.title, ...e.tags);
+    }
+    return terms;
+  }, [entries]);
+  const speechLexiconRef = useRef<string[]>(speechLexicon);
+  useEffect(() => {
+    speechLexiconRef.current = speechLexicon;
+  }, [speechLexicon]);
+
+  const spokenWordCount = useMemo(() => {
+    const combined = `${micLines.join(' ')} ${interimTranscript}`.trim();
+    return combined ? combined.split(/\s+/).length : 0;
+  }, [micLines, interimTranscript]);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -241,6 +326,7 @@ export function CapturePanel({
   const micRestartTimerRef = useRef<number | null>(null);
   const micWatchdogTimerRef = useRef<number | null>(null);
   const micDecayTimerRef = useRef<number | null>(null);
+  const micClockTimerRef = useRef<number | null>(null);
   const micActivityAtRef = useRef<number>(0);
   const micRetryCountRef = useRef(0);
   const micLevelTargetRef = useRef(0);
@@ -249,6 +335,14 @@ export function CapturePanel({
   const latestInterimRef = useRef('');
   const lastFinalNormalizedRef = useRef('');
   const acousticTrackerRef = useRef(new SpeakerAcousticTracker());
+
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micAudioStreamRef = useRef<MediaStream | null>(null);
+  const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const waveformRafRef = useRef<number | null>(null);
+  const waveformBinsRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const acousticProbeActiveRef = useRef(false);
 
   const linesRef = useRef<string[]>([]);
 
@@ -274,6 +368,32 @@ export function CapturePanel({
     setIsRecordingScreen(false);
   };
 
+  const teardownAcousticProbe = () => {
+    acousticProbeActiveRef.current = false;
+    if (waveformRafRef.current !== null) {
+      window.cancelAnimationFrame(waveformRafRef.current);
+      waveformRafRef.current = null;
+    }
+    if (micAudioStreamRef.current) {
+      for (const track of micAudioStreamRef.current.getTracks()) {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      }
+      micAudioStreamRef.current = null;
+    }
+    analyserRef.current = null;
+    waveformBinsRef.current = null;
+    if (audioCtxRef.current) {
+      const ctx = audioCtxRef.current;
+      audioCtxRef.current = null;
+      void ctx.close().catch(() => {});
+    }
+    setAcousticMode('cadence');
+  };
+
   const stopMicTimers = () => {
     if (micRestartTimerRef.current !== null) {
       window.clearTimeout(micRestartTimerRef.current);
@@ -287,8 +407,11 @@ export function CapturePanel({
       window.clearInterval(micDecayTimerRef.current);
       micDecayTimerRef.current = null;
     }
+    if (micClockTimerRef.current !== null) {
+      window.clearInterval(micClockTimerRef.current);
+      micClockTimerRef.current = null;
+    }
     micLevelTargetRef.current = 0;
-    setMicLevel(0);
   };
 
   const tearDownRecognitionInstance = () => {
@@ -318,6 +441,7 @@ export function CapturePanel({
     isMicPausedRef.current = false;
     setIsMicPaused(false);
     stopMicTimers();
+    teardownAcousticProbe();
     tearDownRecognitionInstance();
     setInterimTranscript('');
     latestInterimRef.current = '';
@@ -333,6 +457,84 @@ export function CapturePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const canvas = waveformCanvasRef.current;
+    if (!canvas) return;
+    let raf = 0;
+
+    const drawWaveform = () => {
+      raf = window.requestAnimationFrame(drawWaveform);
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const targetW = Math.floor(rect.width * dpr);
+      const targetH = Math.floor(rect.height * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const cs = getComputedStyle(document.documentElement);
+      const accent = cs.getPropertyValue('--m-accent').trim() || '#059669';
+      const elevated = cs.getPropertyValue('--m-elevated').trim() || '#141c2c';
+      const barCount = 24;
+      const gap = 3;
+      const barW = Math.max(2, (rect.width - gap * (barCount - 1)) / barCount);
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const analyser = analyserRef.current;
+      const bins = waveformBinsRef.current;
+      const audioCtx = audioCtxRef.current;
+      const hasLiveAcoustic =
+        isListeningMic && !isMicPaused && analyser && bins && audioCtx && acousticProbeActiveRef.current;
+
+      if (hasLiveAcoustic) {
+        analyser.getByteFrequencyData(bins);
+        const liveLvl = acousticTrackerRef.current.sampleFrequencyData(bins, audioCtx.sampleRate);
+        micLevelTargetRef.current = Math.max(micLevelTargetRef.current, liveLvl);
+      }
+
+      const now = performance.now() / 160;
+      const currentEnergy = isListeningMic && !isMicPaused ? micLevelTargetRef.current : 0;
+
+      for (let i = 0; i < barCount; i += 1) {
+        let ratio = 0.14;
+        if (hasLiveAcoustic && bins) {
+          const binIdx = Math.min(bins.length - 1, Math.floor(((i + 1) / (barCount + 2)) * (bins.length * 0.42)));
+          ratio = Math.max(0.14, Math.min(1, bins[binIdx] / 195));
+        } else if (currentEnergy > 0) {
+          const wave = 0.55 + 0.45 * Math.sin(now + i * 0.55);
+          ratio = Math.max(0.14, Math.min(1, (currentEnergy / 100) * wave));
+        }
+
+        const barH = Math.max(3, ratio * (rect.height - 4));
+        const x = i * (barW + gap);
+        const y = (rect.height - barH) / 2;
+
+        ctx.fillStyle =
+          isListeningMic && !isMicPaused && (ratio > 0.24 || currentEnergy >= 18) ? accent : elevated;
+        ctx.beginPath();
+        ctx.roundRect(x, y, barW, barH, 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    };
+
+    raf = window.requestAnimationFrame(drawWaveform);
+    waveformRafRef.current = raf;
+    return () => {
+      window.cancelAnimationFrame(raf);
+      if (waveformRafRef.current === raf) waveformRafRef.current = null;
+    };
+  }, [isListeningMic, isMicPaused, activeTab]);
+
   function commitSpeechSegment(rawText: string) {
     const cleaned = rawText.replace(/\s+/g, ' ').trim();
     if (!cleaned) return;
@@ -345,13 +547,14 @@ export function CapturePanel({
     setDetectedSpeakersCount(totalVoices);
     setActiveSpeakerLabel(acoustic.speaker);
 
-    const formattedLine =
-      totalVoices > 1 ? `${acoustic.speaker}: ${cleaned}` : cleaned;
+    const shouldPrefixSpeaker =
+      totalVoices > 1 || acousticTrackerRef.current.hasManualSwitch();
+    const formattedLine = shouldPrefixSpeaker ? `${acoustic.speaker}: ${cleaned}` : cleaned;
     const {mergedLines, appended} = appendDedupedSpeechTurn(micLinesRef.current, formattedLine);
     if (!appended) return;
 
     lastFinalNormalizedRef.current = normKey;
-    micTurnsRef.current = [
+    const nextTurns: SpeechTurnSegment[] = [
       ...micTurnsRef.current,
       {
         id: `turn_${nowMs}_${micTurnsRef.current.length}`,
@@ -362,8 +565,16 @@ export function CapturePanel({
         timestampMs: nowMs,
       },
     ];
+    micTurnsRef.current = nextTurns;
     micLinesRef.current = mergedLines;
     setMicLines(mergedLines);
+
+    writeMicRecoveryDraft({
+      lines: mergedLines,
+      turns: nextTurns,
+      title: sourceTitle,
+      savedAt: new Date().toISOString(),
+    });
   }
 
   async function handleAutoCategorizeReviewFolder() {
@@ -550,6 +761,8 @@ export function CapturePanel({
           micLinesRef.current = [];
           micTurnsRef.current = [];
           setMicLines([]);
+          writeMicRecoveryDraft(null);
+          setRecoverableMicDraft(null);
         }
       } else {
         setStatusMessage('Entries matched existing knowledge (no duplicate rows added).');
@@ -569,6 +782,8 @@ export function CapturePanel({
       micLinesRef.current = [];
       micTurnsRef.current = [];
       setMicLines([]);
+      writeMicRecoveryDraft(null);
+      setRecoverableMicDraft(null);
     }
     setReviewDraft(null);
     setReviewError(null);
@@ -962,23 +1177,22 @@ export function CapturePanel({
     if (micDecayTimerRef.current !== null) {
       window.clearInterval(micDecayTimerRef.current);
     }
-    if (micWatchdogTimerRef.current !== null) {
-      window.clearInterval(micWatchdogTimerRef.current);
+    if (micClockTimerRef.current !== null) {
+      window.clearInterval(micClockTimerRef.current);
     }
+    micClockTimerRef.current = window.setInterval(() => {
+      if (isMicWantedRef.current && !isMicPausedRef.current) {
+        setMicElapsedSeconds((s) => s + 1);
+      }
+    }, 1000);
 
-    // Event-driven smooth signal meter without opening a competing getUserMedia lock
+    // Smooth signal envelope monitor + Web Audio fallback
     micDecayTimerRef.current = window.setInterval(() => {
       if (!isMicWantedRef.current || isMicPausedRef.current) {
         micLevelTargetRef.current = 0;
-        setMicLevel(0);
         return;
       }
-      setMicLevel((prev) => {
-        const target = micLevelTargetRef.current;
-        micLevelTargetRef.current = Math.max(12, Math.round(target * 0.78));
-        if (Math.abs(target - prev) <= 2) return target;
-        return Math.round(prev * 0.55 + target * 0.45);
-      });
+      micLevelTargetRef.current = Math.max(12, Math.round(micLevelTargetRef.current * 0.78));
     }, 95);
 
     // Watchdog prevents silent Web Speech freezes on Chromebook & Android Chrome
@@ -991,6 +1205,48 @@ export function CapturePanel({
         spawnRecognitionSession();
       }
     }, 4000);
+  }
+
+  async function tryAttachAcousticProbe() {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof AudioContext === 'undefined'
+    ) {
+      setAcousticMode('cadence');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      if (!isMicWantedRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
+      const ctx = new AudioContext();
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.75;
+      src.connect(analyser);
+
+      micAudioStreamRef.current = stream;
+      audioCtxRef.current = ctx;
+      analyserRef.current = analyser;
+      waveformBinsRef.current = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+      acousticProbeActiveRef.current = true;
+      setAcousticMode('acoustic');
+    } catch {
+      teardownAcousticProbe();
+    }
   }
 
   function scheduleMicRestart(delayMs: number) {
@@ -1049,15 +1305,16 @@ export function CapturePanel({
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
-        let bestTranscript = (res[0]?.transcript || '').trim();
-        let bestConf = res[0]?.confidence ?? 0;
-        for (let alt = 1; alt < res.length; alt += 1) {
-          const candidate = res[alt];
-          if (candidate?.transcript?.trim() && (candidate.confidence ?? 0) > bestConf) {
-            bestTranscript = candidate.transcript.trim();
-            bestConf = candidate.confidence ?? 0;
+        const alternatives: Array<{transcript: string; confidence?: number}> = [];
+        for (let alt = 0; alt < res.length; alt += 1) {
+          const cand = res[alt];
+          if (cand?.transcript?.trim()) {
+            alternatives.push({transcript: cand.transcript.trim(), confidence: cand.confidence});
           }
         }
+        const bestTranscript = res.isFinal
+          ? rerankSpeechAlternatives(alternatives, speechLexiconRef.current)
+          : alternatives[0]?.transcript || '';
         if (!bestTranscript) continue;
 
         if (res.isFinal) {
@@ -1092,6 +1349,13 @@ export function CapturePanel({
         return;
       }
       if (errCode === 'audio-capture') {
+        // On Android/Chromebook devices that enforce exclusive mic locks, drop the secondary acoustic probe automatically and keep dictation running
+        if (acousticProbeActiveRef.current) {
+          teardownAcousticProbe();
+          setStatusMessage('Switched automatically to Pause & Tap Cadence mode to avoid hardware mic conflict.');
+          scheduleMicRestart(250);
+          return;
+        }
         setErrorMessage(
           'No active microphone device found or another app/tab holds exclusive mic control. Close other mic tabs and tap Start Recording.',
         );
@@ -1245,9 +1509,13 @@ export function CapturePanel({
     micTurnsRef.current = [];
     lastFinalNormalizedRef.current = '';
     micRetryCountRef.current = 0;
+    writeMicRecoveryDraft(null);
+    setRecoverableMicDraft(null);
     setMicLines([]);
     setDetectedSpeakersCount(1);
     setActiveSpeakerLabel('Speaker 1');
+    setIsManualSpeakerMode(false);
+    setMicElapsedSeconds(0);
     latestInterimRef.current = '';
     setInterimTranscript('');
 
@@ -1256,10 +1524,56 @@ export function CapturePanel({
     setIsMicPaused(false);
     setIsListeningMic(true);
     setStatusMessage(
-      'Recording live speech (exclusive hardware mode — no mic conflict). Tap Pause or Stop anytime.',
+      'Recording live speech with domain lexicon reranking & multi-voice tracking. Tap Pause or Stop anytime.',
     );
     startMicActivityMonitor();
     spawnRecognitionSession();
+    void tryAttachAcousticProbe();
+  }
+
+  function handleRestoreRecoverableDraft() {
+    if (!recoverableMicDraft) return;
+    const formatted = formatTranscriptLocally(recoverableMicDraft.turns, recoverableMicDraft.lines);
+    const baseTitle = formatConversationTitle();
+    const customSuffix = recoverableMicDraft.title && recoverableMicDraft.title !== 'Ingested Learning Session'
+      ? recoverableMicDraft.title
+      : '';
+    const inferred = inferFolderDeterministically(customSuffix || baseTitle, formatted.cleanedTranscript, folders);
+    setReviewDraft({
+      kind: 'mic',
+      sourceType: 'mic_transcript',
+      title: customSuffix ? `${baseTitle} · ${customSuffix}` : baseTitle,
+      content: formatted.cleanedTranscript || recoverableMicDraft.lines.join('\n'),
+      folderId: onCreateFolder ? AUTO_FOLDER_OPTION : folders[0]?.id || null,
+      autoFolderSuggestion: inferred.folderName,
+      autoFolderDescription: inferred.description,
+      tagsText: inferred.suggestedTags.join(', ') || 'voice, transcript',
+      status: 'reviewed',
+      saveMode: formatted.cleanedTranscript.length > 2800 ? 'distill' : 'single',
+      extractedAt: recoverableMicDraft.savedAt,
+      micAiPolished: false,
+      micSpeakerCount: Math.max(1, formatted.detectedSpeakers.length),
+    });
+  }
+
+  function handleSelectManualSpeaker(label: string | 'auto') {
+    if (label === 'auto') {
+      acousticTrackerRef.current.clearManualSpeaker();
+      setIsManualSpeakerMode(false);
+      setActiveSpeakerLabel(acousticTrackerRef.current.getActiveSpeaker());
+      return;
+    }
+    const chosen = acousticTrackerRef.current.setActiveSpeaker(label);
+    setIsManualSpeakerMode(true);
+    setActiveSpeakerLabel(chosen);
+    setDetectedSpeakersCount(acousticTrackerRef.current.getDetectedSpeakerCount());
+  }
+
+  function handleAddSpeakerVoice() {
+    const chosen = acousticTrackerRef.current.addNextSpeaker();
+    setIsManualSpeakerMode(true);
+    setActiveSpeakerLabel(chosen);
+    setDetectedSpeakersCount(acousticTrackerRef.current.getDetectedSpeakerCount());
   }
 
   return (
@@ -1361,7 +1675,7 @@ export function CapturePanel({
                 <span>Extract &amp; Preview from YouTube or Web Article URL</span>
               </div>
               {!(brainUrl.trim() || backupBrainUrl.trim()) && (
-                <span className="font-mono text-[11px] text-amber-400">
+                <span className="font-mono text-[11px] text-warn">
                   Browser readability fallback (add Cloud Backup in Settings for YouTube captions)
                 </span>
               )}
@@ -1452,7 +1766,7 @@ export function CapturePanel({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-semibold text-ink">
                 <Mic className="h-4 w-4 text-accent-text" />
-                <span>AI Multi-Voice Recorder</span>
+                <span>AI Multi-Voice Studio</span>
               </div>
               <div className="flex items-center gap-2 font-mono text-[11px] tabular-nums text-ink-muted">
                 {isListeningMic && (
@@ -1461,27 +1775,61 @@ export function CapturePanel({
                     <span>
                       {isMicPaused
                         ? 'Paused'
-                        : detectedSpeakersCount > 1
+                        : detectedSpeakersCount > 1 || isManualSpeakerMode
                           ? `${detectedSpeakersCount} voices (${activeSpeakerLabel})`
                           : activeSpeakerLabel}
                     </span>
                   </span>
                 )}
                 <span>
-                  {isListeningMic ? (isMicPaused ? '· Hold' : `· ${micLevel}%`) : 'Ready'}
+                  {isListeningMic
+                    ? `${formatDurationClock(micElapsedSeconds)} · ${spokenWordCount}w`
+                    : 'Ready'}
                 </span>
               </div>
             </div>
 
             <p className="text-xs leading-relaxed text-ink-muted">
-              Captures rapid speech cleanly without hardware mic conflicts, tracks conversational turns, and runs Connected AI cleanup &amp; Auto-Folder filing when stopped.
+              Domain-lexicon speech reranker with live spectrum visualizer, turn auto-recovery, and multi-voice switching.
             </p>
+
+            {recoverableMicDraft && !isListeningMic && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warn-border bg-warn-soft px-3 py-2 text-xs">
+                <span className="text-ink">
+                  Recovered unsaved transcript ({recoverableMicDraft.lines.length} turns)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRestoreRecoverableDraft}
+                    className="min-h-[40px] rounded bg-accent px-3 py-1 text-xs font-semibold text-white hover:bg-accent-hover"
+                  >
+                    Open &amp; Polish
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      writeMicRecoveryDraft(null);
+                      setRecoverableMicDraft(null);
+                    }}
+                    className="min-h-[40px] rounded border border-line-strong bg-surface px-2.5 py-1 text-xs text-ink-muted hover:text-ink"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Speech Language Selector */}
             <div className="space-y-1">
-              <label htmlFor="mic-lang-select" className="block text-xs font-medium text-ink-muted">
-                Recognition Language
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="mic-lang-select" className="block text-xs font-medium text-ink-muted">
+                  Recognition Language
+                </label>
+                <span className="font-mono text-[10px] text-ink-subtle">
+                  {acousticMode === 'acoustic' ? 'Acoustic FFT + Cadence' : 'Pause + Tap Cadence'}
+                </span>
+              </div>
               <select
                 id="mic-lang-select"
                 value={micLang}
@@ -1497,25 +1845,58 @@ export function CapturePanel({
               </select>
             </div>
 
-            {/* Event-driven Live Signal Meter */}
-            <div
-              aria-label="Microphone audio signal meter"
-              className="flex h-8 items-end gap-1 rounded-md border border-line bg-inset px-2.5 py-1.5"
-            >
-              {Array.from({length: 16}).map((_, idx) => {
-                const threshold = ((idx + 1) / 16) * 100;
-                const active = isListeningMic && !isMicPaused && micLevel >= threshold * 0.7;
-                return (
-                  <div
-                    key={idx}
-                    className={`flex-1 rounded-xs transition-all duration-75 ${
-                      active ? 'bg-accent' : 'bg-elevated'
-                    }`}
-                    style={{height: `${35 + (idx % 4) * 16}%`}}
-                  />
-                );
-              })}
+            {/* Live Spectrum / Cadence Canvas Visualizer */}
+            <div className="rounded-md border border-line bg-inset px-2.5 py-1.5">
+              <canvas
+                ref={waveformCanvasRef}
+                aria-label="Live microphone waveform visualizer"
+                className="h-9 w-full block"
+              />
             </div>
+
+            {/* Live Multi-Voice Switcher (Active while recording) */}
+            {isListeningMic && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleSelectManualSpeaker('auto')}
+                  className={`min-h-[40px] rounded border px-2.5 text-[11px] font-medium transition-colors ${
+                    !isManualSpeakerMode
+                      ? 'border-accent-border bg-accent-soft text-accent-text'
+                      : 'border-line bg-inset text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  Auto Detect
+                </button>
+                {Array.from({length: Math.max(2, detectedSpeakersCount)}).map((_, idx) => {
+                  const lbl = `Speaker ${idx + 1}`;
+                  const active = isManualSpeakerMode && activeSpeakerLabel === lbl;
+                  return (
+                    <button
+                      key={lbl}
+                      type="button"
+                      onClick={() => handleSelectManualSpeaker(lbl)}
+                      className={`min-h-[40px] rounded border px-2.5 text-[11px] font-medium transition-colors ${
+                        active
+                          ? 'border-accent-border bg-accent-soft text-accent-text'
+                          : 'border-line bg-inset text-ink-muted hover:text-ink'
+                      }`}
+                    >
+                      {lbl}
+                    </button>
+                  );
+                })}
+                {detectedSpeakersCount < 6 && (
+                  <button
+                    type="button"
+                    onClick={handleAddSpeakerVoice}
+                    className="min-h-[40px] rounded border border-dashed border-line-strong bg-inset px-2.5 text-[11px] font-medium text-ink-muted hover:text-ink"
+                  >
+                    + Voice
+                  </button>
+                )}
+              </div>
+            )}
 
             {(isListeningMic || micLines.length > 0 || isPolishingMic) && (
               <div className="max-h-40 min-h-[60px] space-y-1 overflow-auto rounded-md border border-line bg-inset px-3 py-2 font-mono text-xs">
@@ -1553,7 +1934,7 @@ export function CapturePanel({
                     </>
                   ) : (
                     <>
-                      <Pause className="h-4 w-4 text-amber-400" />
+                      <Pause className="h-4 w-4 text-warn" />
                       <span>Pause</span>
                     </>
                   )}
@@ -1646,7 +2027,7 @@ export function CapturePanel({
       {activeTab === 'screen' && (
         <section className="space-y-4 rounded-lg border border-line bg-surface p-5">
           {!hasDisplayApi && (
-            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-xs leading-relaxed text-amber-400">
+            <div className="rounded-md border border-warn-border bg-warn-soft p-4 text-xs leading-relaxed text-warn">
               <strong>Android Browser Notice:</strong> Chrome on Android blocks{' '}
               <code className="font-mono">getDisplayMedia</code>. On your Galaxy Tab A9+, use{' '}
               <strong>YouTube &amp; Article Links</strong> or <strong>AI Mic &amp; Screenshot OCR</strong>. On Chromebook,{' '}
@@ -1749,7 +2130,7 @@ export function CapturePanel({
       {errorMessage && (
         <div
           role="alert"
-          className="rounded-md border border-red-500/40 bg-red-500/10 px-4 py-3 text-xs text-red-400"
+          className="rounded-md border border-danger-border bg-danger-soft px-4 py-3 text-xs text-danger"
         >
           {errorMessage}
         </div>

@@ -1,4 +1,5 @@
 import type {DistilledKnowledgeItem} from './aiBrain';
+import {inferFolderDeterministically} from './autoFolders';
 
 const NOISE_LINE_PATTERNS = [
   /^\d{1,2}:\d{2}(:\d{2})?$/,
@@ -97,17 +98,11 @@ export function mergeIncrementalCaption(
 }
 
 function classifyFolderForChunk(chunk: string, sourceType: string): string {
-  const lower = chunk.toLowerCase();
-  if (/\b(error|bug|fix|exception|fail|failed|debug|issue|workaround)\b/.test(lower)) {
-    return 'Debugging';
-  }
-  if (/\b(architecture|schema|database|supabase|deploy|api|endpoint|server)\b/.test(lower)) {
-    return 'Architecture';
-  }
-  if (sourceType.includes('youtube') || sourceType.includes('article') || sourceType.includes('ocr')) {
-    return 'Captured Learning';
-  }
-  return 'Patterns';
+  const hint =
+    sourceType.includes('youtube') || sourceType.includes('article') || sourceType.includes('ocr')
+      ? undefined
+      : undefined;
+  return inferFolderDeterministically('', chunk, [], hint).folderName;
 }
 
 /**

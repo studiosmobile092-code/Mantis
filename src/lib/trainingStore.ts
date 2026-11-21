@@ -261,6 +261,7 @@ export async function executeEvalSuite(params: {
       repoFiles: params.repoFiles,
       repoLabel: params.repoLabel,
       growth,
+      recordUsage: false,
     });
 
     if (
@@ -358,7 +359,7 @@ export function buildSelfOptimizationProposals(
   for (const waste of profile.wasteItems) {
     if (waste.autoFixKind === 'prune-duplicates') {
       proposals.push({
-        id: `opt-dup-${Date.now()}`,
+        id: 'opt-dup',
         kind: 'memory-prune',
         title: `Prune ${profile.duplicateClusterCount} Duplicate Knowledge Entries`,
         rationale:
@@ -370,7 +371,7 @@ export function buildSelfOptimizationProposals(
       });
     } else if (waste.autoFixKind === 'compact-raw') {
       proposals.push({
-        id: `opt-raw-${Date.now()}`,
+        id: 'opt-raw',
         kind: 'memory-prune',
         title: `Compact ${profile.staleRawCount} Stale Raw Captures`,
         rationale:

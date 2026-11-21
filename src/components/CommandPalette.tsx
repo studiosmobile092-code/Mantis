@@ -317,13 +317,13 @@ export function CommandPalette({
               setActiveIndex(0);
             }}
             placeholder="Search commands, knowledge notes, repo files, or themes…"
-            className="min-h-[36px] flex-1 bg-transparent text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
+            className="min-h-[40px] flex-1 bg-transparent text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
           />
           <button
             type="button"
             onClick={onClose}
             aria-label="Close command palette"
-            className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink"
           >
             <X className="h-4 w-4" />
           </button>

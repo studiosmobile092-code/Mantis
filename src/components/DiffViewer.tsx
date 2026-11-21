@@ -29,12 +29,12 @@ export function DiffViewer({filePath, originalContent, proposedContent}: DiffVie
           <span aria-hidden="true" className="text-ink-subtle">
             ·
           </span>
-          <span className="tabular-nums text-emerald-400">+{stats.additions}</span>
-          <span className="tabular-nums text-red-400">-{stats.deletions}</span>
+          <span className="tabular-nums text-accent-text">+{stats.additions}</span>
+          <span className="tabular-nums text-danger">-{stats.deletions}</span>
           <span aria-hidden="true" className="text-ink-subtle">
             ·
           </span>
-          <span className="inline-flex items-center gap-1 text-[11px] text-amber-400">
+          <span className="inline-flex items-center gap-1 text-[11px] text-warn">
             <Lock className="h-3 w-3" />
             <span>Propose-Only · Approval Required</span>
           </span>
@@ -43,7 +43,7 @@ export function DiffViewer({filePath, originalContent, proposedContent}: DiffVie
         <button
           type="button"
           onClick={() => setShowFullFile((v) => !v)}
-          className="min-h-[38px] rounded border border-line-strong bg-inset px-2.5 py-1 text-[11px] font-medium text-ink hover:bg-elevated"
+          className="min-h-[40px] rounded border border-line-strong bg-inset px-2.5 py-1 text-[11px] font-medium text-ink hover:bg-elevated"
         >
           {showFullFile ? 'Show Changed Hunks' : 'Show Full Diff'}
         </button>
@@ -60,16 +60,16 @@ export function DiffViewer({filePath, originalContent, proposedContent}: DiffVie
               {visibleLines.map((line, index) => {
                 const rowBg =
                   line.type === 'add'
-                    ? 'bg-emerald-500/15 text-ink'
+                    ? 'bg-accent-soft/50 text-ink'
                     : line.type === 'remove'
-                      ? 'bg-red-500/15 text-ink'
+                      ? 'bg-danger-soft text-ink'
                       : 'text-ink-muted';
                 const marker = line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ';
                 const markerColor =
                   line.type === 'add'
-                    ? 'text-emerald-400'
+                    ? 'text-accent-text'
                     : line.type === 'remove'
-                      ? 'text-red-400'
+                      ? 'text-danger'
                       : 'text-ink-subtle';
 
                 return (

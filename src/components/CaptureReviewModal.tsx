@@ -314,10 +314,10 @@ export function CaptureReviewModal({
                     <span
                       className={`inline-flex items-center gap-1.5 font-mono font-semibold tabular-nums ${
                         confidenceLevel === 'Good'
-                          ? 'text-emerald-400'
+                          ? 'text-accent-text'
                           : confidenceLevel === 'Fair'
-                            ? 'text-amber-400'
-                            : 'text-red-400'
+                            ? 'text-warn'
+                            : 'text-danger'
                       }`}
                     >
                       {confidenceLevel === 'Good' ? (
@@ -389,7 +389,7 @@ export function CaptureReviewModal({
               )}
 
               {draft.ocrNotice && (
-                <p className="text-xs text-amber-400">{draft.ocrNotice}</p>
+                <p className="text-xs text-warn">{draft.ocrNotice}</p>
               )}
             </div>
           )}
@@ -576,7 +576,7 @@ export function CaptureReviewModal({
                   onClick={() =>
                     onChangeDraft((prev) => ({...prev, saveMode: 'single'}))
                   }
-                  className={`min-h-[36px] rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`min-h-[40px] rounded px-3 py-1 text-xs font-medium transition-colors ${
                     draft.saveMode === 'single'
                       ? 'bg-elevated text-ink'
                       : 'text-ink-muted hover:text-ink'
@@ -590,7 +590,7 @@ export function CaptureReviewModal({
                   onClick={() =>
                     onChangeDraft((prev) => ({...prev, saveMode: 'distill'}))
                   }
-                  className={`min-h-[36px] rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`min-h-[40px] rounded px-3 py-1 text-xs font-medium transition-colors ${
                     draft.saveMode === 'distill'
                       ? 'bg-elevated text-ink'
                       : 'text-ink-muted hover:text-ink'
@@ -605,7 +605,7 @@ export function CaptureReviewModal({
           {errorMessage && (
             <div
               role="alert"
-              className="rounded-md border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs text-red-400"
+              className="rounded-md border border-danger-border bg-danger-soft px-3.5 py-2.5 text-xs text-danger"
             >
               {errorMessage}
             </div>

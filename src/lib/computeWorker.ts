@@ -29,7 +29,10 @@ export type WorkerRequest =
         query: string;
         entries: KnowledgeEntry[];
         folders: KnowledgeFolder[];
-        cachedVectors: Array<[string, QuantizedVectorRecord]>;
+        vectorDeltas?: QuantizedVectorRecord[];
+        pruneIds?: string[];
+        cachedVectors?: Array<[string, QuantizedVectorRecord]>;
+        includeMatrixForGpu?: boolean;
         limit: number;
         includeRaw: boolean;
       };
@@ -455,29 +458,56 @@ export function profileResourcesCore(payload: {
   };
 }
 
+// Persistent worker-side vector cache avoids re-cloning all Int8 vectors per query
+const workerVectors = new Map<string, QuantizedVectorRecord>();
+
 // Worker runtime listener (only executes inside a Web Worker context)
 if (typeof self !== 'undefined' && typeof (self as unknown as {document?: unknown}).document === 'undefined') {
   self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     const req = event.data;
     try {
       if (req.type === 'HYBRID_SEARCH') {
+        if (req.payload.cachedVectors) {
+          for (const [id, rec] of req.payload.cachedVectors) {
+            workerVectors.set(id, rec);
+          }
+        }
+        if (req.payload.vectorDeltas) {
+          for (const rec of req.payload.vectorDeltas) {
+            workerVectors.set(rec.id, rec);
+          }
+        }
+        if (req.payload.pruneIds) {
+          for (const id of req.payload.pruneIds) {
+            workerVectors.delete(id);
+          }
+        }
+
         const res = runHybridSearchCore({
           query: req.payload.query,
           entries: req.payload.entries,
           folders: req.payload.folders,
-          cachedVectors: new Map(req.payload.cachedVectors),
+          cachedVectors: workerVectors,
           limit: req.payload.limit,
           includeRaw: req.payload.includeRaw,
         });
+        const includeMatrix = Boolean(req.payload.includeMatrixForGpu && res.usedEntryIds.length >= 64);
         const response: WorkerResponse = {
           id: req.id,
           ok: true,
           type: 'HYBRID_SEARCH',
           matches: res.matches,
           newVectors: res.newVectors,
+          matrixBuffer: includeMatrix ? res.matrixBuffer : undefined,
           usedEntryIds: res.usedEntryIds,
         };
-        (self as unknown as {postMessage: (msg: WorkerResponse) => void}).postMessage(response);
+        const post = (self as unknown as {postMessage: (msg: WorkerResponse, transfer?: Transferable[]) => void})
+          .postMessage;
+        if (includeMatrix) {
+          post(response, [res.matrixBuffer.buffer]);
+        } else {
+          post(response);
+        }
       } else if (req.type === 'DETECT_CONTRADICTIONS') {
         const alerts = detectContradictionsCore(req.payload);
         (self as unknown as {postMessage: (msg: WorkerResponse) => void}).postMessage({

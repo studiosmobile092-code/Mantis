@@ -25,6 +25,8 @@ export class SpeakerAcousticTracker {
   private lastSpeechTimestampMs = 0;
   private recentCentroids: number[] = [];
   private recentLowRatios: number[] = [];
+  private manualOverrideSpeaker: string | null = null;
+  private manualSwitchUsed = false;
 
   public reset(): void {
     this.profiles = [];
@@ -32,6 +34,38 @@ export class SpeakerAcousticTracker {
     this.lastSpeechTimestampMs = 0;
     this.recentCentroids = [];
     this.recentLowRatios = [];
+    this.manualOverrideSpeaker = null;
+    this.manualSwitchUsed = false;
+  }
+
+  public setActiveSpeaker(label: string): string {
+    const clean = label.trim() || 'Speaker 1';
+    this.activeSpeaker = clean;
+    this.manualOverrideSpeaker = clean;
+    this.manualSwitchUsed = true;
+    if (!this.profiles.some((p) => p.label.toLowerCase() === clean.toLowerCase())) {
+      this.profiles.push({
+        label: clean,
+        avgCentroidHz: 650,
+        avgLowBandRatio: 0.35,
+        sampleCount: 0,
+      });
+    }
+    return clean;
+  }
+
+  public addNextSpeaker(): string {
+    const nextNum = Math.min(6, Math.max(2, this.profiles.length + 1));
+    const label = `Speaker ${nextNum}`;
+    return this.setActiveSpeaker(label);
+  }
+
+  public hasManualSwitch(): boolean {
+    return this.manualSwitchUsed;
+  }
+
+  public clearManualSpeaker(): void {
+    this.manualOverrideSpeaker = null;
   }
 
   public sampleFrequencyData(bins: Uint8Array, sampleRate = 48000): number {
@@ -103,6 +137,28 @@ export class SpeakerAcousticTracker {
     // Reset rolling window for next speaker turn
     this.recentCentroids = [];
     this.recentLowRatios = [];
+
+    if (this.manualOverrideSpeaker) {
+      const chosen = this.manualOverrideSpeaker;
+      const existing = this.profiles.find((p) => p.label === chosen);
+      if (existing) {
+        if (hasAcousticSamples) {
+          const alpha = Math.max(0.15, 1 / (existing.sampleCount + 1));
+          existing.avgCentroidHz = Math.round(existing.avgCentroidHz * (1 - alpha) + centroidHz * alpha);
+          existing.avgLowBandRatio = existing.avgLowBandRatio * (1 - alpha) + lowRatio * alpha;
+          existing.sampleCount += 1;
+        }
+      } else {
+        this.profiles.push({
+          label: chosen,
+          avgCentroidHz: centroidHz,
+          avgLowBandRatio: lowRatio,
+          sampleCount: hasAcousticSamples ? 1 : 0,
+        });
+      }
+      this.activeSpeaker = chosen;
+      return {speaker: chosen, centroidHz, pauseBeforeMs};
+    }
 
     if (this.profiles.length === 0) {
       this.profiles.push({
@@ -219,10 +275,14 @@ export function appendDedupedSpeechTurn(
   }
 
   const tailSlice = existingLines.slice(-2);
+  const wordCount = nextKey.split(' ').filter(Boolean).length;
   for (const prev of tailSlice) {
     const prevKey = normalizeSpeechCompareKey(prev);
     if (!prevKey) continue;
-    if (prevKey === nextKey || prevKey.endsWith(nextKey)) {
+    if (
+      prevKey === nextKey ||
+      ((nextKey.length >= 12 || wordCount >= 3) && prevKey.endsWith(nextKey))
+    ) {
       return {mergedLines: existingLines, appended: false};
     }
     // If browser expanded an interrupted interim line into a longer final line, replace tail
@@ -235,6 +295,80 @@ export function appendDedupedSpeechTurn(
   }
 
   return {mergedLines: [...existingLines, cleanLine], appended: true};
+}
+
+const DEFAULT_TECH_GLOSSARY = [
+  'mantis',
+  'supabase',
+  'cloudflare',
+  'typescript',
+  'javascript',
+  'react',
+  'webgpu',
+  'vulkan',
+  'indexeddb',
+  'ollama',
+  'deepseek',
+  'github',
+  'postgres',
+  'postgresql',
+  'tailwindcss',
+  'vite',
+  'oauth',
+  'lora',
+  'dpo',
+  'sft',
+  'eval',
+  'api',
+  'json',
+  'sql',
+  'rag',
+];
+
+/**
+ * Scores multiple Web Speech recognition alternatives against the user's Knowledge base
+ * lexicon + engineering glossary so domain terms win over homophone guesswork.
+ */
+export function rerankSpeechAlternatives(
+  alternatives: Array<{transcript: string; confidence?: number}>,
+  lexiconTerms: string[] = [],
+): string {
+  const cleanAlts = alternatives
+    .map((a) => ({
+      transcript: String(a.transcript || '').trim(),
+      confidence: typeof a.confidence === 'number' && a.confidence > 0 ? a.confidence : 0.7,
+    }))
+    .filter((a) => a.transcript.length > 0);
+
+  if (cleanAlts.length === 0) return '';
+  if (cleanAlts.length === 1) return cleanAlts[0].transcript;
+
+  const vocab = new Set<string>(DEFAULT_TECH_GLOSSARY);
+  for (const term of lexiconTerms) {
+    for (const tok of term.toLowerCase().replace(/[^a-z0-9_.\-/+#\s]/g, ' ').split(/\s+/)) {
+      if (tok.length >= 3) vocab.add(tok);
+    }
+  }
+
+  let bestText = cleanAlts[0].transcript;
+  let bestScore = -1;
+
+  for (let i = 0; i < cleanAlts.length; i += 1) {
+    const alt = cleanAlts[i];
+    const words = alt.transcript.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+    let hits = 0;
+    for (const w of words) {
+      if (vocab.has(w)) hits += 1;
+    }
+    const rankBias = (cleanAlts.length - i) * 0.04;
+    const score = alt.confidence + hits * 0.28 + rankBias;
+    if (score > bestScore) {
+      bestScore = score;
+      bestText = alt.transcript;
+    }
+  }
+
+  return bestText;
 }
 
 export function extractSpeakerLabels(transcript: string): string[] {

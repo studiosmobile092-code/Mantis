@@ -121,6 +121,7 @@ export function TrainingPanel({
   // Resource Profiler State
   const [profile, setProfile] = useState<ResourceProfile | null>(null);
   const [isProfiling, setIsProfiling] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [optMessage, setOptMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -133,6 +134,7 @@ export function TrainingPanel({
 
   async function refreshProfile() {
     setIsProfiling(true);
+    setProfileError(null);
     try {
       const next = await profileWorkspaceResourcesAsync({
         entries,
@@ -140,16 +142,18 @@ export function TrainingPanel({
         messagesCountBytes,
       });
       setProfile(next);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : 'Unable to profile workspace RAM.');
     } finally {
       setIsProfiling(false);
     }
   }
 
   useEffect(() => {
-    if (activeTab === 'profiler' && !profile) {
+    if (activeTab === 'profiler') {
       void refreshProfile();
     }
-  }, [activeTab]);
+  }, [activeTab, entries.length, repoFiles.length]);
 
   async function handleRunDuel(event: FormEvent) {
     event.preventDefault();
@@ -172,6 +176,7 @@ export function TrainingPanel({
         repoFiles,
         repoLabel,
         growth: computeKnowledgeGrowth(entries),
+        recordUsage: false,
       });
       const duel = await runArenaDuelWithBrain({
         brainUrl,
@@ -407,7 +412,7 @@ export function TrainingPanel({
                               }),
                             )
                           }
-                          className="min-h-[32px] rounded border border-line px-2 py-0.5 font-mono text-[10px] text-ink-muted hover:text-ink"
+                          className="min-h-[40px] rounded border border-line px-2.5 py-0.5 font-mono text-[11px] text-ink-muted hover:text-ink"
                         >
                           {s.status}
                         </button>
@@ -415,7 +420,7 @@ export function TrainingPanel({
                           type="button"
                           aria-label="Delete training sample"
                           onClick={() => onChangeTrainingSamples(deleteTrainingSample(s.id))}
-                          className="inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded text-ink-subtle hover:text-red-400"
+                          className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -455,7 +460,7 @@ export function TrainingPanel({
                         type="button"
                         aria-label="Delete distilled skill"
                         onClick={() => onDeleteScratchSkill(sk.id)}
-                        className="inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded text-ink-subtle hover:text-red-400"
+                        className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -485,7 +490,7 @@ export function TrainingPanel({
                   key={m}
                   type="button"
                   onClick={() => setEvalMode(m)}
-                  className={`min-h-[36px] rounded border px-3 text-xs font-medium capitalize ${
+                  className={`min-h-[40px] rounded border px-3 text-xs font-medium capitalize ${
                     evalMode === m
                       ? 'border-accent-border bg-accent-soft text-accent-text'
                       : 'border-line bg-inset text-ink-muted hover:text-ink'
@@ -529,12 +534,12 @@ export function TrainingPanel({
                       {r.passed ? (
                         <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent-text" />
                       ) : (
-                        <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+                        <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
                       )}
                       <div>
                         <div className="font-medium text-ink">{r.title}</div>
                         {r.failureReasons.length > 0 && (
-                          <div className="text-[11px] text-red-300">
+                          <div className="text-[11px] text-danger">
                             {r.failureReasons.join(' · ')}
                           </div>
                         )}
@@ -601,7 +606,7 @@ export function TrainingPanel({
                   type="button"
                   aria-label="Delete eval case"
                   onClick={() => onChangeEvalCases(deleteEvalCase(c.id))}
-                  className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded text-ink-subtle hover:text-red-400"
+                  className="inline-flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded text-ink-subtle hover:text-danger"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -625,12 +630,21 @@ export function TrainingPanel({
               type="button"
               disabled={isProfiling}
               onClick={() => void refreshProfile()}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded border border-line-strong bg-surface px-3 text-xs font-medium text-ink hover:bg-elevated"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line-strong bg-surface px-3 text-xs font-medium text-ink hover:bg-elevated"
             >
               <Activity className="h-3.5 w-3.5 text-accent-text" />
               <span>{isProfiling ? 'Profiling…' : 'Re-profile RAM & Storage'}</span>
             </button>
           </div>
+
+          {profileError && (
+            <div
+              role="alert"
+              className="rounded-md border border-danger-border bg-danger-soft px-3.5 py-2.5 text-xs text-danger"
+            >
+              {profileError}
+            </div>
+          )}
 
           {optMessage && (
             <div className="rounded-md border border-accent-border bg-accent-soft px-3.5 py-2.5 text-xs text-accent-text">

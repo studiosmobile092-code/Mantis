@@ -165,7 +165,7 @@ export function LiveMonitorPanel({
         </div>
 
         {routeStatus.failoverReason && (
-          <p className="text-[11px] leading-snug text-amber-400">{routeStatus.failoverReason}</p>
+          <p className="text-[11px] leading-snug text-warn">{routeStatus.failoverReason}</p>
         )}
       </section>
 

@@ -86,7 +86,7 @@ export function StatusFooter({
         </span>
 
         {pendingOfflineCount > 0 && (
-          <span className="whitespace-nowrap text-amber-400">
+          <span className="whitespace-nowrap text-warn">
             {pendingOfflineCount} queued
           </span>
         )}

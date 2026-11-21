@@ -101,7 +101,6 @@ import {
   loadEvalRuns,
   loadTrainingSamples,
   runStaticCodeSafetyCheck,
-  saveTrainingSamples,
 } from './lib/trainingStore';
 import {
   detectContradictionsAsync,
@@ -194,6 +193,10 @@ export default function App() {
   const [arenaInitialPrompt, setArenaInitialPrompt] = useState<string>('');
 
   const [folders, setFolders] = useState<KnowledgeFolder[]>([]);
+  const foldersRef = useRef<KnowledgeFolder[]>(folders);
+  useEffect(() => {
+    foldersRef.current = folders;
+  }, [folders]);
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [connection, setConnection] = useState<GitHubConnection | null>(null);
@@ -455,6 +458,7 @@ export default function App() {
       }
 
       setFolders(loadedFolders);
+      foldersRef.current = loadedFolders;
       const rawEntries = (entriesRes.data as KnowledgeEntry[]) || [];
       const hasPhase6EntryCols =
         rawEntries.length === 0 || 'status' in rawEntries[0] || 'source_url' in rawEntries[0];
@@ -632,6 +636,7 @@ export default function App() {
       void loadWorkspaceData(session).then(() => void flushOfflineQueue());
     } else {
       setFolders([]);
+      foldersRef.current = [];
       setEntries([]);
       setMessages([]);
       setConnection(null);
@@ -697,6 +702,7 @@ export default function App() {
     }
 
     const created = data as KnowledgeFolder;
+    foldersRef.current = [...foldersRef.current, created];
     setFolders((prev) => [...prev, created]);
     return created;
   }
@@ -709,6 +715,7 @@ export default function App() {
       setErrorBanner(error.message);
       return false;
     }
+    foldersRef.current = foldersRef.current.filter((f) => f.id !== folderId);
     setFolders((prev) => prev.filter((f) => f.id !== folderId));
     setEntries((prev) =>
       prev.map((e) => (e.folder_id === folderId ? {...e, folder_id: null} : e)),
@@ -743,11 +750,12 @@ export default function App() {
     }
 
     // Non-blocking contradiction guard against Trusted entries
+    const liveFolders = foldersRef.current;
     void detectContradictionsAsync({
       candidateTitle: cleanTitle,
       candidateContent: cleanContent,
       entries,
-      folders,
+      folders: liveFolders,
     }).then((alerts) => {
       if (alerts.length > 0) {
         setContradictionAlerts(alerts);
@@ -757,9 +765,9 @@ export default function App() {
     markHashSaved(dedupe.hash);
     const nowIso = new Date().toISOString();
     const desiredStatus = payload.status || getDefaultStatusForSource(payload.source);
-    let resolvedFolderId = resolveGuaranteedFolderId(payload.folderId, folders);
+    let resolvedFolderId = resolveGuaranteedFolderId(payload.folderId, liveFolders);
 
-    if (!resolvedFolderId && folders.length === 0) {
+    if (!resolvedFolderId && liveFolders.length === 0) {
       const createdFolder = await handleCreateFolder('Patterns', 'Default knowledge folder');
       if (createdFolder) {
         resolvedFolderId = createdFolder.id;
@@ -910,7 +918,7 @@ export default function App() {
     if (!prevSnapshot) return false;
 
     const guaranteedFolderId = payload.folderId
-      ? resolveGuaranteedFolderId(payload.folderId, folders)
+      ? resolveGuaranteedFolderId(payload.folderId, foldersRef.current)
       : null;
 
     const optimisticUpdated: KnowledgeEntry = {
@@ -1274,7 +1282,7 @@ export default function App() {
     if (!session || items.length === 0) return 0;
     setErrorBanner(null);
 
-    let activeFolders = [...folders];
+    let activeFolders = [...foldersRef.current];
     const desiredStatus = meta?.status || getDefaultStatusForSource(sourceType);
     const basePrepared: Array<{
       baseRow: {
@@ -1450,17 +1458,19 @@ export default function App() {
     );
     if (phase5SchemaMissing) return;
     await Promise.all(
-      entryIds.map(async (id) => {
-        const current = entries.find((e) => e.id === id);
-        if (!current) return;
-        await supabase
-          .from('knowledge_entries')
-          .update({
-            recall_count: (current.recall_count || 0) + 1,
-            confidence_score: (current.confidence_score || 1) + 1,
-          })
-          .eq('id', id);
-      }),
+      entryIds
+        .filter((id) => !id.startsWith('optimistic-'))
+        .map(async (id) => {
+          const current = entries.find((e) => e.id === id);
+          if (!current) return;
+          await supabase
+            .from('knowledge_entries')
+            .update({
+              recall_count: (current.recall_count || 0) + 1,
+              confidence_score: (current.confidence_score || 1) + 1,
+            })
+            .eq('id', id);
+        }),
     );
   }
 
@@ -1830,7 +1840,7 @@ export default function App() {
       model: brainModel,
       prompt,
       entries,
-      folders,
+      folders: foldersRef.current,
     });
     if (!lesson.usedTeacher) return lesson;
 
@@ -1849,7 +1859,7 @@ export default function App() {
     const ensured = await ensureAutoFolderExists(
       lesson.folderName,
       `Auto-distilled Teacher lessons (${lesson.folderName})`,
-      folders,
+      foldersRef.current,
       handleCreateFolder,
     );
     await handleSaveEntry({
@@ -2359,10 +2369,6 @@ export default function App() {
 
   function handleRejectAssassinBrief(brief: AssassinPrepBrief) {
     const rejectedSummary = brief.proposedDiffs.map((d) => d.title).join('; ') || brief.goal;
-    const next = [
-      ...trainingSamples,
-    ];
-    saveTrainingSamples(next);
     setTrainingSamples(
       addTrainingSample({
         format: 'dpo',
@@ -2546,12 +2552,12 @@ export default function App() {
       model: brainModel,
       title: suggestedTitle,
       content,
-      existingFolders: folders,
+      existingFolders: foldersRef.current,
     });
     const ensured = await ensureAutoFolderExists(
       folderGuess.folderName,
       folderGuess.description,
-      folders,
+      foldersRef.current,
       handleCreateFolder,
     );
     const saved = await handleSaveEntry({
@@ -2638,10 +2644,10 @@ export default function App() {
             {contradictionAlerts.length > 0 && (
               <div
                 role="status"
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-2.5 text-xs text-amber-200"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warn-border bg-warn-soft px-4 py-2.5 text-xs text-ink"
               >
                 <div className="flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-warn" />
                   <span>
                     <strong>Contradiction Guard:</strong> &quot;{contradictionAlerts[0].newTitle}&quot; conflicts with Trusted note &quot;
                     {contradictionAlerts[0].existingTitle}&quot; ({contradictionAlerts[0].reason}).
@@ -2655,14 +2661,14 @@ export default function App() {
                       setActiveArea('knowledge');
                       setContradictionAlerts([]);
                     }}
-                    className="min-h-[32px] rounded border border-amber-400/40 px-2.5 text-[11px] font-semibold hover:bg-amber-900/40"
+                    className="min-h-[40px] rounded border border-warn-border bg-surface/60 px-3 text-xs font-semibold text-warn hover:bg-surface"
                   >
                     Inspect Note
                   </button>
                   <button
                     type="button"
                     onClick={() => setContradictionAlerts([])}
-                    className="min-h-[32px] px-2 text-[11px] text-amber-300 hover:text-white"
+                    className="min-h-[40px] px-2.5 text-xs text-ink-muted hover:text-ink"
                   >
                     Dismiss
                   </button>
@@ -2673,13 +2679,13 @@ export default function App() {
             {errorBanner && !schemaMissing && (
               <div
                 role="alert"
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-xs text-red-200"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-danger-border bg-danger-soft px-4 py-3 text-xs text-danger"
               >
                 <span>{errorBanner}</span>
                 <button
                   type="button"
                   onClick={() => void loadWorkspaceData(session)}
-                  className="min-h-[36px] rounded border border-red-400/40 px-3 py-1 font-semibold hover:bg-red-900/40"
+                  className="min-h-[40px] rounded border border-danger-border bg-surface/60 px-3 py-1 font-semibold text-danger hover:bg-surface"
                 >
                   Retry
                 </button>
@@ -2799,7 +2805,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleToggleLeftPane}
-                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
                       >
                         <PanelLeftOpen className="h-3.5 w-3.5 text-accent-text" />
                         <span>Explorer (Ctrl+B)</span>
@@ -2812,7 +2818,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleToggleRightPane}
-                        className="inline-flex min-h-[34px] items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
                       >
                         <PanelRightOpen className="h-3.5 w-3.5 text-accent-text" />
                         <span>Context Monitor</span>
@@ -3241,9 +3247,9 @@ export default function App() {
           aria-live="polite"
           className={`mantis-slide-up fixed right-4 bottom-20 z-40 flex items-center gap-2.5 rounded-md border px-3.5 py-2 text-xs font-medium shadow-lg md:bottom-9 ${
             saveFeedback.state === 'failed'
-              ? 'border-red-500/50 bg-red-950/95 text-red-100'
+              ? 'border-danger-border bg-surface/95 text-danger'
               : saveFeedback.state === 'queued'
-                ? 'border-amber-500/50 bg-amber-950/95 text-amber-100'
+                ? 'border-warn-border bg-surface/95 text-warn'
                 : saveFeedback.state === 'saved'
                   ? 'border-accent-border bg-surface/95 text-accent-text'
                   : 'border-line-strong bg-surface/95 text-ink'
@@ -3256,10 +3262,10 @@ export default function App() {
             <CheckCircle2 className="h-3.5 w-3.5 text-accent-text" />
           )}
           {saveFeedback.state === 'queued' && (
-            <WifiOff className="h-3.5 w-3.5 text-amber-300" />
+            <WifiOff className="h-3.5 w-3.5 text-warn" />
           )}
           {saveFeedback.state === 'failed' && (
-            <AlertCircle className="h-3.5 w-3.5 text-red-300" />
+            <AlertCircle className="h-3.5 w-3.5 text-danger" />
           )}
 
           <span>{saveFeedback.message}</span>
@@ -3268,7 +3274,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => void retrySaveFnRef.current?.()}
-              className="inline-flex min-h-[36px] items-center gap-1 rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+              className="inline-flex min-h-[40px] items-center gap-1 rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-500"
             >
               <RefreshCw className="h-3 w-3" />
               <span>Retry</span>

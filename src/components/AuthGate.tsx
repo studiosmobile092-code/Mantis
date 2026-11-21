@@ -160,7 +160,7 @@ export function AuthGate({onAuthenticated}: AuthGateProps) {
             {errorMessage && (
               <div
                 role="alert"
-                className="rounded-md border border-red-500/40 bg-red-500/10 px-3.5 py-2.5 text-xs leading-relaxed text-red-400"
+                className="rounded-md border border-danger-border bg-danger-soft px-3.5 py-2.5 text-xs leading-relaxed text-danger"
               >
                 {errorMessage}
               </div>
@@ -235,7 +235,7 @@ export function AuthGate({onAuthenticated}: AuthGateProps) {
                 <button
                   type="button"
                   onClick={handleCopySql}
-                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded border border-line-strong bg-inset px-3 py-1 text-xs font-medium text-ink hover:bg-elevated"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line-strong bg-inset px-3 py-1 text-xs font-medium text-ink hover:bg-elevated"
                 >
                   {copiedSql ? (
                     <Check className="h-3.5 w-3.5 text-accent-text" />

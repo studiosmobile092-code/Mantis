@@ -290,7 +290,7 @@ export function SettingsPanel({
             {
               title: 'Supabase Cloud Memory',
               badge: schemaMissing ? 'Needs Setup' : 'Connected',
-              tone: schemaMissing ? 'text-amber-400' : 'text-accent-text',
+              tone: schemaMissing ? 'text-warn' : 'text-accent-text',
               detail: schemaMissing
                 ? 'Run P1 schema SQL below and refresh.'
                 : 'Postgres + RLS active across devices.',
@@ -313,7 +313,7 @@ export function SettingsPanel({
                 routeStatus.activeKind !== 'built-in-only'
                   ? 'text-accent-text'
                   : brainUrl.trim() || backupBrainUrl.trim()
-                    ? 'text-amber-400'
+                    ? 'text-warn'
                     : 'text-ink-muted',
               detail:
                 routeStatus.activeKind !== 'built-in-only'
@@ -575,7 +575,7 @@ export function SettingsPanel({
                 type="checkbox"
                 checked={preferBuiltInDraft}
                 onChange={(e) => setPreferBuiltInDraft(e.target.checked)}
-                className="h-4 w-4 accent-emerald-500"
+                className="h-4 w-4 accent-[var(--m-accent)]"
               />
               <span>Built-in AI leads every turn (Cloud Brain distills &amp; assists)</span>
             </label>
@@ -584,7 +584,7 @@ export function SettingsPanel({
                 type="checkbox"
                 checked={autoLearnDraft}
                 onChange={(e) => setAutoLearnDraft(e.target.checked)}
-                className="h-4 w-4 accent-emerald-500"
+                className="h-4 w-4 accent-[var(--m-accent)]"
               />
               <span>Auto-mine rules &amp; facts during chats</span>
             </label>
@@ -631,7 +631,7 @@ export function SettingsPanel({
             className={`rounded-md border px-3.5 py-2.5 font-mono text-xs ${
               brainStatus === 'ok'
                 ? 'border-accent-border bg-accent-soft text-ink'
-                : 'border-red-500/40 bg-red-500/10 text-red-400'
+                : 'border-danger-border bg-danger-soft text-danger'
             }`}
           >
             {brainMessage}
@@ -865,7 +865,7 @@ export function SettingsPanel({
             className={`rounded-md border px-3.5 py-2.5 font-mono text-xs ${
               pingStatus === 'ok'
                 ? 'border-accent-border bg-accent-soft text-ink'
-                : 'border-red-500/40 bg-red-500/10 text-red-400'
+                : 'border-danger-border bg-danger-soft text-danger'
             }`}
           >
             {pingMessage}
@@ -913,14 +913,14 @@ export function SettingsPanel({
         </pre>
 
         {offlineQueueCount > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-400">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warn-border bg-warn-soft px-3.5 py-2.5 text-xs text-warn">
             <span>
               {offlineQueueCount} offline knowledge {offlineQueueCount === 1 ? 'change' : 'changes'} queued locally.
             </span>
             <button
               type="button"
               onClick={onFlushOfflineQueue}
-              className="min-h-[38px] rounded bg-amber-600 px-3 py-1 font-semibold text-white hover:bg-amber-500"
+              className="min-h-[40px] rounded bg-accent px-3.5 py-1 font-semibold text-white hover:bg-accent-hover"
             >
               Sync Queued Now
             </button>
@@ -951,7 +951,7 @@ export function SettingsPanel({
                 key={item.num}
                 type="button"
                 onClick={() => void handleCopyText(item.sql, item.num)}
-                className="inline-flex min-h-[38px] items-center gap-1 rounded-md border border-line-strong bg-inset px-2.5 py-1 text-xs text-ink hover:bg-elevated"
+                className="inline-flex min-h-[40px] items-center gap-1 rounded-md border border-line-strong bg-inset px-3 py-1 text-xs text-ink hover:bg-elevated"
               >
                 {copiedWhich === item.num ? (
                   <Check className="h-3 w-3 text-accent-text" />
