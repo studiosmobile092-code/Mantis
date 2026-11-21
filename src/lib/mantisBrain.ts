@@ -5,6 +5,7 @@ import type {
   KnowledgeGrowthStats,
   RepoFile,
 } from '../types/mantis';
+import {getEntryStatus} from './knowledgeSync';
 import {
   retrieveRelevantKnowledge,
   retrieveRelevantRepoFiles,
@@ -331,7 +332,9 @@ export function synthesizeBuiltInReply(params: {
       };
     }
 
-    const recent = entries.slice(0, 6);
+    const trustedEntries = entries.filter((e) => getEntryStatus(e) !== 'raw');
+    const rawCount = entries.length - trustedEntries.length;
+    const recent = (trustedEntries.length > 0 ? trustedEntries : entries).slice(0, 6);
     const conceptSummary = growth.topConcepts
       .slice(0, 8)
       .map((c) => `${c.label} (${c.count})`)
@@ -339,13 +342,13 @@ export function synthesizeBuiltInReply(params: {
 
     return {
       replyText: [
-        `Built-in Knowledge Index: ${entries.length} entries · ${growth.uniqueConcepts} concepts · ${growth.totalRecalls} verified recalls.`,
+        `Built-in Knowledge Index: ${entries.length} entries (${rawCount > 0 ? `${entries.length - rawCount} active, ${rawCount} raw pending review` : 'all active'}) · ${growth.uniqueConcepts} concepts · ${growth.totalRecalls} verified recalls.`,
         conceptSummary ? `Top concepts: ${conceptSummary}` : '',
         '',
-        'Most recent entries:',
+        'Most recent active entries:',
         ...recent.map((e) => {
           const fname = (e.folder_id && folderMap.get(e.folder_id)) || 'Uncategorized';
-          return `- [${fname}] ${e.title} (conf ${e.confidence_score || 1})`;
+          return `- [${fname} · ${getEntryStatus(e)}] ${e.title} (conf ${e.confidence_score || 1})`;
         }),
         ...(repoFiles.length > 0
           ? ['', `Connected repo (${repoLabel || 'GitHub'}): ${repoFiles.length} indexed source files.`]

@@ -8,6 +8,7 @@ import type {
   RepoMatch,
   RetrievalMatch,
 } from '../types/mantis';
+import {getEntryStatus} from './knowledgeSync';
 
 export const STARTER_FOLDERS: Array<{name: string; description: string}> = [
   {
@@ -119,11 +120,13 @@ export function retrieveRelevantKnowledge(
   entries: KnowledgeEntry[],
   folders: KnowledgeFolder[],
   limit = 4,
+  options?: {includeRaw?: boolean},
 ): RetrievalMatch[] {
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
   const normalizedQuery = query.trim().toLowerCase();
   const tokens = tokenizeQuery(query);
   const queryGrams = buildTrigrams(normalizedQuery);
+  const includeRaw = options?.includeRaw ?? false;
 
   if (!normalizedQuery || entries.length === 0) {
     return [];
@@ -132,6 +135,11 @@ export function retrieveRelevantKnowledge(
   const scored: RetrievalMatch[] = [];
 
   for (const entry of entries) {
+    const status = getEntryStatus(entry);
+    if (status === 'raw' && !includeRaw) {
+      continue;
+    }
+
     const titleLower = entry.title.toLowerCase();
     const contentLower = entry.content.toLowerCase();
     const folderName = (entry.folder_id && folderMap.get(entry.folder_id)) || 'Uncategorized';
@@ -180,10 +188,18 @@ export function retrieveRelevantKnowledge(
       }
     }
 
-    // Apply reinforcement boost from user-verified confidence score
+    // Apply reinforcement boost + trust tier weighting (Trusted strong, Reviewed medium)
     if (score > 0) {
       const confidence = Math.max(1, entry.confidence_score || 1);
       score += Math.min(3, (confidence - 1) * 0.6);
+      if (status === 'trusted') {
+        score = score * 1.45 + 2.5;
+        reasons.unshift('Trusted');
+      } else if (status === 'reviewed') {
+        score *= 0.85;
+      } else {
+        score *= 0.45;
+      }
     }
 
     if (matchedTitleTokens.length > 0) {

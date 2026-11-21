@@ -2,16 +2,24 @@ import {
   BookOpen,
   Check,
   Edit3,
+  ExternalLink,
   Folder,
   FolderPlus,
   PlusCircle,
   Search,
+  ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react';
 import {type FormEvent, useEffect, useMemo, useState} from 'react';
+import {getEntryStatus} from '../lib/knowledgeSync';
 import {parseTagsInput} from '../lib/memory';
-import type {KnowledgeEntry, KnowledgeFolder} from '../types/mantis';
+import type {
+  KnowledgeEntry,
+  KnowledgeFolder,
+  KnowledgeStatus,
+  SaveFeedbackInfo,
+} from '../types/mantis';
 
 interface KnowledgeBrowserProps {
   folders: KnowledgeFolder[];
@@ -19,13 +27,21 @@ interface KnowledgeBrowserProps {
   isLoading: boolean;
   highlightedEntryId: string | null;
   initialFolderId?: string;
+  saveFeedback?: SaveFeedbackInfo;
   onClearHighlight: () => void;
   onCreateFolder: (name: string, description: string) => Promise<KnowledgeFolder | null>;
   onDeleteFolder: (folderId: string) => Promise<boolean>;
   onUpdateEntry: (
     id: string,
-    payload: {title: string; content: string; folderId: string | null; tags: string[]},
+    payload: {
+      title: string;
+      content: string;
+      folderId: string | null;
+      tags: string[];
+      status?: KnowledgeStatus;
+    },
   ) => Promise<boolean>;
+  onUpdateEntryStatus: (id: string, status: KnowledgeStatus) => Promise<boolean>;
   onDeleteEntry: (id: string) => Promise<boolean>;
   onOpenTeach: () => void;
 }
@@ -36,15 +52,18 @@ export function KnowledgeBrowser({
   isLoading,
   highlightedEntryId,
   initialFolderId,
+  saveFeedback,
   onClearHighlight,
   onCreateFolder,
   onDeleteFolder,
   onUpdateEntry,
+  onUpdateEntryStatus,
   onDeleteEntry,
   onOpenTeach,
 }: KnowledgeBrowserProps) {
   const [selectedFolderId, setSelectedFolderId] = useState<string>(initialFolderId || 'all');
   const [selectedTag, setSelectedTag] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | KnowledgeStatus>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewFolderForm, setShowNewFolderForm] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -57,6 +76,7 @@ export function KnowledgeBrowser({
   const [editFolderId, setEditFolderId] = useState<string>('');
   const [editTagsRaw, setEditTagsRaw] = useState('');
   const [editContent, setEditContent] = useState('');
+  const [editStatus, setEditStatus] = useState<KnowledgeStatus>('reviewed');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -104,6 +124,19 @@ export function KnowledgeBrowser({
     return Array.from(tagSet).sort((a, b) => a.localeCompare(b));
   }, [entries]);
 
+  const statusCounts = useMemo(() => {
+    let trusted = 0;
+    let reviewed = 0;
+    let raw = 0;
+    for (const entry of entries) {
+      const s = getEntryStatus(entry);
+      if (s === 'trusted') trusted += 1;
+      else if (s === 'raw') raw += 1;
+      else reviewed += 1;
+    }
+    return {trusted, reviewed, raw};
+  }, [entries]);
+
   const filteredEntries = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return entries.filter((entry) => {
@@ -115,6 +148,9 @@ export function KnowledgeBrowser({
       if (selectedTag !== 'all' && !entry.tags.includes(selectedTag)) {
         return false;
       }
+      if (statusFilter !== 'all' && getEntryStatus(entry) !== statusFilter) {
+        return false;
+      }
       if (!q) return true;
       return (
         entry.title.toLowerCase().includes(q) ||
@@ -122,7 +158,7 @@ export function KnowledgeBrowser({
         entry.tags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [entries, selectedFolderId, selectedTag, searchQuery, folderMap]);
+  }, [entries, selectedFolderId, selectedTag, statusFilter, searchQuery, folderMap]);
 
   async function handleCreateFolder(event: FormEvent) {
     event.preventDefault();
@@ -148,6 +184,7 @@ export function KnowledgeBrowser({
     setEditFolderId(entry.folder_id || '');
     setEditTagsRaw(entry.tags.join(', '));
     setEditContent(entry.content);
+    setEditStatus(getEntryStatus(entry));
     setConfirmDeleteId(null);
   }
 
@@ -160,6 +197,7 @@ export function KnowledgeBrowser({
         content: editContent.trim(),
         folderId: editFolderId || null,
         tags: parseTagsInput(editTagsRaw),
+        status: editStatus,
       });
       if (ok) {
         setEditingId(null);
@@ -358,6 +396,50 @@ export function KnowledgeBrowser({
 
         {/* Entries List Column */}
         <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-800 bg-slate-900 p-1">
+              {(
+                [
+                  {id: 'all', label: `All (${entries.length})`},
+                  {id: 'trusted', label: `Trusted (${statusCounts.trusted})`},
+                  {id: 'reviewed', label: `Reviewed (${statusCounts.reviewed})`},
+                  {id: 'raw', label: `Raw (${statusCounts.raw})`},
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setStatusFilter(tab.id)}
+                  className={`min-h-[38px] rounded px-3 text-xs font-medium tabular-nums transition-colors ${
+                    statusFilter === tab.id
+                      ? 'bg-slate-800 text-slate-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {saveFeedback && saveFeedback.state !== 'idle' ? (
+              <span
+                className={`font-mono text-xs ${
+                  saveFeedback.state === 'failed'
+                    ? 'text-red-300'
+                    : saveFeedback.state === 'saved'
+                      ? 'text-emerald-400'
+                      : 'text-slate-300'
+                }`}
+              >
+                {saveFeedback.message}
+              </span>
+            ) : (
+              <span className="font-mono text-[11px] text-slate-500">
+                AI uses Trusted (strong) &gt; Reviewed; Raw excluded by default
+              </span>
+            )}
+          </div>
+
           <div className={`grid gap-2.5 ${allTags.length > 0 ? 'sm:grid-cols-[1fr_180px]' : ''}`}>
             <div className="relative">
               <Search className="pointer-events-none absolute top-1/2 left-3.5 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -436,6 +518,7 @@ export function KnowledgeBrowser({
               {filteredEntries.map((entry) => {
                 const folderName =
                   (entry.folder_id && folderMap.get(entry.folder_id)?.name) || 'Uncategorized';
+                const entryStatus = getEntryStatus(entry);
                 const isEditing = editingId === entry.id;
                 const isHighlighted = highlightedEntryId === entry.id;
 
@@ -448,7 +531,7 @@ export function KnowledgeBrowser({
                   >
                     {isEditing ? (
                       <div className="space-y-3">
-                        <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="grid gap-3 sm:grid-cols-3">
                           <input
                             type="text"
                             value={editTitle}
@@ -466,6 +549,16 @@ export function KnowledgeBrowser({
                                 {folder.name}
                               </option>
                             ))}
+                          </select>
+                          <select
+                            aria-label="Entry trust status"
+                            value={editStatus}
+                            onChange={(e) => setEditStatus(e.target.value as KnowledgeStatus)}
+                            className="min-h-[42px] rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
+                          >
+                            <option value="trusted">Trusted (Strong AI Weight)</option>
+                            <option value="reviewed">Reviewed (Medium Weight)</option>
+                            <option value="raw">Raw (Excluded by Default)</option>
                           </select>
                         </div>
 
@@ -512,7 +605,23 @@ export function KnowledgeBrowser({
                               {entry.title}
                             </h3>
                             <div className="flex flex-wrap items-center gap-2 font-mono text-xs text-slate-400">
-                              <span className="text-emerald-400">{folderName}</span>
+                              <span
+                                className={
+                                  entryStatus === 'trusted'
+                                    ? 'font-semibold text-emerald-400'
+                                    : entryStatus === 'raw'
+                                      ? 'font-semibold text-amber-300'
+                                      : 'text-sky-300'
+                                }
+                              >
+                                {entryStatus === 'trusted'
+                                  ? 'Trusted'
+                                  : entryStatus === 'raw'
+                                    ? 'Raw'
+                                    : 'Reviewed'}
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-slate-200">{folderName}</span>
                               {entry.tags.length > 0 && (
                                 <>
                                   <span aria-hidden="true">·</span>
@@ -523,10 +632,35 @@ export function KnowledgeBrowser({
                               <span className="tabular-nums">
                                 Updated {new Date(entry.updated_at).toLocaleDateString()}
                               </span>
+                              {entry.source_url && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <a
+                                    href={entry.source_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-slate-300 underline decoration-slate-600 underline-offset-2 hover:text-emerald-300"
+                                  >
+                                    <ExternalLink className="h-3 w-3" />
+                                    <span>Source</span>
+                                  </a>
+                                </>
+                              )}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {entryStatus !== 'trusted' && (
+                              <button
+                                type="button"
+                                onClick={() => void onUpdateEntryStatus(entry.id, 'trusted')}
+                                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/40"
+                              >
+                                <ShieldCheck className="h-3.5 w-3.5" />
+                                <span>Mark as Trusted</span>
+                              </button>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => startEdit(entry)}

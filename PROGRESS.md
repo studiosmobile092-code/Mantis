@@ -117,3 +117,21 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   - Updated `src/lib/schemaText.ts` and `src/components/SettingsPanel.tsx` with dedicated 1-tap copy buttons for all four files.
   - Fixed `src/lib/aiBrain.ts` so `/health` probes run headerless (preventing Supabase gateway HTTP 401s on `apikey` / `Bearer` headers), never pass `sb_publishable_...` inside `Authorization: Bearer`, and automatically refresh expiring Supabase JWTs via `supabase.auth.getSession()` / `refreshSession()` on 401.
 - **Verification**: Run `npm run lint` and `npm run build`, then tap **Save & Test Both Routes** in Mantis **Settings** on the Chromebook.
+
+---
+
+## Phase 6 — Professional Polish & Pro IDE Upgrade
+
+### Group 1 — Knowledge Save Reliability, Trust Weighting & Offline Queue (Items 1, 5, 28 + Phase 6 SQL)
+- **Status**: Completed (Ready for Tablet & Chromebook Verification)
+- **Summary**:
+  - **Save Feedback & Optimistic Rollback (`src/lib/knowledgeSync.ts`, `src/App.tsx`, `src/components/TeachPanel.tsx`)**: Every Knowledge save now inserts/updates optimistically for instant UI response, displays live `Saving…` → `Saved ✓` or `Failed – Retry` (with one-tap Retry), prevents short-window duplicate saves via title + content hash deduplication, and guarantees valid `user_id` and `folder_id`.
+  - **Offline Resilience (Item 28)**: Network/offline failures automatically queue non-critical Knowledge writes locally (`Offline — queued to sync`) and auto-flush whenever connectivity returns (plus manual **Sync Queued Now** in Settings).
+  - **Captured vs Trusted Knowledge (Item 5)**: Added `raw | reviewed | trusted` lifecycle, status filter tabs (`All / Trusted / Reviewed / Raw`), visual status badges, and one-tap **Mark as Trusted** in `KnowledgeBrowser`. Updated `retrieveRelevantKnowledge` (`src/lib/memory.ts`) so **Trusted** entries carry strong priority, **Reviewed** entries carry medium weight, and **Raw** entries are excluded from AI answers by default.
+  - **Optional Phase 6 SQL with Safe Fallback (`supabase/schema_phase6.sql`)**: Added idempotent Phase 6 SQL (`status`, `source_url`, `extracted_at` on `knowledge_entries`; `theme`, `accent_color` on `user_preferences`) copyable in **Settings**, with automatic schema fallback + local metadata persistence if not yet run in Supabase.
+- **Verification**:
+  1. Open **Studio → Teach** on your Galaxy Tab or Chromebook, save a rule, and confirm immediate **Saving… → Saved ✓** feedback and instant appearance in **Knowledge**.
+  2. Double-tap save or re-submit the exact same entry within 30s and confirm no duplicate entry is created.
+  3. Open **Knowledge**, filter by **Trusted / Reviewed / Raw**, tap **Mark as Trusted** on any non-trusted entry, and ask a question in **Studio** to confirm Trusted knowledge answers first while Raw entries are excluded.
+  4. *(Optional cross-device sync)* Open **Settings → Phase 6 Polish SQL**, copy and run it once in Supabase SQL Editor, then click **Sync** in the top bar.
+

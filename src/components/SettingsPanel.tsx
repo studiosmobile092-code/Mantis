@@ -13,6 +13,7 @@ import {
   MANTIS_PHASE3_SCHEMA_SQL,
   MANTIS_PHASE4_SCHEMA_SQL,
   MANTIS_PHASE5_SCHEMA_SQL,
+  MANTIS_PHASE6_SCHEMA_SQL,
   MANTIS_SUPABASE_EDGE_FUNCTION_TS,
   MANTIS_SUPABASE_EDGE_HELPERS_TS,
   MANTIS_SUPABASE_EDGE_PROVIDERS_TS,
@@ -30,6 +31,9 @@ interface SettingsPanelProps {
   phase3SchemaMissing: boolean;
   phase4SchemaMissing: boolean;
   phase5SchemaMissing: boolean;
+  phase6SchemaMissing: boolean;
+  offlineQueueCount: number;
+  onFlushOfflineQueue: () => void;
   brainUrl: string;
   backupBrainUrl: string;
   brainModel: string;
@@ -56,6 +60,9 @@ export function SettingsPanel({
   phase3SchemaMissing,
   phase4SchemaMissing,
   phase5SchemaMissing,
+  phase6SchemaMissing,
+  offlineQueueCount,
+  onFlushOfflineQueue,
   brainUrl,
   backupBrainUrl,
   brainModel,
@@ -74,6 +81,7 @@ export function SettingsPanel({
     | 3
     | 4
     | 5
+    | 6
     | 'worker'
     | 'supabase-helpers'
     | 'supabase-providers'
@@ -144,6 +152,7 @@ export function SettingsPanel({
       | 3
       | 4
       | 5
+      | 6
       | 'worker'
       | 'supabase-helpers'
       | 'supabase-providers'
@@ -638,44 +647,67 @@ export function SettingsPanel({
         </div>
       </section>
 
-      {/* Phase 1–5 SQL References */}
+      {/* Phase 1–6 SQL References */}
       <section className="space-y-4 rounded-lg border border-slate-800 bg-[#0F172A] p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-slate-400" />
-            <h2 className="text-sm font-semibold text-slate-100">
-              Phase 5 SQL Migration ({phase5SchemaMissing ? 'Setup Required' : 'Active'})
-            </h2>
+          <div>
+            <div className="flex items-center gap-2">
+              <Database className="h-4 w-4 text-emerald-400" />
+              <h2 className="text-sm font-semibold text-slate-100">
+                Phase 6 Polish SQL (Optional — {phase6SchemaMissing ? 'Fallback Active' : 'Synced in DB'})
+              </h2>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Adds cross-device syncing for Knowledge trust status, source URLs, extraction dates, and theme preferences. Safe fallback works even before running this SQL.
+            </p>
           </div>
           <button
             type="button"
-            onClick={() => void handleCopyText(MANTIS_PHASE5_SCHEMA_SQL, 5)}
+            onClick={() => void handleCopyText(MANTIS_PHASE6_SCHEMA_SQL, 6)}
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-medium text-slate-100 hover:bg-slate-700"
           >
-            {copiedWhich === 5 ? (
+            {copiedWhich === 6 ? (
               <Check className="h-3.5 w-3.5 text-emerald-400" />
             ) : (
               <Copy className="h-3.5 w-3.5" />
             )}
-            <span>{copiedWhich === 5 ? 'Phase 5 SQL Copied' : 'Copy Phase 5 SQL'}</span>
+            <span>{copiedWhich === 6 ? 'Phase 6 SQL Copied' : 'Copy Phase 6 SQL'}</span>
           </button>
         </div>
         <pre className="max-h-36 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] p-3 font-mono text-[11px] leading-relaxed text-slate-300">
-          {MANTIS_PHASE5_SCHEMA_SQL}
+          {MANTIS_PHASE6_SCHEMA_SQL}
         </pre>
+
+        {offlineQueueCount > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-950/25 px-3.5 py-2.5 text-xs text-amber-200">
+            <span>
+              {offlineQueueCount} offline knowledge {offlineQueueCount === 1 ? 'change' : 'changes'} queued locally.
+            </span>
+            <button
+              type="button"
+              onClick={onFlushOfflineQueue}
+              className="min-h-[34px] rounded bg-amber-600 px-3 py-1 font-semibold text-white hover:bg-amber-500"
+            >
+              Sync Queued Now
+            </button>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-3">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-200">
             <Database className="h-4 w-4 text-slate-400" />
             <span>
-              Phases 1–4 Status: P1 {schemaMissing ? 'Missing' : 'Active'} · P2{' '}
+              Phases 1–6: P1 {schemaMissing ? 'Missing' : 'Active'} · P2{' '}
               {phase2SchemaMissing ? 'Missing' : 'Active'} · P3{' '}
               {phase3SchemaMissing ? 'Missing' : 'Active'} · P4{' '}
-              {phase4SchemaMissing ? 'Missing' : 'Active'}
+              {phase4SchemaMissing ? 'Missing' : 'Active'} · P5{' '}
+              {phase5SchemaMissing ? 'Missing' : 'Active'} · P6{' '}
+              {phase6SchemaMissing ? 'Local Fallback' : 'Active'}
             </span>
           </div>
           <div className="flex flex-wrap gap-2">
             {[
+              {num: 5 as const, sql: MANTIS_PHASE5_SCHEMA_SQL},
               {num: 4 as const, sql: MANTIS_PHASE4_SCHEMA_SQL},
               {num: 3 as const, sql: MANTIS_PHASE3_SCHEMA_SQL},
               {num: 2 as const, sql: MANTIS_PHASE2_SCHEMA_SQL},

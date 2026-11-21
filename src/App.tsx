@@ -1,6 +1,6 @@
 import type {Session} from '@supabase/supabase-js';
-import {Activity, ArrowLeft, FolderTree, X} from 'lucide-react';
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {Activity, AlertCircle, ArrowLeft, CheckCircle2, FolderTree, Loader2, RefreshCw, WifiOff, X} from 'lucide-react';
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AuthGate} from './components/AuthGate';
 import {CapturePanel} from './components/CapturePanel';
 import {ChatWorkspace} from './components/ChatWorkspace';
@@ -32,6 +32,21 @@ import {
   parseGitHubRepoInput,
 } from './lib/github';
 import {
+  applyEntryMetaFallbacks,
+  enqueueOfflineWrite,
+  formatActionableError,
+  getDefaultStatusForSource,
+  isDuplicateWithinWindow,
+  isLikelyOfflineError,
+  isMissingPhase6ColumnError,
+  loadOfflineWriteQueue,
+  markHashSaved,
+  resolveGuaranteedFolderId,
+  saveEntryMetaFallback,
+  saveOfflineWriteQueue,
+  unmarkHashSaved,
+} from './lib/knowledgeSync';
+import {
   computeKnowledgeGrowth,
   mineKnowledgeFromText,
   synthesizeBuiltInReply,
@@ -58,9 +73,11 @@ import type {
   GitHubConnection,
   KnowledgeEntry,
   KnowledgeFolder,
+  KnowledgeStatus,
   LearningEvent,
   LearningEventKind,
   RepoFile,
+  SaveFeedbackInfo,
   SelfAuditFinding,
   SelfAuditReport,
   SelfAuditRun,
@@ -101,7 +118,15 @@ export default function App() {
   const [phase3SchemaMissing, setPhase3SchemaMissing] = useState(false);
   const [phase4SchemaMissing, setPhase4SchemaMissing] = useState(false);
   const [phase5SchemaMissing, setPhase5SchemaMissing] = useState(false);
+  const [phase6SchemaMissing, setPhase6SchemaMissing] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedbackInfo>({
+    state: 'idle',
+    message: '',
+  });
+  const [offlineQueueCount, setOfflineQueueCount] = useState<number>(() => loadOfflineWriteQueue().length);
+  const retrySaveFnRef = useRef<(() => Promise<void>) | null>(null);
+  const feedbackClearTimerRef = useRef<number | null>(null);
 
   const initialLocalBrain = useMemo(() => getLocalBrainConfig(), []);
   const [brainUrl, setBrainUrl] = useState(initialLocalBrain.brainUrl);
@@ -123,6 +148,22 @@ export default function App() {
     content: string;
     tags: string;
   }>({key: 0, title: '', content: '', tags: ''});
+
+  const setTransientSaveFeedback = useCallback(
+    (info: SaveFeedbackInfo, autoClearMs = 2600) => {
+      if (feedbackClearTimerRef.current !== null) {
+        window.clearTimeout(feedbackClearTimerRef.current);
+        feedbackClearTimerRef.current = null;
+      }
+      setSaveFeedback(info);
+      if (autoClearMs > 0 && (info.state === 'saved' || info.state === 'queued')) {
+        feedbackClearTimerRef.current = window.setTimeout(() => {
+          setSaveFeedback({state: 'idle', message: ''});
+        }, autoClearMs);
+      }
+    },
+    [],
+  );
 
   const pushLearningEvent = useCallback(
     (kind: LearningEventKind, title: string, detail: string, source: string) => {
@@ -234,7 +275,15 @@ export default function App() {
       }
 
       setFolders(loadedFolders);
-      const loadedEntries = (entriesRes.data as KnowledgeEntry[]) || [];
+      const rawEntries = (entriesRes.data as KnowledgeEntry[]) || [];
+      const hasPhase6EntryCols =
+        rawEntries.length === 0 || 'status' in rawEntries[0] || 'source_url' in rawEntries[0];
+      if (!hasPhase6EntryCols) {
+        setPhase6SchemaMissing(true);
+      } else {
+        setPhase6SchemaMissing(false);
+      }
+      const loadedEntries = applyEntryMetaFallbacks(rawEntries);
       setEntries(loadedEntries);
       setMessages((messagesRes.data as ChatMessage[]) || []);
 
@@ -316,15 +365,73 @@ export default function App() {
         });
       }
     } catch (err) {
-      setErrorBanner(err instanceof Error ? err.message : 'Unable to reach Supabase');
+      setErrorBanner(formatActionableError(err));
     } finally {
       setIsLoadingData(false);
     }
   }, []);
 
+  const flushOfflineQueue = useCallback(async () => {
+    if (!session) return;
+    const queue = loadOfflineWriteQueue();
+    if (queue.length === 0) return;
+
+    const remaining = [...queue];
+    let flushedCount = 0;
+
+    while (remaining.length > 0) {
+      const nextItem = remaining[0];
+      try {
+        if (nextItem.kind === 'save_entry') {
+          const {error} = await supabase.from('knowledge_entries').insert(nextItem.payload);
+          if (error && !isMissingPhase6ColumnError(error)) {
+            if (isLikelyOfflineError(error)) break;
+          }
+        } else if (nextItem.kind === 'update_entry') {
+          const {id, ...fields} = nextItem.payload;
+          const {error} = await supabase
+            .from('knowledge_entries')
+            .update(fields)
+            .eq('id', String(id));
+          if (error && isLikelyOfflineError(error)) break;
+        } else if (nextItem.kind === 'update_status') {
+          const {id, status} = nextItem.payload;
+          const {error} = await supabase
+            .from('knowledge_entries')
+            .update({status})
+            .eq('id', String(id));
+          if (error && !isMissingPhase6ColumnError(error) && isLikelyOfflineError(error)) break;
+        }
+        remaining.shift();
+        flushedCount += 1;
+      } catch (err) {
+        if (isLikelyOfflineError(err)) break;
+        remaining.shift();
+      }
+    }
+
+    saveOfflineWriteQueue(remaining);
+    setOfflineQueueCount(remaining.length);
+    if (flushedCount > 0) {
+      setTransientSaveFeedback({
+        state: 'saved',
+        message: `Synced ${flushedCount} queued ${flushedCount === 1 ? 'change' : 'changes'} ✓`,
+      });
+      await loadWorkspaceData(session);
+    }
+  }, [session, loadWorkspaceData, setTransientSaveFeedback]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      void flushOfflineQueue();
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [flushOfflineQueue]);
+
   useEffect(() => {
     if (session) {
-      void loadWorkspaceData(session);
+      void loadWorkspaceData(session).then(() => void flushOfflineQueue());
     } else {
       setFolders([]);
       setEntries([]);
@@ -340,9 +447,10 @@ export default function App() {
       setPhase3SchemaMissing(false);
       setPhase4SchemaMissing(false);
       setPhase5SchemaMissing(false);
+      setPhase6SchemaMissing(false);
       setErrorBanner(null);
     }
-  }, [session, loadWorkspaceData]);
+  }, [session, loadWorkspaceData, flushOfflineQueue]);
 
   const metrics = useMemo(
     () =>
@@ -406,74 +514,373 @@ export default function App() {
     folderId: string | null;
     tags: string[];
     source: string;
+    status?: KnowledgeStatus;
+    sourceUrl?: string | null;
+    extractedAt?: string | null;
   }): Promise<boolean> {
     if (!session) return false;
     setErrorBanner(null);
 
-    const {data, error} = await supabase
-      .from('knowledge_entries')
-      .insert({
-        user_id: session.user.id,
-        folder_id: payload.folderId,
-        title: payload.title,
-        content: payload.content,
-        tags: payload.tags,
-        source: payload.source,
-      })
-      .select('*')
-      .single();
-
-    if (error) {
-      setErrorBanner(error.message);
+    const cleanTitle = payload.title.trim();
+    const cleanContent = payload.content.trim();
+    if (!cleanTitle || !cleanContent) {
+      setTransientSaveFeedback({state: 'failed', message: 'Failed – Title and content required'}, 0);
       return false;
     }
 
-    const created = data as KnowledgeEntry;
-    setEntries((prev) => [created, ...prev]);
-    pushLearningEvent('manual_teach', created.title, created.content.slice(0, 90), payload.source);
-    return true;
+    const dedupe = isDuplicateWithinWindow(cleanTitle, cleanContent, entries);
+    if (dedupe.isDuplicate) {
+      setTransientSaveFeedback({state: 'saved', message: 'Saved ✓ (already in memory)'});
+      return true;
+    }
+
+    markHashSaved(dedupe.hash);
+    const nowIso = new Date().toISOString();
+    const desiredStatus = payload.status || getDefaultStatusForSource(payload.source);
+    let resolvedFolderId = resolveGuaranteedFolderId(payload.folderId, folders);
+
+    if (!resolvedFolderId && folders.length === 0) {
+      const createdFolder = await handleCreateFolder('Patterns', 'Default knowledge folder');
+      if (createdFolder) {
+        resolvedFolderId = createdFolder.id;
+      }
+    }
+
+    const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const optimisticEntry: KnowledgeEntry = {
+      id: optimisticId,
+      user_id: session.user.id,
+      folder_id: resolvedFolderId,
+      title: cleanTitle,
+      content: cleanContent,
+      tags: payload.tags,
+      source: payload.source,
+      status: desiredStatus,
+      source_url: payload.sourceUrl ?? null,
+      extracted_at: payload.extractedAt ?? null,
+      recall_count: 0,
+      confidence_score: 1,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    // Immediate optimistic UI update + Saving feedback
+    setEntries((prev) => [optimisticEntry, ...prev]);
+    setTransientSaveFeedback({state: 'saving', message: 'Saving…'}, 0);
+
+    const baseInsert = {
+      user_id: session.user.id,
+      folder_id: resolvedFolderId,
+      title: cleanTitle,
+      content: cleanContent,
+      tags: payload.tags,
+      source: payload.source,
+    };
+
+    const executeSave = async () => {
+      try {
+        const insertPayload: Record<string, unknown> = phase6SchemaMissing
+          ? baseInsert
+          : {
+              ...baseInsert,
+              status: desiredStatus,
+              source_url: payload.sourceUrl ?? null,
+              extracted_at: payload.extractedAt ?? null,
+            };
+
+        let res = await supabase
+          .from('knowledge_entries')
+          .insert(insertPayload)
+          .select('*')
+          .single();
+
+        if (res.error && isMissingPhase6ColumnError(res.error)) {
+          setPhase6SchemaMissing(true);
+          res = await supabase
+            .from('knowledge_entries')
+            .insert(baseInsert)
+            .select('*')
+            .single();
+        }
+
+        if (res.error) {
+          if (isLikelyOfflineError(res.error)) {
+            const nextQ = enqueueOfflineWrite({kind: 'save_entry', payload: baseInsert});
+            setOfflineQueueCount(nextQ.length);
+            saveEntryMetaFallback(optimisticId, {
+              status: desiredStatus,
+              source_url: payload.sourceUrl ?? null,
+              extracted_at: payload.extractedAt ?? null,
+            });
+            setTransientSaveFeedback({
+              state: 'queued',
+              message: 'Offline — queued to sync',
+            });
+            return true;
+          }
+
+          // Roll back optimistic insert on hard failure
+          setEntries((prev) => prev.filter((item) => item.id !== optimisticId));
+          unmarkHashSaved(dedupe.hash);
+          const friendly = formatActionableError(res.error);
+          setErrorBanner(friendly);
+          retrySaveFnRef.current = async () => {
+            await handleSaveEntry(payload);
+          };
+          setTransientSaveFeedback(
+            {state: 'failed', message: 'Failed – Retry', canRetry: true},
+            0,
+          );
+          return false;
+        }
+
+        const inserted = res.data as KnowledgeEntry;
+        saveEntryMetaFallback(inserted.id, {
+          status: inserted.status || desiredStatus,
+          source_url: inserted.source_url ?? payload.sourceUrl ?? null,
+          extracted_at: inserted.extracted_at ?? payload.extractedAt ?? null,
+        });
+        const hydrated = applyEntryMetaFallbacks([inserted])[0];
+
+        setEntries((prev) => prev.map((item) => (item.id === optimisticId ? hydrated : item)));
+        pushLearningEvent(
+          'manual_teach',
+          hydrated.title,
+          hydrated.content.slice(0, 90),
+          payload.source,
+        );
+        retrySaveFnRef.current = null;
+        setTransientSaveFeedback({state: 'saved', message: 'Saved ✓'});
+        return true;
+      } catch (err) {
+        if (isLikelyOfflineError(err)) {
+          const nextQ = enqueueOfflineWrite({kind: 'save_entry', payload: baseInsert});
+          setOfflineQueueCount(nextQ.length);
+          setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+          return true;
+        }
+        setEntries((prev) => prev.filter((item) => item.id !== optimisticId));
+        unmarkHashSaved(dedupe.hash);
+        setErrorBanner(formatActionableError(err));
+        retrySaveFnRef.current = async () => {
+          await handleSaveEntry(payload);
+        };
+        setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry', canRetry: true}, 0);
+        return false;
+      }
+    };
+
+    return executeSave();
   }
 
   async function handleUpdateEntry(
     id: string,
-    payload: {title: string; content: string; folderId: string | null; tags: string[]},
+    payload: {
+      title: string;
+      content: string;
+      folderId: string | null;
+      tags: string[];
+      status?: KnowledgeStatus;
+    },
   ): Promise<boolean> {
     if (!session) return false;
     setErrorBanner(null);
 
-    const {data, error} = await supabase
-      .from('knowledge_entries')
-      .update({
-        title: payload.title,
-        content: payload.content,
-        folder_id: payload.folderId,
-        tags: payload.tags,
-      })
-      .eq('id', id)
-      .select('*')
-      .single();
+    const prevSnapshot = entries.find((item) => item.id === id);
+    if (!prevSnapshot) return false;
 
-    if (error) {
-      setErrorBanner(error.message);
+    const guaranteedFolderId = payload.folderId
+      ? resolveGuaranteedFolderId(payload.folderId, folders)
+      : null;
+
+    const optimisticUpdated: KnowledgeEntry = {
+      ...prevSnapshot,
+      title: payload.title,
+      content: payload.content,
+      folder_id: guaranteedFolderId,
+      tags: payload.tags,
+      status: payload.status ?? prevSnapshot.status,
+      updated_at: new Date().toISOString(),
+    };
+
+    setEntries((prev) => prev.map((item) => (item.id === id ? optimisticUpdated : item)));
+    setTransientSaveFeedback({state: 'saving', message: 'Saving…'}, 0);
+
+    const baseUpdate = {
+      title: payload.title,
+      content: payload.content,
+      folder_id: guaranteedFolderId,
+      tags: payload.tags,
+    };
+
+    try {
+      let res = await supabase
+        .from('knowledge_entries')
+        .update(
+          phase6SchemaMissing || !payload.status
+            ? baseUpdate
+            : {...baseUpdate, status: payload.status},
+        )
+        .eq('id', id)
+        .select('*')
+        .single();
+
+      if (res.error && isMissingPhase6ColumnError(res.error)) {
+        setPhase6SchemaMissing(true);
+        res = await supabase
+          .from('knowledge_entries')
+          .update(baseUpdate)
+          .eq('id', id)
+          .select('*')
+          .single();
+      }
+
+      if (res.error) {
+        if (isLikelyOfflineError(res.error)) {
+          const nextQ = enqueueOfflineWrite({
+            kind: 'update_entry',
+            payload: {id, ...baseUpdate},
+          });
+          setOfflineQueueCount(nextQ.length);
+          if (payload.status) saveEntryMetaFallback(id, {status: payload.status});
+          setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+          return true;
+        }
+        setEntries((prev) => prev.map((item) => (item.id === id ? prevSnapshot : item)));
+        setErrorBanner(formatActionableError(res.error));
+        retrySaveFnRef.current = async () => {
+          await handleUpdateEntry(id, payload);
+        };
+        setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry', canRetry: true}, 0);
+        return false;
+      }
+
+      const rawUpdated = res.data as KnowledgeEntry;
+      if (payload.status) {
+        saveEntryMetaFallback(id, {status: rawUpdated.status || payload.status});
+      }
+      const hydrated = applyEntryMetaFallbacks([rawUpdated])[0];
+      setEntries((prev) => prev.map((item) => (item.id === id ? hydrated : item)));
+      retrySaveFnRef.current = null;
+      setTransientSaveFeedback({state: 'saved', message: 'Saved ✓'});
+      return true;
+    } catch (err) {
+      if (isLikelyOfflineError(err)) {
+        const nextQ = enqueueOfflineWrite({kind: 'update_entry', payload: {id, ...baseUpdate}});
+        setOfflineQueueCount(nextQ.length);
+        setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+        return true;
+      }
+      setEntries((prev) => prev.map((item) => (item.id === id ? prevSnapshot : item)));
+      setErrorBanner(formatActionableError(err));
+      retrySaveFnRef.current = async () => {
+        await handleUpdateEntry(id, payload);
+      };
+      setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry', canRetry: true}, 0);
       return false;
     }
+  }
 
-    const updated = data as KnowledgeEntry;
-    setEntries((prev) => prev.map((item) => (item.id === id ? updated : item)));
-    return true;
+  async function handleUpdateEntryStatus(
+    id: string,
+    nextStatus: KnowledgeStatus,
+  ): Promise<boolean> {
+    if (!session) return false;
+    const prevSnapshot = entries.find((item) => item.id === id);
+    if (!prevSnapshot) return false;
+
+    setEntries((prev) =>
+      prev.map((item) => (item.id === id ? {...item, status: nextStatus} : item)),
+    );
+    saveEntryMetaFallback(id, {status: nextStatus});
+    setTransientSaveFeedback({state: 'saving', message: 'Saving…'}, 0);
+
+    if (id.startsWith('optimistic-') || phase6SchemaMissing) {
+      setTransientSaveFeedback({
+        state: 'saved',
+        message: nextStatus === 'trusted' ? 'Marked Trusted ✓' : 'Saved ✓',
+      });
+      return true;
+    }
+
+    try {
+      const {error} = await supabase
+        .from('knowledge_entries')
+        .update({status: nextStatus})
+        .eq('id', id);
+
+      if (error) {
+        if (isMissingPhase6ColumnError(error)) {
+          setPhase6SchemaMissing(true);
+          setTransientSaveFeedback({
+            state: 'saved',
+            message: nextStatus === 'trusted' ? 'Marked Trusted ✓' : 'Saved ✓',
+          });
+          return true;
+        }
+        if (isLikelyOfflineError(error)) {
+          const nextQ = enqueueOfflineWrite({
+            kind: 'update_status',
+            payload: {id, status: nextStatus},
+          });
+          setOfflineQueueCount(nextQ.length);
+          setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+          return true;
+        }
+        setEntries((prev) => prev.map((item) => (item.id === id ? prevSnapshot : item)));
+        saveEntryMetaFallback(id, {status: prevSnapshot.status});
+        setErrorBanner(formatActionableError(error));
+        retrySaveFnRef.current = async () => {
+          await handleUpdateEntryStatus(id, nextStatus);
+        };
+        setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry', canRetry: true}, 0);
+        return false;
+      }
+
+      setTransientSaveFeedback({
+        state: 'saved',
+        message: nextStatus === 'trusted' ? 'Marked Trusted ✓' : 'Saved ✓',
+      });
+      return true;
+    } catch (err) {
+      if (isLikelyOfflineError(err)) {
+        const nextQ = enqueueOfflineWrite({
+          kind: 'update_status',
+          payload: {id, status: nextStatus},
+        });
+        setOfflineQueueCount(nextQ.length);
+        setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+        return true;
+      }
+      setEntries((prev) => prev.map((item) => (item.id === id ? prevSnapshot : item)));
+      setErrorBanner(formatActionableError(err));
+      setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry', canRetry: true}, 0);
+      return false;
+    }
   }
 
   async function handleDeleteEntry(id: string): Promise<boolean> {
     if (!session) return false;
     setErrorBanner(null);
 
+    const prevSnapshot = entries.find((item) => item.id === id);
+    setEntries((prev) => prev.filter((item) => item.id !== id));
+
+    if (id.startsWith('optimistic-')) {
+      return true;
+    }
+
     const {error} = await supabase.from('knowledge_entries').delete().eq('id', id);
     if (error) {
-      setErrorBanner(error.message);
+      if (prevSnapshot) {
+        setEntries((prev) => [prevSnapshot, ...prev]);
+      }
+      setErrorBanner(formatActionableError(error));
+      setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry'}, 0);
       return false;
     }
 
-    setEntries((prev) => prev.filter((item) => item.id !== id));
+    setTransientSaveFeedback({state: 'saved', message: 'Deleted ✓'});
     return true;
   }
 
@@ -587,6 +994,7 @@ export default function App() {
   async function handleSaveCapturedEntries(
     items: DistilledKnowledgeItem[],
     sourceType: string,
+    meta?: {status?: KnowledgeStatus; sourceUrl?: string | null; extractedAt?: string | null},
   ): Promise<number> {
     if (!session || items.length === 0) return 0;
     setErrorBanner(null);
@@ -606,61 +1014,144 @@ export default function App() {
       }
     }
 
-    const existingSignatures = new Set(
-      entries.map(
-        (e) => `${e.title.trim().toLowerCase()}::${e.content.slice(0, 60).trim().toLowerCase()}`,
-      ),
-    );
+    const desiredStatus = meta?.status || getDefaultStatusForSource(sourceType);
+    const basePrepared: Array<{
+      baseRow: {
+        user_id: string;
+        folder_id: string | null;
+        title: string;
+        content: string;
+        tags: string[];
+        source: string;
+      };
+      hash: string;
+    }> = [];
 
-    const rowsToInsert = items
-      .filter((item) => {
-        const sig = `${item.title.trim().toLowerCase()}::${item.content.slice(0, 60).trim().toLowerCase()}`;
-        return item.title.trim() && item.content.trim() && !existingSignatures.has(sig);
-      })
-      .map((item) => {
-        const matchedFolder =
-          activeFolders.find((f) => f.name.toLowerCase() === item.folder.toLowerCase()) ||
-          captureFolder ||
-          activeFolders[0] ||
-          null;
-        return {
+    for (const item of items) {
+      const cleanTitle = item.title.trim().slice(0, 120);
+      const cleanContent = item.content.trim();
+      if (!cleanTitle || !cleanContent) continue;
+
+      const dedupe = isDuplicateWithinWindow(cleanTitle, cleanContent, entries);
+      if (dedupe.isDuplicate) continue;
+      markHashSaved(dedupe.hash);
+
+      const matchedFolder = activeFolders.find(
+        (f) => f.name.toLowerCase() === item.folder.toLowerCase(),
+      );
+      const guaranteedFolderId = resolveGuaranteedFolderId(
+        matchedFolder?.id || captureFolder?.id,
+        activeFolders,
+      );
+
+      basePrepared.push({
+        hash: dedupe.hash,
+        baseRow: {
           user_id: session.user.id,
-          folder_id: matchedFolder?.id || null,
-          title: item.title.trim().slice(0, 120),
-          content: item.content.trim(),
+          folder_id: guaranteedFolderId,
+          title: cleanTitle,
+          content: cleanContent,
           tags: Array.from(new Set(item.tags.map((t) => t.trim().toLowerCase()).filter(Boolean))),
           source: sourceType,
-        };
+        },
       });
+    }
 
-    if (rowsToInsert.length === 0) return 0;
+    if (basePrepared.length === 0) return 0;
 
-    const {data, error} = await supabase
-      .from('knowledge_entries')
-      .insert(rowsToInsert)
-      .select('*');
+    setTransientSaveFeedback({state: 'saving', message: 'Saving…'}, 0);
+    const nowIso = new Date().toISOString();
+    const optimisticRows: KnowledgeEntry[] = basePrepared.map((p, idx) => ({
+      id: `optimistic-cap-${Date.now()}-${idx}`,
+      ...p.baseRow,
+      status: desiredStatus,
+      source_url: meta?.sourceUrl ?? null,
+      extracted_at: meta?.extractedAt ?? null,
+      recall_count: 0,
+      confidence_score: 1,
+      created_at: nowIso,
+      updated_at: nowIso,
+    }));
 
-    if (error) {
-      setErrorBanner(error.message);
+    setEntries((prev) => [...optimisticRows, ...prev]);
+
+    try {
+      let res = await supabase
+        .from('knowledge_entries')
+        .insert(
+          basePrepared.map((p) =>
+            phase6SchemaMissing
+              ? p.baseRow
+              : {
+                  ...p.baseRow,
+                  status: desiredStatus,
+                  source_url: meta?.sourceUrl ?? null,
+                  extracted_at: meta?.extractedAt ?? null,
+                },
+          ),
+        )
+        .select('*');
+
+      if (res.error && isMissingPhase6ColumnError(res.error)) {
+        setPhase6SchemaMissing(true);
+        res = await supabase
+          .from('knowledge_entries')
+          .insert(basePrepared.map((p) => p.baseRow))
+          .select('*');
+      }
+
+      if (res.error) {
+        for (const p of basePrepared) unmarkHashSaved(p.hash);
+        if (isLikelyOfflineError(res.error)) {
+          let latestQ = loadOfflineWriteQueue();
+          for (const p of basePrepared) {
+            latestQ = enqueueOfflineWrite({kind: 'save_entry', payload: p.baseRow});
+          }
+          setOfflineQueueCount(latestQ.length);
+          setTransientSaveFeedback({state: 'queued', message: 'Offline — queued to sync'});
+          return basePrepared.length;
+        }
+        const optIds = new Set(optimisticRows.map((o) => o.id));
+        setEntries((prev) => prev.filter((item) => !optIds.has(item.id)));
+        setErrorBanner(formatActionableError(res.error));
+        setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry'}, 0);
+        return 0;
+      }
+
+      const savedRaw = (res.data as KnowledgeEntry[]) || [];
+      for (const row of savedRaw) {
+        saveEntryMetaFallback(row.id, {
+          status: row.status || desiredStatus,
+          source_url: row.source_url ?? meta?.sourceUrl ?? null,
+          extracted_at: row.extracted_at ?? meta?.extractedAt ?? null,
+        });
+      }
+      const hydratedSaved = applyEntryMetaFallbacks(savedRaw);
+      const optIds = new Set(optimisticRows.map((o) => o.id));
+      setEntries((prev) => [...hydratedSaved, ...prev.filter((item) => !optIds.has(item.id))]);
+
+      const kind: LearningEventKind = sourceType.includes('youtube') || sourceType.includes('article')
+        ? 'url_ingested'
+        : sourceType.includes('mic')
+          ? 'voice_captured'
+          : sourceType.includes('ocr')
+            ? 'ocr_distilled'
+            : 'auto_mined';
+
+      for (const row of hydratedSaved.slice(0, 3)) {
+        pushLearningEvent(kind, row.title, row.content.slice(0, 85), sourceType);
+      }
+
+      setTransientSaveFeedback({state: 'saved', message: 'Saved ✓'});
+      return hydratedSaved.length;
+    } catch (err) {
+      for (const p of basePrepared) unmarkHashSaved(p.hash);
+      const optIds = new Set(optimisticRows.map((o) => o.id));
+      setEntries((prev) => prev.filter((item) => !optIds.has(item.id)));
+      setErrorBanner(formatActionableError(err));
+      setTransientSaveFeedback({state: 'failed', message: 'Failed – Retry'}, 0);
       return 0;
     }
-
-    const saved = (data as KnowledgeEntry[]) || [];
-    setEntries((prev) => [...saved, ...prev]);
-
-    const kind: LearningEventKind = sourceType.includes('youtube') || sourceType.includes('article')
-      ? 'url_ingested'
-      : sourceType.includes('mic')
-        ? 'voice_captured'
-        : sourceType.includes('ocr')
-          ? 'ocr_distilled'
-          : 'auto_mined';
-
-    for (const row of saved.slice(0, 3)) {
-      pushLearningEvent(kind, row.title, row.content.slice(0, 85), sourceType);
-    }
-
-    return saved.length;
   }
 
   async function handleReinforceEntries(entryIds: string[]) {
@@ -1114,30 +1605,19 @@ export default function App() {
         } else {
           const defaultFolder =
             folders.find((f) => f.name.toLowerCase() === 'patterns') || folders[0] || null;
-          const {data: savedNote, error: noteErr} = await supabase
-            .from('knowledge_entries')
-            .insert({
-              user_id: session.user.id,
-              folder_id: defaultFolder?.id || null,
-              title: noteTitle,
-              content: noteContent,
-              tags: [],
-              source: 'chat',
-            })
-            .select('*')
-            .single();
-
-          if (noteErr) {
-            replyText = `Could not save note to Supabase: ${noteErr.message}`;
-          } else {
-            const createdNote = savedNote as KnowledgeEntry;
-            setEntries((prev) => [createdNote, ...prev]);
-            citedEntryIds = [createdNote.id];
-            pushLearningEvent('manual_teach', createdNote.title, createdNote.content.slice(0, 80), 'chat');
-            replyText = `Saved "${createdNote.title}" to ${
-              defaultFolder?.name || 'Uncategorized'
-            }. Mantis indexed it for future retrieval.`;
-          }
+          const savedOk = await handleSaveEntry({
+            title: noteTitle,
+            content: noteContent,
+            folderId: defaultFolder?.id || null,
+            tags: [],
+            source: 'chat',
+            status: 'trusted',
+          });
+          replyText = savedOk
+            ? `Saved "${noteTitle}" as Trusted to ${
+                defaultFolder?.name || 'Patterns'
+              }. Mantis indexed it with strong retrieval priority.`
+            : 'Could not save note to Supabase — tap Retry on the save status notice.';
         }
       } else if (prompt.toLowerCase().startsWith('/suggest ')) {
         const targetQuery = prompt.slice(9).trim();
@@ -1617,6 +2097,10 @@ export default function App() {
                       initialTitle={teachPrefill.title}
                       initialContent={teachPrefill.content}
                       initialTags={teachPrefill.tags}
+                      saveFeedback={saveFeedback}
+                      onRetrySave={
+                        retrySaveFnRef.current ? () => void retrySaveFnRef.current?.() : undefined
+                      }
                       onSaveEntry={handleSaveEntry}
                       onCreateFolder={handleCreateFolder}
                       onOpenKnowledge={() => setActiveArea('knowledge')}
@@ -1695,10 +2179,12 @@ export default function App() {
             isLoading={isLoadingData}
             highlightedEntryId={highlightedEntryId}
             initialFolderId={selectedKnowledgeFolderId}
+            saveFeedback={saveFeedback}
             onClearHighlight={() => setHighlightedEntryId(null)}
             onCreateFolder={handleCreateFolder}
             onDeleteFolder={handleDeleteFolder}
             onUpdateEntry={handleUpdateEntry}
+            onUpdateEntryStatus={handleUpdateEntryStatus}
             onDeleteEntry={handleDeleteEntry}
             onOpenTeach={() => {
               setStudioSubView('teach');
@@ -1786,6 +2272,9 @@ export default function App() {
             phase3SchemaMissing={phase3SchemaMissing}
             phase4SchemaMissing={phase4SchemaMissing}
             phase5SchemaMissing={phase5SchemaMissing}
+            phase6SchemaMissing={phase6SchemaMissing}
+            offlineQueueCount={offlineQueueCount}
+            onFlushOfflineQueue={() => void flushOfflineQueue()}
             brainUrl={brainUrl}
             backupBrainUrl={backupBrainUrl}
             brainModel={brainModel}
@@ -1798,6 +2287,49 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Non-blocking Global Save & Sync Feedback */}
+      {saveFeedback.state !== 'idle' && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed right-4 bottom-20 z-40 flex items-center gap-2.5 rounded-md border px-3.5 py-2 text-xs font-medium shadow-lg md:bottom-5 ${
+            saveFeedback.state === 'failed'
+              ? 'border-red-500/50 bg-red-950/95 text-red-100'
+              : saveFeedback.state === 'queued'
+                ? 'border-amber-500/50 bg-amber-950/95 text-amber-100'
+                : saveFeedback.state === 'saved'
+                  ? 'border-emerald-500/50 bg-slate-900/95 text-emerald-300'
+                  : 'border-slate-700 bg-slate-900/95 text-slate-200'
+          }`}
+        >
+          {saveFeedback.state === 'saving' && (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+          )}
+          {saveFeedback.state === 'saved' && (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+          )}
+          {saveFeedback.state === 'queued' && (
+            <WifiOff className="h-3.5 w-3.5 text-amber-300" />
+          )}
+          {saveFeedback.state === 'failed' && (
+            <AlertCircle className="h-3.5 w-3.5 text-red-300" />
+          )}
+
+          <span>{saveFeedback.message}</span>
+
+          {saveFeedback.state === 'failed' && retrySaveFnRef.current && (
+            <button
+              type="button"
+              onClick={() => void retrySaveFnRef.current?.()}
+              className="inline-flex min-h-[32px] items-center gap-1 rounded bg-red-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-red-500"
+            >
+              <RefreshCw className="h-3 w-3" />
+              <span>Retry</span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

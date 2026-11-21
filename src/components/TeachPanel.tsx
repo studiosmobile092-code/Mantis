@@ -1,7 +1,7 @@
-import {CheckCircle2, FolderPlus, PlusCircle, Sparkles} from 'lucide-react';
+import {CheckCircle2, FolderPlus, Loader2, PlusCircle, RefreshCw, Sparkles} from 'lucide-react';
 import {type FormEvent, useMemo, useState} from 'react';
 import {parseTagsInput} from '../lib/memory';
-import type {KnowledgeEntry, KnowledgeFolder} from '../types/mantis';
+import type {KnowledgeEntry, KnowledgeFolder, KnowledgeStatus, SaveFeedbackInfo} from '../types/mantis';
 
 interface TeachPanelProps {
   folders: KnowledgeFolder[];
@@ -9,12 +9,15 @@ interface TeachPanelProps {
   initialTitle?: string;
   initialContent?: string;
   initialTags?: string;
+  saveFeedback?: SaveFeedbackInfo;
+  onRetrySave?: () => void;
   onSaveEntry: (payload: {
     title: string;
     content: string;
     folderId: string | null;
     tags: string[];
     source: string;
+    status?: KnowledgeStatus;
   }) => Promise<boolean>;
   onCreateFolder: (name: string, description: string) => Promise<KnowledgeFolder | null>;
   onOpenKnowledge: () => void;
@@ -63,6 +66,8 @@ export function TeachPanel({
   initialTitle = '',
   initialContent = '',
   initialTags = '',
+  saveFeedback,
+  onRetrySave,
   onSaveEntry,
   onCreateFolder,
   onOpenKnowledge,
@@ -136,12 +141,15 @@ export function TeachPanel({
         folderId: folderId || folders[0]?.id || null,
         tags: parseTagsInput(tagsRaw),
         source: 'teach',
+        status: 'trusted',
       });
       if (ok) {
-        setSavedNotice(`Saved "${trimmedTitle}" to persistent Supabase memory.`);
+        setSavedNotice(`Saved "${trimmedTitle}" as Trusted.`);
         setTitle('');
         setTagsRaw('');
         setContent('');
+      } else {
+        setErrorNotice('Save failed — tap Retry below to try again.');
       }
     } finally {
       setIsSaving(false);
@@ -340,14 +348,41 @@ export function TeachPanel({
           </div>
         )}
 
-        <div className="flex flex-wrap items-center justify-end gap-3 border-t border-slate-800 pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-4">
+          <div className="flex items-center gap-2 text-xs">
+            {saveFeedback && saveFeedback.state !== 'idle' && (
+              <span
+                className={`inline-flex items-center gap-1.5 font-mono ${
+                  saveFeedback.state === 'failed'
+                    ? 'text-red-300'
+                    : saveFeedback.state === 'saved'
+                      ? 'text-emerald-400'
+                      : 'text-slate-300'
+                }`}
+              >
+                {saveFeedback.state === 'saving' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>{saveFeedback.message}</span>
+              </span>
+            )}
+            {saveFeedback?.state === 'failed' && onRetrySave && (
+              <button
+                type="button"
+                onClick={onRetrySave}
+                className="inline-flex min-h-[36px] items-center gap-1 rounded border border-red-500/40 bg-red-950/40 px-2.5 py-1 text-xs font-semibold text-red-200 hover:bg-red-900/50"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>Retry</span>
+              </button>
+            )}
+          </div>
+
           <button
             type="submit"
             disabled={isSaving}
             className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-60"
           >
             <PlusCircle className="h-4 w-4" />
-            <span>{isSaving ? 'Saving to Supabase...' : 'Save to Knowledge'}</span>
+            <span>{isSaving ? 'Saving…' : 'Save to Knowledge'}</span>
           </button>
         </div>
       </form>

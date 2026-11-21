@@ -60,6 +60,18 @@ export interface KnowledgeFolder {
   created_at: string;
 }
 
+export type KnowledgeStatus = 'raw' | 'reviewed' | 'trusted';
+export type ThemeMode = 'dark' | 'dim' | 'light';
+export type AccentColor = 'emerald' | 'blue' | 'violet' | 'amber' | 'rose';
+
+export type SaveFeedbackState = 'idle' | 'saving' | 'saved' | 'queued' | 'failed';
+
+export interface SaveFeedbackInfo {
+  state: SaveFeedbackState;
+  message: string;
+  canRetry?: boolean;
+}
+
 export interface KnowledgeEntry {
   id: string;
   user_id: string;
@@ -68,6 +80,9 @@ export interface KnowledgeEntry {
   content: string;
   tags: string[];
   source: string;
+  status?: KnowledgeStatus;
+  source_url?: string | null;
+  extracted_at?: string | null;
   recall_count?: number;
   confidence_score?: number;
   created_at: string;
@@ -81,6 +96,8 @@ export interface UserPreferences {
   preferred_model: string;
   auto_learn_from_chat: boolean;
   prefer_built_in_first?: boolean;
+  theme?: ThemeMode;
+  accent_color?: AccentColor;
   capture_interval_ms: number;
   updated_at: string;
 }

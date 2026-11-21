@@ -3,12 +3,14 @@ import supabaseEdgeHelpersSource from '../../supabase/functions/mantis-brain/hel
 import supabaseEdgeProvidersSource from '../../supabase/functions/mantis-brain/providers.ts?raw';
 import supabaseEdgeRoutesSource from '../../supabase/functions/mantis-brain/routes.ts?raw';
 import supabaseEdgeFunctionSource from '../../supabase/functions/mantis-brain/index.ts?raw';
+import phase6SchemaSqlSource from '../../supabase/schema_phase6.sql?raw';
 
 export const MANTIS_CLOUDFLARE_WORKER_JS = cloudflareWorkerSource;
 export const MANTIS_SUPABASE_EDGE_HELPERS_TS = supabaseEdgeHelpersSource;
 export const MANTIS_SUPABASE_EDGE_PROVIDERS_TS = supabaseEdgeProvidersSource;
 export const MANTIS_SUPABASE_EDGE_ROUTES_TS = supabaseEdgeRoutesSource;
 export const MANTIS_SUPABASE_EDGE_FUNCTION_TS = supabaseEdgeFunctionSource;
+export const MANTIS_PHASE6_SCHEMA_SQL = phase6SchemaSqlSource;
 
 export const MANTIS_PHASE1_SCHEMA_SQL = `-- Mantis Web-First Phase 1 Schema
 -- Run once in Supabase SQL Editor:
