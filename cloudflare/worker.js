@@ -40,10 +40,26 @@ const GROQ_FALLBACK_MODELS = [
 ];
 
 const OPENROUTER_FALLBACK_MODELS = [
-  'qwen/qwen-2.5-coder-32b-instruct:free',
+  'openrouter/free',
+  'qwen/qwen3-coder:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'deepseek/deepseek-chat-v3-0324:free',
+  'google/gemma-3-27b-it:free',
 ];
+
+async function discoverLiveOpenRouterFreeModels() {
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models');
+    if (!res.ok) return [];
+    const payload = await res.json();
+    const freeIds = (payload.data || [])
+      .map((m) => String(m.id || '').trim())
+      .filter((id) => id.endsWith(':free') || id === 'openrouter/free');
+    const preferred = freeIds.filter((id) => /coder|qwen|llama|deepseek|gemma/i.test(id));
+    return Array.from(new Set(['openrouter/free', ...preferred, ...freeIds])).slice(0, 6);
+  } catch {
+    return [];
+  }
+}
 
 function getWorkersAiCandidates(preferredModel) {
   const pref = String(preferredModel || '').toLowerCase();
@@ -268,6 +284,10 @@ async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 14
 
   // 4. OpenRouter Free API
   if ((env.OPENROUTER_API_KEY || '').trim()) {
+    const openRouterHeaders = {
+      'HTTP-Referer': 'https://studiosmobile092-code.github.io/Mantis/',
+      'X-Title': 'Mantis AI',
+    };
     try {
       const res = await tryOpenAiCompatible(
         'https://openrouter.ai/api/v1/chat/completions',
@@ -277,11 +297,31 @@ async function callHuggingFaceChat(env, messages, preferredModel, maxTokens = 14
         messages,
         maxTokens,
         temperature,
-        {'HTTP-Referer': 'https://studiosmobile092-code.github.io/Mantis/', 'X-Title': 'Mantis AI'},
+        openRouterHeaders,
       );
       if (res) return res;
-    } catch (err) {
-      errors.push(err instanceof Error ? err.message : String(err));
+    } catch (firstErr) {
+      const liveModels = await discoverLiveOpenRouterFreeModels();
+      const extraModels = liveModels.filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id));
+      if (extraModels.length > 0) {
+        try {
+          const retryRes = await tryOpenAiCompatible(
+            'https://openrouter.ai/api/v1/chat/completions',
+            env.OPENROUTER_API_KEY,
+            extraModels,
+            'OpenRouter',
+            messages,
+            maxTokens,
+            temperature,
+            openRouterHeaders,
+          );
+          if (retryRes) return retryRes;
+        } catch (retryErr) {
+          errors.push(retryErr instanceof Error ? retryErr.message : String(retryErr));
+        }
+      } else {
+        errors.push(firstErr instanceof Error ? firstErr.message : String(firstErr));
+      }
     }
   }
 

@@ -127,8 +127,12 @@ export function normalizeExternalUrl(raw: string): string {
 }
 
 export function normalizeBrainUrl(raw: string): string {
-  const normalized = normalizeExternalUrl(raw).replace(/\/+$/, '');
+  let normalized = normalizeExternalUrl(raw).replace(/\/+$/, '');
   if (!normalized) return '';
+  normalized = normalized.replace(
+    /\/(health|ai\/verify|ai\/chat|ai\/distill|ai\/suggest|extract-url)$/i,
+    '',
+  );
   try {
     const parsed = new URL(normalized);
     if (
@@ -140,7 +144,7 @@ export function normalizeBrainUrl(raw: string): string {
   } catch {
     // return normalized string so caller validation surfaces URL error
   }
-  return normalized;
+  return normalized.replace(/\/+$/, '');
 }
 
 export function getLocalBrainMode(): 'worker' | 'ollama' {
