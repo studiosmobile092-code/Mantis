@@ -135,3 +135,25 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   3. Open **Knowledge**, filter by **Trusted / Reviewed / Raw**, tap **Mark as Trusted** on any non-trusted entry, and ask a question in **Studio** to confirm Trusted knowledge answers first while Raw entries are excluded.
   4. *(Optional cross-device sync)* Open **Settings → Phase 6 Polish SQL**, copy and run it once in Supabase SQL Editor, then click **Sync** in the top bar.
 
+### Group 2 — URL / Article Extraction Upgrade & Editable Preview (Items 2, 27)
+- **Status**: Completed (Ready for Tablet & Chromebook Verification)
+- **Summary**:
+  - Upgraded `src/lib/aiBrain.ts` (`cleanExtractedArticleText`, `htmlToReadableText`, `extractUrlViaBrain`) to strip web navigation, cookie/share clutter, and inline link noise while preserving headings and fenced code blocks, and to attach `extractedAt` timestamps.
+  - Added `src/components/CaptureReviewModal.tsx` and refactored URL & Paste workflows in `src/components/CapturePanel.tsx` so extracted links and pasted articles ALWAYS open in an editable preview (Title, Content, Folder, Tags, Status `Reviewed`/`Trusted`, `Single Entry` vs `Split Concepts`, `source_url`, and `extracted_at`) before saving.
+
+### Group 3 — OCR Pipeline Speed, ROI Crop & Preview Confirmation (Items 3, 25)
+- **Status**: Completed (Ready for Tablet & Chromebook Verification)
+- **Summary**:
+  - Upgraded `src/lib/ocrCapture.ts` with ROI cropping (`full`, `center_article`, `bottom_captions`), a fast lower-resolution pass first (~900px max edge for screenshots / 960px cap for live screen capture), and an optional **Refine High-Res** second pass with contrast sharpening.
+  - Removed all silent OCR auto-saving from both Screenshot OCR and Live Screen OCR in `src/components/CapturePanel.tsx`. Recognized text now opens in `CaptureReviewModal` with cropped image preview, confidence badge (`Good` / `Fair` / `Low` + `%`), ROI switcher, **Refine High-Res**, and explicit **Save to Knowledge** / **Discard** actions.
+
+### Group 4 — Mic Record → Transcribe → Review → Save Flow (Item 4)
+- **Status**: Completed (Ready for Tablet & Chromebook Verification)
+- **Summary**:
+  - Replaced continuous auto-saving microphone capture in `src/components/CapturePanel.tsx` with a manual **Start Recording** → live meter & interim transcript → **Stop & Review Transcript** flow (preserving trailing interim words).
+  - Pre-fills transcripts cleanly as **`Conversation – [Date]`** inside `CaptureReviewModal` so the user can edit, pick folder/status, and confirm **Save to Knowledge** or **Discard** before anything writes to Supabase.
+- **Verification (Groups 2–4)**:
+  1. **URL Preview & Edit**: Open **Capture → YouTube & Article Links**, paste any article or YouTube link, tap **Extract & Preview**, edit the title/text, confirm **Save to Knowledge**, and verify `source_url` ("Source" link) appears on the saved entry in **Knowledge**. Repeat and tap **Discard** to confirm nothing is saved.
+  2. **OCR Preview & High-Res Refine**: Open **Capture → Mic & Screenshot OCR**, pick a Crop Focus Region, upload or `Ctrl+V` paste a screenshot, inspect the cropped thumbnail and confidence (`Good` / `Fair` / `Low`), optionally tap **Refine High-Res**, then **Save to Knowledge** or **Discard**.
+  3. **Mic Review Flow**: Tap **Start Recording**, speak a sentence, tap **Stop & Review Transcript**, confirm the pre-filled **`Conversation – [Date]`** modal opens with your editable transcript, and save or discard cleanly.
+

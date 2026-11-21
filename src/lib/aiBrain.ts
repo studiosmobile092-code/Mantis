@@ -966,14 +966,141 @@ export async function suggestCodeWithAiBrain(params: {
   };
 }
 
+const READABILITY_NOISE_LINE_RE =
+  /^(skip to (main )?content|menu|navigation|search|sign in|sign up|log in|log out|subscribe|subscribe to our newsletter|cookie policy|accept all( cookies)?|reject all|manage cookies|privacy policy|terms of service|terms of use|share on (twitter|x|linkedin|facebook|reddit|email)|table of contents|back to top|was this page helpful\??|edit this page on github|advertisement|sponsored)$/i;
+
+/**
+ * Strips web chrome, cookie/nav boilerplate, and inline link noise from extracted article text
+ * while keeping headings, lists, and fenced code blocks intact.
+ */
+export function cleanExtractedArticleText(
+  raw: string,
+  fallbackTitle = '',
+): {title: string; text: string} {
+  const normalized = raw.replace(/\r\n/g, '\n').trim();
+  const titleMatch = normalized.match(/^Title:\s*(.+)$/m);
+  const headerTitle = titleMatch ? titleMatch[1].trim() : '';
+
+  const withoutMetaHeaders = normalized
+    .replace(/^Title:.*$/gm, '')
+    .replace(/^URL Source:.*$/gm, '')
+    .replace(/^Published Time:.*$/gm, '')
+    .replace(/^Markdown Content:\s*$/gm, '')
+    .replace(/^Warning:.*$/gm, '')
+    .trim();
+
+  // Split by fenced code blocks so code snippets are never altered
+  const segments = withoutMetaHeaders.split(/(```[\s\S]*?```)/g);
+  const cleanedSegments = segments.map((segment, index) => {
+    if (index % 2 === 1) {
+      return segment.trim();
+    }
+
+    const lines = segment
+      .split('\n')
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return '';
+        if (READABILITY_NOISE_LINE_RE.test(trimmed)) return '';
+        if (/^!\[[^\]]{0,24}\]\([^)]+\)$/.test(trimmed)) return '';
+        if (/^\[\]\([^)]+\)$/.test(trimmed)) return '';
+        if (/^[-*_]{3,}$/.test(trimmed)) return '';
+        // Strip distracting inline URL targets outside code blocks while keeping link labels
+        return trimmed.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_m, label: string) =>
+          label.trim(),
+        );
+      })
+      .filter((line, idx, arr) => {
+        if (line !== '') return true;
+        // Collapse consecutive blank lines
+        return idx > 0 && arr[idx - 1] !== '';
+      });
+
+    return lines.join('\n').trim();
+  });
+
+  const body = cleanedSegments
+    .filter(Boolean)
+    .join('\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, 35000);
+
+  const headingMatch = body.match(/^#{1,2}\s+(.+)$/m);
+  const resolvedTitle =
+    headerTitle && !/^(just a moment|404|access denied)/i.test(headerTitle)
+      ? headerTitle
+      : headingMatch?.[1]?.trim() || fallbackTitle;
+
+  return {
+    title: resolvedTitle,
+    text: body,
+  };
+}
+
+function htmlToReadableText(html: string, url: string): {title: string; text: string} | null {
+  try {
+    if (typeof DOMParser === 'undefined') return null;
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const title = doc.querySelector('title')?.textContent?.trim() || url;
+
+    const removeSelectors = [
+      'script',
+      'style',
+      'noscript',
+      'svg',
+      'nav',
+      'header',
+      'footer',
+      'aside',
+      '[role="navigation"]',
+      '[role="banner"]',
+      '[role="contentinfo"]',
+    ];
+    for (const sel of removeSelectors) {
+      doc.querySelectorAll(sel).forEach((el) => el.remove());
+    }
+
+    const mainEl = doc.querySelector('article, main, [role="main"]') || doc.body;
+    if (!mainEl) return null;
+
+    const blocks: string[] = [];
+    mainEl.querySelectorAll('h1, h2, h3, h4, p, li, pre').forEach((node) => {
+      const tag = node.tagName.toLowerCase();
+      const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length < 3 || READABILITY_NOISE_LINE_RE.test(text)) return;
+      if (tag === 'h1') blocks.push(`# ${text}`);
+      else if (tag === 'h2') blocks.push(`## ${text}`);
+      else if (tag === 'h3' || tag === 'h4') blocks.push(`### ${text}`);
+      else if (tag === 'li') blocks.push(`- ${text}`);
+      else if (tag === 'pre') blocks.push(`\`\`\`\n${(node.textContent || '').trim()}\n\`\`\``);
+      else blocks.push(text);
+    });
+
+    const combined = blocks.join('\n\n').trim().slice(0, 35000);
+    if (combined.length < 90) return null;
+    return {title, text: combined};
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Browser fallback reader when neither Worker nor Backup Edge Function is available yet:
- * Tries CORS-friendly Markdown reader (r.jina.ai) for web articles.
+ * Tries CORS-friendly Markdown reader (r.jina.ai) and direct readable HTML/plain-text fetch.
  */
 async function extractUrlClientFallback(
   url: string,
-): Promise<{kind: 'youtube' | 'article'; url: string; title: string; text: string} | null> {
+): Promise<{
+  kind: 'youtube' | 'article';
+  url: string;
+  title: string;
+  text: string;
+  extractedAt: string;
+} | null> {
   const isYt = /youtube\.com|youtu\.be/i.test(url);
+  const extractedAt = new Date().toISOString();
+
   try {
     const readerRes = await fetchWithTimeout(
       `https://r.jina.ai/${url}`,
@@ -983,20 +1110,14 @@ async function extractUrlClientFallback(
     if (readerRes.ok) {
       const raw = await readerRes.text();
       if (raw.trim().length >= 90) {
-        const titleMatch = raw.match(/^Title:\s*(.+)$/m);
-        const title = titleMatch ? titleMatch[1].trim() : url;
-        const cleaned = raw
-          .replace(/^Title:.*$/m, '')
-          .replace(/^URL Source:.*$/m, '')
-          .replace(/^Markdown Content:\s*$/m, '')
-          .trim()
-          .slice(0, 35000);
-        if (cleaned.length >= 90) {
+        const cleaned = cleanExtractedArticleText(raw, url);
+        if (cleaned.text.length >= 90) {
           return {
             kind: isYt ? 'youtube' : 'article',
             url,
-            title,
-            text: cleaned,
+            title: cleaned.title || url,
+            text: cleaned.text,
+            extractedAt,
           };
         }
       }
@@ -1004,6 +1125,42 @@ async function extractUrlClientFallback(
   } catch {
     // ignore CORS or network errors on fallback reader
   }
+
+  if (!isYt) {
+    try {
+      const directRes = await fetchWithTimeout(url, {}, 9000);
+      if (directRes.ok) {
+        const contentType = (directRes.headers.get('content-type') || '').toLowerCase();
+        const body = await directRes.text();
+        if (contentType.includes('text/html')) {
+          const parsed = htmlToReadableText(body, url);
+          if (parsed) {
+            return {
+              kind: 'article',
+              url,
+              title: parsed.title,
+              text: parsed.text,
+              extractedAt,
+            };
+          }
+        } else if (body.trim().length >= 90) {
+          const cleaned = cleanExtractedArticleText(body, url);
+          if (cleaned.text.length >= 90) {
+            return {
+              kind: 'article',
+              url,
+              title: cleaned.title || url,
+              text: cleaned.text,
+              extractedAt,
+            };
+          }
+        }
+      }
+    } catch {
+      // ignore CORS restrictions on direct fetch
+    }
+  }
+
   return null;
 }
 
@@ -1012,8 +1169,15 @@ export async function extractUrlViaBrain(params: {
   backupBrainUrl?: string;
   accessToken: string;
   url: string;
-}): Promise<{kind: 'youtube' | 'article'; url: string; title: string; text: string}> {
+}): Promise<{
+  kind: 'youtube' | 'article';
+  url: string;
+  title: string;
+  text: string;
+  extractedAt: string;
+}> {
   const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const extractedAt = new Date().toISOString();
 
   if (candidates.length > 0) {
     try {
@@ -1033,11 +1197,23 @@ export async function extractUrlViaBrain(params: {
       });
 
       if (payload.text) {
+        const kind = payload.kind || (/youtube\.com|youtu\.be/i.test(params.url) ? 'youtube' : 'article');
+        if (kind === 'article') {
+          const cleaned = cleanExtractedArticleText(payload.text, payload.title || params.url);
+          return {
+            kind,
+            url: payload.url || params.url,
+            title: cleaned.title || payload.title || params.url,
+            text: cleaned.text || payload.text,
+            extractedAt,
+          };
+        }
         return {
-          kind: payload.kind || 'article',
+          kind,
           url: payload.url || params.url,
           title: payload.title || params.url,
-          text: payload.text,
+          text: payload.text.trim(),
+          extractedAt,
         };
       }
     } catch (backendErr) {

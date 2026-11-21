@@ -2,6 +2,7 @@ import {
   Camera,
   CheckCircle2,
   ClipboardPaste,
+  Eye,
   FileText,
   Globe,
   Link2,
@@ -9,7 +10,6 @@ import {
   MicOff,
   Monitor,
   Play,
-  Sparkles,
   Square,
   Trash2,
 } from 'lucide-react';
@@ -29,15 +29,29 @@ import {
   type CaptureZone,
 } from '../lib/ocrCapture';
 import {distillTextLocally, mergeIncrementalCaption} from '../lib/textDistiller';
+import type {KnowledgeFolder, KnowledgeStatus} from '../types/mantis';
+import {CaptureReviewModal, type CaptureReviewDraft} from './CaptureReviewModal';
 
 interface CapturePanelProps {
   brainUrl: string;
   backupBrainUrl: string;
   brainModel: string;
   accessToken: string;
+  folders: KnowledgeFolder[];
+  onSaveEntry: (payload: {
+    folderId: string | null;
+    title: string;
+    content: string;
+    tags: string[];
+    source: string;
+    status?: KnowledgeStatus;
+    sourceUrl?: string | null;
+    extractedAt?: string | null;
+  }) => Promise<boolean>;
   onSaveCapturedEntries: (
     items: DistilledKnowledgeItem[],
     sourceType: string,
+    meta?: {status?: KnowledgeStatus; sourceUrl?: string | null; extractedAt?: string | null},
   ) => Promise<number>;
   onOpenKnowledge: () => void;
 }
@@ -78,21 +92,49 @@ interface LinkIngestRecord {
   createdAt: string;
 }
 
+function formatConversationTitle(date = new Date()): string {
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date);
+  return `Conversation – ${formatted}`;
+}
+
+function parseTagsText(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(',')
+        .map((t) => t.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function resolveDefaultCaptureFolderId(folders: KnowledgeFolder[]): string | null {
+  const captured = folders.find(
+    (f) => f.name.toLowerCase() === 'captured learning',
+  );
+  return captured?.id || folders[0]?.id || null;
+}
+
 export function CapturePanel({
   brainUrl,
   backupBrainUrl,
   brainModel,
   accessToken,
+  folders,
+  onSaveEntry,
   onSaveCapturedEntries,
   onOpenKnowledge,
 }: CapturePanelProps) {
   const hasDisplayApi = supportsDisplayCapture();
   const hasMicApi = supportsSpeechRecognition();
 
-  // Default to URL / Text or Live Mic so both Tablet & Chromebook work immediately on open
   const [activeTab, setActiveTab] = useState<CaptureTab>('url_text');
 
-  // Shared rolling capture buffer
+  // Shared capture & buffer state (never auto-saved without user confirmation)
   const [sourceTitle, setSourceTitle] = useState('Ingested Learning Session');
   const [capturedLines, setCapturedLines] = useState<string[]>([]);
   const [framesScanned, setFramesScanned] = useState(0);
@@ -100,13 +142,17 @@ export function CapturePanel({
   const [notesLearned, setNotesLearned] = useState(0);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isDistilling, setIsDistilling] = useState(false);
+
+  // Review & Confirm modal state (shared by URL, Paste, OCR, and Mic)
+  const [reviewDraft, setReviewDraft] = useState<CaptureReviewDraft | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [isSavingReview, setIsSavingReview] = useState(false);
+  const [isRefiningOcr, setIsRefiningOcr] = useState(false);
 
   // Live Screen OCR state
   const [isRecordingScreen, setIsRecordingScreen] = useState(false);
   const [captureZone, setCaptureZone] = useState<CaptureZone>('bottom_captions');
   const [scanIntervalMs, setScanIntervalMs] = useState(2000);
-  const [autoLearnEnabled, setAutoLearnEnabled] = useState(true);
   const [lastConfidence, setLastConfidence] = useState<number | null>(null);
   const [cropPreviewUrl, setCropPreviewUrl] = useState<string | null>(null);
 
@@ -117,9 +163,11 @@ export function CapturePanel({
   const [extractStepText, setExtractStepText] = useState<string | null>(null);
   const [linkHistory, setLinkHistory] = useState<LinkIngestRecord[]>([]);
 
-  // Image / Live Mic state
+  // Image OCR & Live Mic state
+  const [imageOcrZone, setImageOcrZone] = useState<CaptureZone>('full');
   const [isOcrImageBusy, setIsOcrImageBusy] = useState(false);
   const [isListeningMic, setIsListeningMic] = useState(false);
+  const [micLines, setMicLines] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [micLevel, setMicLevel] = useState(0);
 
@@ -135,9 +183,10 @@ export function CapturePanel({
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioMeterRafRef = useRef<number | null>(null);
+  const micLinesRef = useRef<string[]>([]);
+  const latestInterimRef = useRef('');
 
   const linesRef = useRef<string[]>([]);
-  const unlearnedLineStartRef = useRef(0);
 
   useEffect(() => {
     linesRef.current = capturedLines;
@@ -197,6 +246,7 @@ export function CapturePanel({
     }
     stopAudioMeter();
     setInterimTranscript('');
+    latestInterimRef.current = '';
     setIsListeningMic(false);
   };
 
@@ -209,57 +259,182 @@ export function CapturePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function distillAndStoreLines(
-    linesToLearn: string[],
-    title: string,
-    sourceType: string,
-  ): Promise<number> {
-    const rawText = linesToLearn.join('\n').trim();
-    if (!rawText) return 0;
+  async function handleConfirmReviewSave() {
+    if (!reviewDraft) return;
+    const cleanTitle = reviewDraft.title.trim();
+    const cleanContent = reviewDraft.content.trim();
+    if (!cleanTitle || !cleanContent) {
+      setReviewError('Provide both a title and content before saving.');
+      return;
+    }
 
-    setIsDistilling(true);
+    setIsSavingReview(true);
+    setReviewError(null);
     setErrorMessage(null);
-    try {
-      let items: DistilledKnowledgeItem[] = [];
-      let summary = '';
 
-      if ((brainUrl.trim() || backupBrainUrl.trim()) && accessToken) {
-        try {
-          const distilled = await distillWithAiBrain({
-            brainUrl,
-            backupBrainUrl,
-            accessToken,
-            model: brainModel,
-            text: rawText,
-            sourceTitle: title,
-            sourceType,
-          });
-          items = distilled.entries;
-          summary = distilled.summary;
-        } catch {
-          const local = distillTextLocally(rawText, title, sourceType);
-          items = local.entries;
-          summary = local.summary;
+    try {
+      const tags = parseTagsText(reviewDraft.tagsText);
+      let savedCount = 0;
+
+      if (reviewDraft.saveMode === 'single') {
+        const ok = await onSaveEntry({
+          folderId: reviewDraft.folderId,
+          title: cleanTitle,
+          content: cleanContent,
+          tags: tags.length > 0 ? tags : [reviewDraft.sourceType.replace(/_/g, '-')],
+          source: reviewDraft.sourceType,
+          status: reviewDraft.status,
+          sourceUrl: reviewDraft.sourceUrl ?? null,
+          extractedAt: reviewDraft.extractedAt ?? null,
+        });
+        if (!ok) {
+          setReviewError(
+            'Could not save entry right now. Check the error banner or your connection and try again.',
+          );
+          return;
         }
+        savedCount = 1;
       } else {
-        const local = distillTextLocally(rawText, title, sourceType);
-        items = local.entries;
-        summary = local.summary;
+        let items: DistilledKnowledgeItem[] = [];
+        if ((brainUrl.trim() || backupBrainUrl.trim()) && accessToken) {
+          try {
+            const distilled = await distillWithAiBrain({
+              brainUrl,
+              backupBrainUrl,
+              accessToken,
+              model: brainModel,
+              text: cleanContent,
+              sourceTitle: cleanTitle,
+              sourceType: reviewDraft.sourceType,
+            });
+            items = distilled.entries;
+          } catch {
+            items = distillTextLocally(cleanContent, cleanTitle, reviewDraft.sourceType).entries;
+          }
+        } else {
+          items = distillTextLocally(cleanContent, cleanTitle, reviewDraft.sourceType).entries;
+        }
+
+        if (items.length === 0) {
+          setReviewError(
+            'No split concepts could be extracted — switch Storage Format to Single Entry and save directly.',
+          );
+          return;
+        }
+
+        const chosenFolderName = folders.find((f) => f.id === reviewDraft.folderId)?.name;
+        const preparedItems = items.map((item) => ({
+          ...item,
+          folder: chosenFolderName || item.folder,
+          tags: Array.from(new Set([...item.tags, ...tags])),
+        }));
+
+        savedCount = await onSaveCapturedEntries(preparedItems, reviewDraft.sourceType, {
+          status: reviewDraft.status,
+          sourceUrl: reviewDraft.sourceUrl ?? null,
+          extractedAt: reviewDraft.extractedAt ?? null,
+        });
       }
 
-      if (items.length === 0) return 0;
-      const savedCount = await onSaveCapturedEntries(items, sourceType);
-      setNotesLearned((prev) => prev + savedCount);
-      setStatusMessage(
-        savedCount > 0
-          ? `Stored ${savedCount} Knowledge ${savedCount === 1 ? 'entry' : 'entries'} from ${sourceType}${
-              summary ? ` — ${summary}` : ''
-            }`
-          : 'Entries matched existing knowledge (no duplicate rows added).',
-      );
-      return savedCount;
+      if (savedCount > 0) {
+        setNotesLearned((prev) => prev + savedCount);
+        setStatusMessage(
+          `Saved ${savedCount} ${reviewDraft.status} Knowledge ${
+            savedCount === 1 ? 'entry' : 'entries'
+          }: "${cleanTitle}"`,
+        );
+
+        if (reviewDraft.kind === 'url' && reviewDraft.sourceUrl) {
+          const urlKind =
+            reviewDraft.sourceType === 'youtube_transcript' ? 'youtube' : 'article';
+          setLinkHistory((prev) => [
+            {
+              id: `${Date.now()}`,
+              url: reviewDraft.sourceUrl || '',
+              title: cleanTitle,
+              kind: urlKind,
+              savedCount,
+              createdAt: new Date().toISOString(),
+            },
+            ...prev.slice(0, 5),
+          ]);
+          setTargetUrl('');
+        } else if (reviewDraft.kind === 'paste') {
+          setPastedText('');
+        } else if (reviewDraft.kind === 'mic') {
+          micLinesRef.current = [];
+          setMicLines([]);
+        }
+      } else {
+        setStatusMessage('Entries matched existing knowledge (no duplicate rows added).');
+      }
+
+      setReviewDraft(null);
+      setReviewError(null);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'Failed to save reviewed capture.');
     } finally {
-      setIsDistilling(false);
+      setIsSavingReview(false);
+    }
+  }
+
+  function handleDiscardReview() {
+    if (reviewDraft?.kind === 'mic') {
+      micLinesRef.current = [];
+      setMicLines([]);
+    }
+    setReviewDraft(null);
+    setReviewError(null);
+    setStatusMessage('Capture discarded — nothing was saved to Knowledge.');
+  }
+
+  async function handleRefineOcrHighRes(zone: CaptureZone) {
+    if (!reviewDraft?.sourceFiles || reviewDraft.sourceFiles.length === 0) return;
+    setIsRefiningOcr(true);
+    setReviewError(null);
+
+    try {
+      let mergedLines: string[] = [];
+      let confTotal = 0;
+      let firstPreview: string | null = reviewDraft.previewDataUrl || null;
+
+      for (let i = 0; i < reviewDraft.sourceFiles.length; i += 1) {
+        const res = await recognizeImageBlob(reviewDraft.sourceFiles[i], {
+          zone,
+          mode: 'high_res',
+        });
+        if (i === 0 && res.previewDataUrl) {
+          firstPreview = res.previewDataUrl;
+        }
+        confTotal += res.confidence;
+        if (res.text.trim()) {
+          mergedLines = mergeIncrementalCaption(mergedLines, res.text).mergedLines;
+        }
+      }
+
+      const avgConf = Math.round(confTotal / reviewDraft.sourceFiles.length);
+      const refinedText = mergedLines.join('\n').trim();
+
+      setLastConfidence(avgConf);
+      setReviewDraft((prev) =>
+        prev
+          ? {
+              ...prev,
+              content: refinedText || prev.content,
+              previewDataUrl: firstPreview,
+              ocrConfidence: avgConf,
+              ocrZone: zone,
+              ocrMode: 'high_res',
+              ocrNotice: refinedText
+                ? 'High-resolution OCR refinement complete. Verify text below before saving.'
+                : 'No clear text detected at high resolution — you can still type or edit notes manually below.',
+            }
+          : null,
+      );
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'High-res OCR refinement failed.');
+    } finally {
+      setIsRefiningOcr(false);
     }
   }
 
@@ -287,13 +462,6 @@ export function CapturePanel({
         if (addedText) {
           linesRef.current = mergedLines;
           setCapturedLines(mergedLines);
-
-          const pendingCount = mergedLines.length - unlearnedLineStartRef.current;
-          if (autoLearnEnabled && pendingCount >= 5) {
-            const batch = mergedLines.slice(unlearnedLineStartRef.current);
-            unlearnedLineStartRef.current = mergedLines.length;
-            void distillAndStoreLines(batch, sourceTitle, 'screen_ocr');
-          }
         }
       }
     } catch (err) {
@@ -341,7 +509,7 @@ export function CapturePanel({
             : captureZone === 'center_article'
               ? 'Center Article'
               : 'Full Screen'
-        }). Diff-gated OCR active...`,
+        }). Lines collect in your review buffer without auto-saving.`,
       );
 
       window.setTimeout(() => void scanSingleVideoFrame(), 650);
@@ -356,23 +524,43 @@ export function CapturePanel({
     }
   }
 
-  async function handleStopAndLearn() {
+  function handleStopAndReviewScreen() {
     stopScreenCapture();
-    const unlearned = linesRef.current.slice(unlearnedLineStartRef.current);
-    if (unlearned.length > 0) {
-      unlearnedLineStartRef.current = linesRef.current.length;
-      await distillAndStoreLines(unlearned, sourceTitle, 'screen_ocr');
-    } else {
-      setStatusMessage('Screen recording stopped. All captured lines are already saved.');
+    const collected = linesRef.current.join('\n').trim();
+    if (!collected) {
+      setStatusMessage('Screen recording stopped — no readable text lines were captured.');
+      return;
     }
+    setReviewDraft({
+      kind: 'ocr',
+      sourceType: 'screen_ocr',
+      title: sourceTitle.trim() || `Screen OCR – ${new Date().toLocaleDateString()}`,
+      content: collected,
+      folderId: resolveDefaultCaptureFolderId(folders),
+      tagsText: 'screen, ocr',
+      status: 'reviewed',
+      saveMode: collected.length > 2200 ? 'distill' : 'single',
+      previewDataUrl: cropPreviewUrl,
+      ocrConfidence: lastConfidence,
+      ocrZone: captureZone,
+      ocrMode: 'fast',
+      ocrNotice: 'Review and clean up captured screen text before saving to Knowledge.',
+    });
   }
 
-  async function handleLearnAllBuffer() {
-    const all = linesRef.current.slice(unlearnedLineStartRef.current);
-    const target = all.length > 0 ? all : linesRef.current;
-    if (target.length === 0) return;
-    unlearnedLineStartRef.current = linesRef.current.length;
-    await distillAndStoreLines(target, sourceTitle, 'capture_buffer');
+  function handleOpenBufferReview() {
+    const collected = linesRef.current.join('\n').trim();
+    if (!collected) return;
+    setReviewDraft({
+      kind: 'paste',
+      sourceType: 'capture_buffer',
+      title: sourceTitle.trim() || 'Captured Buffer Note',
+      content: collected,
+      folderId: resolveDefaultCaptureFolderId(folders),
+      tagsText: 'captured, notes',
+      status: 'reviewed',
+      saveMode: collected.length > 2200 ? 'distill' : 'single',
+    });
   }
 
   async function handleExtractUrlSubmit(event: FormEvent) {
@@ -386,7 +574,7 @@ export function CapturePanel({
     setErrorMessage(null);
     setStatusMessage(null);
     setIsExtractingUrl(true);
-    setExtractStepText('1/3 Fetching source transcript or article body...');
+    setExtractStepText('1/2 Fetching clean article body or video transcript...');
 
     try {
       const extracted = await extractUrlViaBrain({
@@ -396,33 +584,21 @@ export function CapturePanel({
         url: clean,
       });
 
-      setSourceTitle(extracted.title);
-      setExtractStepText('2/3 Deduplicating and mining concepts...');
-      const {mergedLines} = mergeIncrementalCaption(linesRef.current, extracted.text);
-      linesRef.current = mergedLines;
-      setCapturedLines(mergedLines);
-      unlearnedLineStartRef.current = mergedLines.length;
-
+      setExtractStepText('2/2 Preparing editable preview...');
       const sourceType = extracted.kind === 'youtube' ? 'youtube_transcript' : 'article_ingest';
-      setExtractStepText('3/3 Saving distilled knowledge to Supabase...');
-      const savedCount = await distillAndStoreLines(
-        extracted.text.split('\n'),
-        extracted.title,
-        sourceType,
-      );
 
-      setLinkHistory((prev) => [
-        {
-          id: `${Date.now()}`,
-          url: clean,
-          title: extracted.title,
-          kind: extracted.kind,
-          savedCount,
-          createdAt: new Date().toISOString(),
-        },
-        ...prev.slice(0, 5),
-      ]);
-      setTargetUrl('');
+      setReviewDraft({
+        kind: 'url',
+        sourceType,
+        title: extracted.title,
+        content: extracted.text,
+        folderId: resolveDefaultCaptureFolderId(folders),
+        tagsText: extracted.kind === 'youtube' ? 'youtube, transcript' : 'article, web',
+        status: 'reviewed',
+        saveMode: extracted.text.length > 2600 ? 'distill' : 'single',
+        sourceUrl: extracted.url,
+        extractedAt: extracted.extractedAt,
+      });
       setExtractStepText(null);
     } catch (err) {
       setExtractStepText(null);
@@ -432,18 +608,27 @@ export function CapturePanel({
     }
   }
 
-  async function handleLearnPastedText(event: FormEvent) {
+  function handleOpenPastedReview(event: FormEvent) {
     event.preventDefault();
     const clean = pastedText.trim();
     if (!clean) return;
     setErrorMessage(null);
-    const title = sourceTitle.trim() || 'Pasted Article / Transcript';
-    const {mergedLines} = mergeIncrementalCaption(linesRef.current, clean);
-    linesRef.current = mergedLines;
-    setCapturedLines(mergedLines);
-    unlearnedLineStartRef.current = mergedLines.length;
-    await distillAndStoreLines(clean.split('\n'), title, 'article_ingest');
-    setPastedText('');
+    const defaultTitle =
+      sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
+        ? sourceTitle.trim()
+        : 'Pasted Article / Notes';
+
+    setReviewDraft({
+      kind: 'paste',
+      sourceType: 'article_ingest',
+      title: defaultTitle,
+      content: clean,
+      folderId: resolveDefaultCaptureFolderId(folders),
+      tagsText: 'article, notes',
+      status: 'reviewed',
+      saveMode: clean.length > 2600 ? 'distill' : 'single',
+      extractedAt: new Date().toISOString(),
+    });
   }
 
   async function processImageFiles(files: FileList | File[]) {
@@ -451,33 +636,63 @@ export function CapturePanel({
     if (list.length === 0) return;
     setIsOcrImageBusy(true);
     setErrorMessage(null);
-    setStatusMessage(`Running on-device OCR across ${list.length} image(s)...`);
+    setStatusMessage(`Running fast low-res OCR across ${list.length} image(s)...`);
 
     try {
-      let totalNewLines = 0;
-      for (const file of list) {
-        const {text, confidence} = await recognizeImageBlob(file);
+      let mergedLines: string[] = [];
+      let confTotal = 0;
+      let firstPreview: string | null = null;
+
+      for (let i = 0; i < list.length; i += 1) {
+        const res = await recognizeImageBlob(list[i], {
+          zone: imageOcrZone,
+          mode: 'fast',
+        });
         setFramesScanned((n) => n + 1);
-        setLastConfidence(confidence);
-        const {mergedLines, addedText} = mergeIncrementalCaption(linesRef.current, text);
-        if (addedText) {
-          linesRef.current = mergedLines;
-          setCapturedLines(mergedLines);
-          totalNewLines += addedText.split('\n').length;
+        confTotal += res.confidence;
+        if (i === 0) {
+          firstPreview = res.previewDataUrl;
+        }
+        if (res.text.trim()) {
+          mergedLines = mergeIncrementalCaption(mergedLines, res.text).mergedLines;
         }
       }
 
-      if (totalNewLines > 0) {
-        const batch = linesRef.current.slice(unlearnedLineStartRef.current);
-        unlearnedLineStartRef.current = linesRef.current.length;
-        await distillAndStoreLines(
-          batch,
-          sourceTitle || list[0].name || 'Screenshot OCR',
-          'screenshot_ocr',
-        );
-      } else {
-        setStatusMessage('OCR finished, but no clear new readable words were detected.');
+      const avgConfidence = Math.round(confTotal / list.length);
+      setLastConfidence(avgConfidence);
+      if (firstPreview) {
+        setCropPreviewUrl(firstPreview);
       }
+
+      const recognizedText = mergedLines.join('\n').trim();
+      const baseTitle =
+        sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
+          ? sourceTitle.trim()
+          : list[0]?.name
+            ? `Screenshot – ${list[0].name.replace(/\.[^.]+$/, '')}`
+            : 'Screenshot OCR Capture';
+
+      setStatusMessage(null);
+      setReviewDraft({
+        kind: 'ocr',
+        sourceType: 'screenshot_ocr',
+        title: baseTitle,
+        content: recognizedText,
+        folderId: resolveDefaultCaptureFolderId(folders),
+        tagsText: 'screenshot, ocr',
+        status: 'reviewed',
+        saveMode: 'single',
+        previewDataUrl: firstPreview,
+        ocrConfidence: avgConfidence,
+        ocrZone: imageOcrZone,
+        ocrMode: 'fast',
+        sourceFiles: list,
+        ocrNotice: recognizedText
+          ? avgConfidence < 60
+            ? 'OCR confidence is low on the fast pass. Try switching crop region or tapping Refine High-Res before saving.'
+            : null
+          : 'No clear words detected on the fast pass. Try switching OCR Region or tapping Refine High-Res.',
+      });
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Image OCR failed.');
     } finally {
@@ -567,23 +782,16 @@ export function CapturePanel({
         }
       }
 
+      latestInterimRef.current = liveInterim;
       setInterimTranscript(liveInterim);
 
       if (finals.length > 0) {
-        const {mergedLines, addedText} = mergeIncrementalCaption(
-          linesRef.current,
+        const {mergedLines} = mergeIncrementalCaption(
+          micLinesRef.current,
           finals.join('\n'),
         );
-        if (addedText) {
-          linesRef.current = mergedLines;
-          setCapturedLines(mergedLines);
-          const pending = mergedLines.length - unlearnedLineStartRef.current;
-          if (autoLearnEnabled && pending >= 4) {
-            const batch = mergedLines.slice(unlearnedLineStartRef.current);
-            unlearnedLineStartRef.current = mergedLines.length;
-            void distillAndStoreLines(batch, sourceTitle || 'Live Audio Capture', 'mic_transcript');
-          }
-        }
+        micLinesRef.current = mergedLines;
+        setMicLines(mergedLines);
       }
     };
 
@@ -594,7 +802,9 @@ export function CapturePanel({
         return;
       }
       if (errCode === 'not-allowed' || errCode === 'service-not-allowed') {
-        setErrorMessage('Microphone access was denied by browser settings. Allow microphone access and retry.');
+        setErrorMessage(
+          'Microphone access was denied by browser settings. Allow microphone access and retry.',
+        );
         stopMicCapture();
         return;
       }
@@ -622,17 +832,44 @@ export function CapturePanel({
     }
   }
 
-  async function handleToggleMic() {
+  function handleToggleMic() {
     setErrorMessage(null);
     if (isListeningMic) {
-      stopMicCapture();
-      const unlearned = linesRef.current.slice(unlearnedLineStartRef.current);
-      if (unlearned.length > 0) {
-        unlearnedLineStartRef.current = linesRef.current.length;
-        await distillAndStoreLines(unlearned, sourceTitle || 'Voice / Audio Capture', 'mic_transcript');
-      } else {
-        setStatusMessage('Mic stopped. Buffer saved.');
+      // Capture any trailing interim words before stopping
+      const trailing = latestInterimRef.current.trim();
+      let combinedLines = [...micLinesRef.current];
+      if (trailing) {
+        combinedLines = mergeIncrementalCaption(combinedLines, trailing).mergedLines;
       }
+
+      stopMicCapture();
+      const transcriptText = combinedLines.join('\n').trim();
+      if (!transcriptText) {
+        setStatusMessage(
+          'Recording stopped — no speech detected. Tap Start Recording to try again.',
+        );
+        micLinesRef.current = [];
+        setMicLines([]);
+        return;
+      }
+
+      const defaultTitle =
+        sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
+          ? `${formatConversationTitle()} · ${sourceTitle.trim()}`
+          : formatConversationTitle();
+
+      setStatusMessage(null);
+      setReviewDraft({
+        kind: 'mic',
+        sourceType: 'mic_transcript',
+        title: defaultTitle,
+        content: transcriptText,
+        folderId: resolveDefaultCaptureFolderId(folders),
+        tagsText: 'voice, conversation',
+        status: 'reviewed',
+        saveMode: transcriptText.length > 2800 ? 'distill' : 'single',
+        extractedAt: new Date().toISOString(),
+      });
       return;
     }
 
@@ -641,9 +878,16 @@ export function CapturePanel({
       return;
     }
 
+    micLinesRef.current = [];
+    setMicLines([]);
+    latestInterimRef.current = '';
+    setInterimTranscript('');
+
     isMicWantedRef.current = true;
     setIsListeningMic(true);
-    setStatusMessage('Continuous live listener active — speak or play nearby audio; auto-saves continuously.');
+    setStatusMessage(
+      'Recording audio — transcript builds live below and opens for review when you tap Stop.',
+    );
     void startWebAudioMeter();
     spawnRecognitionSession();
   }
@@ -653,10 +897,10 @@ export function CapturePanel({
       <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-slate-100">
-            Ingest &amp; Live Capture Lab
+            Ingest &amp; Review Capture Lab
           </h1>
           <p className="text-sm text-slate-400">
-            Ingest YouTube videos, web articles, continuous mic speech, or screen OCR into Supabase Knowledge.
+            Extract links, run fast OCR on screenshots, or record conversations — always review and edit before saving.
           </p>
         </div>
 
@@ -669,9 +913,9 @@ export function CapturePanel({
             </>
           )}
           <span aria-hidden="true">·</span>
-          <span>{capturedLines.length} lines</span>
+          <span>{capturedLines.length} buffer lines</span>
           <span aria-hidden="true">·</span>
-          <span className="text-emerald-400">{notesLearned} learned</span>
+          <span className="text-emerald-400">{notesLearned} saved</span>
         </div>
       </div>
 
@@ -680,7 +924,7 @@ export function CapturePanel({
         <button
           type="button"
           onClick={() => setActiveTab('url_text')}
-          className={`inline-flex min-h-[42px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
+          className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'url_text'
               ? 'bg-slate-800 text-slate-100'
               : 'text-slate-400 hover:text-slate-200'
@@ -693,20 +937,20 @@ export function CapturePanel({
         <button
           type="button"
           onClick={() => setActiveTab('image_mic')}
-          className={`inline-flex min-h-[42px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
+          className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'image_mic'
               ? 'bg-slate-800 text-slate-100'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <Mic className="h-4 w-4" />
-          <span>Live Mic &amp; Screenshots</span>
+          <span>Mic &amp; Screenshot OCR</span>
         </button>
 
         <button
           type="button"
           onClick={() => setActiveTab('screen')}
-          className={`inline-flex min-h-[42px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
+          className={`inline-flex min-h-[44px] items-center gap-2 rounded-md px-3.5 py-2 text-xs font-medium transition-colors ${
             activeTab === 'screen'
               ? 'bg-slate-800 text-slate-100'
               : 'text-slate-400 hover:text-slate-200'
@@ -717,11 +961,11 @@ export function CapturePanel({
         </button>
       </div>
 
-      {/* Shared Session Title */}
-      <div className="grid gap-3 rounded-lg border border-slate-800 bg-[#0F172A] p-4 sm:grid-cols-[1fr_auto]">
+      {/* Shared Session Title Prefix */}
+      <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
         <div className="space-y-1">
           <label htmlFor="capture-topic" className="block text-xs font-medium text-slate-300">
-            Knowledge Title Prefix
+            Optional Session Label (editable again in Preview before saving)
           </label>
           <input
             id="capture-topic"
@@ -732,16 +976,6 @@ export function CapturePanel({
             className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
           />
         </div>
-
-        <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 self-end rounded-md border border-slate-800 bg-[#0B1120] px-3.5 py-2 text-xs text-slate-200">
-          <input
-            type="checkbox"
-            checked={autoLearnEnabled}
-            onChange={(e) => setAutoLearnEnabled(e.target.checked)}
-            className="h-4 w-4 accent-emerald-500"
-          />
-          <span>Auto-Distill &amp; Save Live</span>
-        </label>
       </div>
 
       {/* Tab 1: YouTube / Article URL + Bulk Paste */}
@@ -751,14 +985,14 @@ export function CapturePanel({
             onSubmit={handleExtractUrlSubmit}
             className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
                 <Link2 className="h-4 w-4 text-emerald-400" />
-                <span>Read &amp; Learn from YouTube or Web Article URL</span>
+                <span>Extract &amp; Preview from YouTube or Web Article URL</span>
               </div>
               {!(brainUrl.trim() || backupBrainUrl.trim()) && (
                 <span className="font-mono text-[11px] text-amber-300">
-                  Browser reader fallback (add Cloud Backup in Settings for YouTube captions)
+                  Browser readability fallback (add Cloud Backup in Settings for YouTube captions)
                 </span>
               )}
             </div>
@@ -777,11 +1011,11 @@ export function CapturePanel({
               />
               <button
                 type="submit"
-                disabled={isExtractingUrl || isDistilling}
+                disabled={isExtractingUrl}
                 className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
               >
-                <Sparkles className="h-4 w-4" />
-                <span>{isExtractingUrl ? 'Extracting...' : 'Read & Learn Link'}</span>
+                <Eye className="h-4 w-4" />
+                <span>{isExtractingUrl ? 'Extracting…' : 'Extract & Preview'}</span>
               </button>
             </div>
 
@@ -793,7 +1027,7 @@ export function CapturePanel({
 
             {linkHistory.length > 0 && (
               <div className="space-y-1.5 border-t border-slate-800 pt-3">
-                <div className="text-[11px] font-medium text-slate-400">Ingested Links (Session)</div>
+                <div className="text-[11px] font-medium text-slate-400">Saved Links (Session)</div>
                 <div className="space-y-1">
                   {linkHistory.map((item) => (
                     <div
@@ -812,28 +1046,28 @@ export function CapturePanel({
           </form>
 
           <form
-            onSubmit={handleLearnPastedText}
+            onSubmit={handleOpenPastedReview}
             className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5"
           >
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
               <FileText className="h-4 w-4 text-sky-400" />
-              <span>Paste Any Article, Docs Page, or Transcript</span>
+              <span>Paste Article, Docs Page, or Transcript</span>
             </div>
             <textarea
               rows={5}
               value={pastedText}
               onChange={(e) => setPastedText(e.target.value)}
-              placeholder="Paste any article, notes, or transcript here — Mantis splits concepts and stores them automatically..."
+              placeholder="Paste any article, notes, or transcript here — opens an editable preview before saving..."
               className="w-full rounded-md border border-slate-700 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
             />
             <div className="flex justify-end">
               <button
                 type="submit"
-                disabled={!pastedText.trim() || isDistilling}
+                disabled={!pastedText.trim()}
                 className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-slate-800 px-4 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-700 disabled:opacity-50"
               >
-                <Sparkles className="h-4 w-4 text-emerald-400" />
-                <span>{isDistilling ? 'Distilling...' : 'Distill & Store Text'}</span>
+                <Eye className="h-4 w-4 text-emerald-400" />
+                <span>Preview &amp; Save Text</span>
               </button>
             </div>
           </form>
@@ -843,20 +1077,20 @@ export function CapturePanel({
       {/* Tab 2: Live Mic & Screenshot OCR */}
       {activeTab === 'image_mic' && (
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* Mic Record -> Transcribe -> Review -> Save */}
           <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
                 <Mic className="h-4 w-4 text-sky-400" />
-                <span>Continuous Live Mic &amp; Audio Listener</span>
+                <span>Voice &amp; Conversation Recorder</span>
               </div>
               <span className="font-mono text-[11px] tabular-nums text-slate-400">
-                {isListeningMic ? `Signal ${micLevel}%` : 'Idle'}
+                {isListeningMic ? `Signal ${micLevel}%` : 'Ready'}
               </span>
             </div>
 
             <p className="text-xs leading-relaxed text-slate-400">
-              Auto-restarts cleanly on Android Chrome pauses and streams live spoken words below
-              until you tap Stop.
+              Tap Start to transcribe live speech. Nothing saves automatically — tapping Stop opens an editable transcript preview.
             </p>
 
             {/* Real Web Audio 16-bar Level Meter */}
@@ -879,16 +1113,23 @@ export function CapturePanel({
               })}
             </div>
 
-            {isListeningMic && (
-              <div className="min-h-[44px] rounded-md border border-slate-800 bg-[#0B1120] px-3 py-2 font-mono text-xs text-emerald-300">
-                {interimTranscript || 'Listening for speech or nearby video audio...'}
+            {(isListeningMic || micLines.length > 0) && (
+              <div className="max-h-36 min-h-[56px] space-y-1 overflow-auto rounded-md border border-slate-800 bg-[#0B1120] px-3 py-2 font-mono text-xs">
+                {micLines.length > 0 && (
+                  <div className="whitespace-pre-wrap text-slate-200">{micLines.join('\n')}</div>
+                )}
+                {isListeningMic && (
+                  <div className="text-emerald-300">
+                    {interimTranscript || 'Listening for speech…'}
+                  </div>
+                )}
               </div>
             )}
 
             <button
               type="button"
               disabled={!hasMicApi}
-              onClick={() => void handleToggleMic()}
+              onClick={handleToggleMic}
               className={`inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-xs font-semibold text-white transition-colors disabled:opacity-50 ${
                 isListeningMic
                   ? 'bg-red-600 hover:bg-red-500'
@@ -900,25 +1141,45 @@ export function CapturePanel({
                 {!hasMicApi
                   ? 'Speech API Unsupported Here'
                   : isListeningMic
-                    ? 'Stop Listening & Save'
-                    : 'Start Live Mic Listener'}
+                    ? 'Stop & Review Transcript'
+                    : 'Start Recording'}
               </span>
             </button>
           </div>
 
+          {/* Screenshot OCR with ROI Crop + Fast Pass -> Preview Modal */}
           <div className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-100">
               <Camera className="h-4 w-4 text-emerald-400" />
-              <span>Screenshot / Photo Batch OCR</span>
+              <span>Screenshot / Image OCR</span>
             </div>
             <p className="text-xs leading-relaxed text-slate-400">
-              Upload screenshots on tablet or Chromebook (or press Ctrl+V to paste directly).
-              On-device OCR reads the text and stores concepts automatically.
+              Runs a fast lower-res OCR pass on your selected crop region, then opens an editable preview with confidence score and High-Res refinement.
             </p>
+
+            <div className="space-y-1">
+              <label htmlFor="image-ocr-zone" className="block text-xs font-medium text-slate-300">
+                Crop Focus Region
+              </label>
+              <select
+                id="image-ocr-zone"
+                value={imageOcrZone}
+                disabled={isOcrImageBusy}
+                onChange={(e) => setImageOcrZone(e.target.value as CaptureZone)}
+                className="min-h-[44px] w-full rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+              >
+                <option value="full">Full Image</option>
+                <option value="center_article">Center Article / Code Region</option>
+                <option value="bottom_captions">Bottom Captions Strip</option>
+              </select>
+            </div>
+
             <label className="flex min-h-[48px] cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-700 bg-[#0B1120] px-4 py-3 text-xs font-semibold text-slate-200 hover:border-emerald-500/60 hover:bg-slate-800/60">
               <ClipboardPaste className="h-4 w-4 text-emerald-400" />
               <span>
-                {isOcrImageBusy ? 'Reading Image Text...' : 'Choose Screenshot(s) or Photo'}
+                {isOcrImageBusy
+                  ? 'Running Fast OCR Pass…'
+                  : 'Choose Screenshot(s) or Ctrl+V Paste'}
               </span>
               <input
                 type="file"
@@ -945,7 +1206,7 @@ export function CapturePanel({
             <div className="rounded-md border border-amber-500/40 bg-amber-950/20 p-4 text-xs leading-relaxed text-amber-200">
               <strong>Android Browser Notice:</strong> Chrome on Android blocks{' '}
               <code className="font-mono">getDisplayMedia</code>. On your Galaxy Tab A9+, use{' '}
-              <strong>YouTube &amp; Article Links</strong> or <strong>Live Mic &amp; Screenshots</strong>. On Chromebook,{' '}
+              <strong>YouTube &amp; Article Links</strong> or <strong>Mic &amp; Screenshot OCR</strong>. On Chromebook,{' '}
               <strong>Record Screen &amp; Read</strong> works natively.
             </div>
           )}
@@ -989,11 +1250,11 @@ export function CapturePanel({
               {isRecordingScreen ? (
                 <button
                   type="button"
-                  onClick={() => void handleStopAndLearn()}
+                  onClick={handleStopAndReviewScreen}
                   className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500"
                 >
                   <Square className="h-4 w-4" />
-                  <span>Stop &amp; Save Remaining</span>
+                  <span>Stop &amp; Review OCR</span>
                 </button>
               ) : (
                 <button
@@ -1020,7 +1281,7 @@ export function CapturePanel({
               {!isRecordingScreen && (
                 <div className="p-6 text-center text-xs text-slate-400">
                   Start recording a browser tab on Chromebook; static frames are skipped automatically
-                  to save CPU.
+                  and lines wait in the review buffer until you confirm.
                 </div>
               )}
             </div>
@@ -1066,21 +1327,21 @@ export function CapturePanel({
               onClick={onOpenKnowledge}
               className="font-semibold text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
             >
-              View Learned Knowledge
+              View Saved Knowledge
             </button>
           )}
         </div>
       )}
 
-      {/* Deduplicated Buffer */}
+      {/* Screen Capture Review Buffer */}
       <section className="space-y-3 rounded-lg border border-slate-800 bg-[#0F172A] p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-mono text-xs text-slate-300">
-            <span className="font-semibold text-slate-100">Deduplicated Capture Buffer</span>
+            <span className="font-semibold text-slate-100">Screen Capture Review Buffer</span>
             {lastConfidence !== null && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="tabular-nums text-slate-400">OCR conf: {lastConfidence}%</span>
+                <span className="tabular-nums text-slate-400">Last OCR conf: {lastConfidence}%</span>
               </>
             )}
           </div>
@@ -1088,12 +1349,12 @@ export function CapturePanel({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={capturedLines.length === 0 || isDistilling}
-              onClick={() => void handleLearnAllBuffer()}
-              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
+              disabled={capturedLines.length === 0}
+              onClick={handleOpenBufferReview}
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
             >
-              <Sparkles className="h-3.5 w-3.5" />
-              <span>{isDistilling ? 'Learning...' : 'Distill & Save Buffer'}</span>
+              <Eye className="h-3.5 w-3.5" />
+              <span>Review &amp; Save Buffer</span>
             </button>
             <button
               type="button"
@@ -1101,9 +1362,8 @@ export function CapturePanel({
               onClick={() => {
                 setCapturedLines([]);
                 linesRef.current = [];
-                unlearnedLineStartRef.current = 0;
               }}
-              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B1120] px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-40"
             >
               <Trash2 className="h-3.5 w-3.5" />
               <span>Clear</span>
@@ -1111,12 +1371,25 @@ export function CapturePanel({
           </div>
         </div>
 
-        <pre className="max-h-60 min-h-[110px] overflow-auto whitespace-pre-wrap rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
+        <pre className="max-h-56 min-h-[96px] overflow-auto whitespace-pre-wrap rounded-md border border-slate-800 bg-[#0B1120] p-3.5 font-mono text-xs leading-relaxed text-slate-200">
           {capturedLines.length > 0
             ? capturedLines.join('\n')
-            : 'Captured YouTube captions, articles, voice transcripts, and OCR lines collect here automatically.'}
+            : 'Live Screen OCR lines collect here for review before saving.'}
         </pre>
       </section>
+
+      {/* Mandatory Preview-and-Confirm Modal for URL, Paste, OCR, and Mic */}
+      <CaptureReviewModal
+        draft={reviewDraft}
+        folders={folders}
+        isSaving={isSavingReview}
+        isRefiningOcr={isRefiningOcr}
+        errorMessage={reviewError}
+        onChangeDraft={(updater) => setReviewDraft((prev) => (prev ? updater(prev) : null))}
+        onRefineOcrHighRes={handleRefineOcrHighRes}
+        onConfirmSave={handleConfirmReviewSave}
+        onDiscard={handleDiscardReview}
+      />
     </div>
   );
 }

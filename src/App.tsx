@@ -2199,6 +2199,8 @@ export default function App() {
             backupBrainUrl={backupBrainUrl}
             brainModel={brainModel}
             accessToken={session.access_token}
+            folders={folders}
+            onSaveEntry={handleSaveEntry}
             onSaveCapturedEntries={handleSaveCapturedEntries}
             onOpenKnowledge={() => setActiveArea('knowledge')}
           />
