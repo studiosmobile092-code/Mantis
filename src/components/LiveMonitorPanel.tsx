@@ -54,6 +54,14 @@ function formatEventKind(kind: LearningEvent['kind']): string {
       return 'Boost';
     case 'cloud_assisted':
       return 'Assist';
+    case 'teacher_distilled':
+      return 'Distilled';
+    case 'dpo_logged':
+      return 'DPO';
+    case 'eval_passed':
+      return 'Eval';
+    case 'self_optimized':
+      return 'Self-Opt';
     case 'repo_indexed':
       return 'Repo';
     default:

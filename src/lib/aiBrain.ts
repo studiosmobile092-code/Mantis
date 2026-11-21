@@ -1639,3 +1639,212 @@ export async function suggestSemanticFolderWithAi(params: {
     usedAi: false,
   };
 }
+
+export interface TeacherLessonPacket {
+  answer: string;
+  triggers: string[];
+  responseVariants: string[];
+  knowledgeTitle: string;
+  knowledgeContent: string;
+  folderName: string;
+  tags: string[];
+  modelUsed: string;
+  usedTeacher: boolean;
+}
+
+/**
+ * Teacher-to-Scratch Distillation:
+ * When the local Scratch AI doesn't know how to respond (e.g. "hi", "1+1", or a new coding topic),
+ * the connected AI Brain answers AND generates multi-variant triggers + responses so Scratch handles it offline forever after.
+ */
+export async function distillLessonWithTeacher(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  prompt: string;
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+}): Promise<TeacherLessonPacket> {
+  const cleanPrompt = params.prompt.trim();
+  const deterministic = inferFolderDeterministically(cleanPrompt, cleanPrompt, params.folders);
+  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+
+  if (candidates.length === 0) {
+    return {
+      answer: `I saved "${cleanPrompt}" so you can teach or expand it in Teach Rule, or connect your Worker/Backup AI route in Settings for automatic Teacher distillation.`,
+      triggers: [cleanPrompt.toLowerCase()],
+      responseVariants: [cleanPrompt],
+      knowledgeTitle: cleanPrompt.slice(0, 68),
+      knowledgeContent: cleanPrompt,
+      folderName: deterministic.folderName,
+      tags: deterministic.suggestedTags,
+      modelUsed: 'built-in-teacher-fallback',
+      usedTeacher: false,
+    };
+  }
+
+  const folderNames = params.folders.map((f) => f.name).join(', ') || 'Patterns, Architecture, Greetings';
+  const relevant = retrieveRelevantKnowledge(cleanPrompt, params.entries, params.folders, 3);
+
+  const teacherPrompt = [
+    'You are the Mantis AI Brain Teacher training a smaller local Scratch AI.',
+    'The user just sent a prompt that the Scratch AI could not confidently answer on its own.',
+    'Produce TWO things inside strict valid JSON (no markdown fences):',
+    '1. "answer": The direct, crisp, helpful answer to show the user right now.',
+    '2. A compact reusable lesson so the Scratch AI can answer similar prompts offline next time:',
+    '   - "triggers": 3-6 lowercase phrase variants or keywords that should activate this skill (e.g. for "hi": ["hi", "hello", "hey", "hey mantis", "good morning"]).',
+    '   - "responseVariants": 2-4 varied, natural responses Scratch AI can rotate through cleanly.',
+    '   - "knowledgeTitle": Concise title (max 70 chars).',
+    '   - "knowledgeContent": Clear durable rule/fact/pattern summary.',
+    `   - "folderName": Best 1-2 word folder (${folderNames} — or new clear category like Greetings, Math, Patterns).`,
+    '   - "tags": 2-4 lowercase tags.',
+    '',
+    'Schema:',
+    '{"answer":"...","triggers":["..."],"responseVariants":["..."],"knowledgeTitle":"...","knowledgeContent":"...","folderName":"...","tags":["..."]}',
+    '',
+    `User Prompt: ${cleanPrompt}`,
+  ].join('\n');
+
+  try {
+    const res = await runLightweightAiJsonPrompt({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt: teacherPrompt,
+      knowledgeContext: relevant.map((m) => ({
+        title: m.entry.title,
+        folder: m.folderName,
+        content: m.entry.content.slice(0, 400),
+      })),
+      timeoutMs: 11000,
+    });
+
+    const parsed = parseJsonObjectFromAiReply<{
+      answer?: string;
+      triggers?: string[];
+      responseVariants?: string[];
+      knowledgeTitle?: string;
+      knowledgeContent?: string;
+      folderName?: string;
+      tags?: string[];
+    }>(res.text);
+
+    if (parsed?.answer && parsed.answer.trim()) {
+      const folderGuess = inferFolderDeterministically(
+        parsed.knowledgeTitle || cleanPrompt,
+        parsed.knowledgeContent || parsed.answer,
+        params.folders,
+        parsed.folderName,
+      );
+      const triggers = Array.isArray(parsed.triggers) && parsed.triggers.length > 0
+        ? parsed.triggers.map((t) => String(t).trim().toLowerCase()).filter(Boolean)
+        : [cleanPrompt.toLowerCase()];
+      const variants =
+        Array.isArray(parsed.responseVariants) && parsed.responseVariants.length > 0
+          ? parsed.responseVariants.map((r) => String(r).trim()).filter(Boolean)
+          : [parsed.answer.trim()];
+
+      return {
+        answer: parsed.answer.trim(),
+        triggers,
+        responseVariants: variants,
+        knowledgeTitle: (parsed.knowledgeTitle || cleanPrompt).trim().slice(0, 80),
+        knowledgeContent: (parsed.knowledgeContent || parsed.answer).trim(),
+        folderName: normalizeFolderName(folderGuess.folderName) || deterministic.folderName,
+        tags: Array.isArray(parsed.tags)
+          ? parsed.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean).slice(0, 5)
+          : folderGuess.suggestedTags,
+        modelUsed: res.modelUsed,
+        usedTeacher: true,
+      };
+    }
+  } catch {
+    // Graceful fallback to standard AI chat if JSON distillation times out
+  }
+
+  const chatFallback = await askAiBrainChat({
+    brainUrl: params.brainUrl,
+    backupBrainUrl: params.backupBrainUrl,
+    accessToken: params.accessToken,
+    model: params.model,
+    prompt: cleanPrompt,
+    entries: params.entries,
+    folders: params.folders,
+    repoFiles: [],
+    history: [],
+  });
+
+  return {
+    answer: chatFallback.replyText,
+    triggers: [cleanPrompt.toLowerCase()],
+    responseVariants: [chatFallback.replyText],
+    knowledgeTitle: cleanPrompt.slice(0, 72),
+    knowledgeContent: chatFallback.replyText.slice(0, 1200),
+    folderName: deterministic.folderName,
+    tags: deterministic.suggestedTags,
+    modelUsed: chatFallback.modelUsed,
+    usedTeacher: true,
+  };
+}
+
+/**
+ * Generates two distinct candidate answers for DPO Side-by-Side Arena ranking.
+ */
+export async function runArenaDuelWithBrain(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  prompt: string;
+  scratchCandidate: string;
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+  repoFiles: RepoFile[];
+}): Promise<{
+  candidateA: {label: string; text: string};
+  candidateB: {label: string; text: string};
+  citedEntryIds: string[];
+}> {
+  const hasCloud = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl).length > 0;
+  if (!hasCloud) {
+    return {
+      candidateA: {label: 'Scratch Hybrid RAG', text: params.scratchCandidate},
+      candidateB: {
+        label: 'Concise Rule Summary',
+        text: `${params.scratchCandidate}\n\n(Connect a Cloud Assist route in Settings to compare Scratch vs. Cloud LLM reasoning in Arena mode.)`,
+      },
+      citedEntryIds: [],
+    };
+  }
+
+  try {
+    const cloudRes = await askAiBrainChat({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt: params.prompt,
+      entries: params.entries,
+      folders: params.folders,
+      repoFiles: params.repoFiles,
+      history: [],
+    });
+    return {
+      candidateA: {label: 'Scratch Hybrid AI', text: params.scratchCandidate},
+      candidateB: {label: `Cloud Teacher (${cloudRes.modelUsed})`, text: cloudRes.replyText},
+      citedEntryIds: cloudRes.citedEntryIds,
+    };
+  } catch (err) {
+    return {
+      candidateA: {label: 'Scratch Hybrid AI', text: params.scratchCandidate},
+      candidateB: {
+        label: 'Cloud Assist Unavailable',
+        text: err instanceof Error ? err.message : 'Cloud route unavailable right now.',
+      },
+      citedEntryIds: [],
+    };
+  }
+}
+

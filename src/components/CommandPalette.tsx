@@ -1,6 +1,10 @@
 import {
   BookOpen,
+  Compass,
+  Crosshair,
+  Download,
   FileCode2,
+  FlaskConical,
   GitBranch,
   Palette,
   PanelLeft,
@@ -29,6 +33,8 @@ interface CommandPaletteProps {
   folders: KnowledgeFolder[];
   repoFiles: RepoFile[];
   onNavigateArea: (area: AreaId) => void;
+  onOpenGraph: () => void;
+  onPrefillExecute: () => void;
   onOpenTeach: () => void;
   onSync: () => void;
   onSelectTheme: (theme: ThemeMode) => void;
@@ -54,6 +60,8 @@ export function CommandPalette({
   folders,
   repoFiles,
   onNavigateArea,
+  onOpenGraph,
+  onPrefillExecute,
   onOpenTeach,
   onSync,
   onSelectTheme,
@@ -86,15 +94,23 @@ export function CommandPalette({
       {
         id: 'nav-studio',
         group: 'Navigate',
-        label: 'Go to Studio Chat',
-        subtitle: 'Three-pane workbench & AI chat',
+        label: 'Go to Studio Workbench',
+        subtitle: 'Editorial AI stream & Smart-Assassin composer',
         icon: Terminal,
         run: () => onNavigateArea('studio'),
       },
       {
+        id: 'nav-graph',
+        group: 'Navigate',
+        label: 'Open Live Concept Graph',
+        subtitle: 'Interactive force-directed memory & repo topology',
+        icon: Compass,
+        run: onOpenGraph,
+      },
+      {
         id: 'nav-knowledge',
         group: 'Navigate',
-        label: 'Go to Knowledge Base',
+        label: 'Go to Memory Explorer',
         subtitle: `${entries.length} stored entries`,
         icon: BookOpen,
         run: () => onNavigateArea('knowledge'),
@@ -102,7 +118,7 @@ export function CommandPalette({
       {
         id: 'nav-ingest',
         group: 'Navigate',
-        label: 'Go to Capture & Ingest Lab',
+        label: 'Go to Capture Studio',
         subtitle: 'Links, AI multi-voice mic, OCR',
         icon: Radio,
         run: () => onNavigateArea('ingest'),
@@ -110,18 +126,42 @@ export function CommandPalette({
       {
         id: 'nav-github',
         group: 'Navigate',
-        label: 'Go to GitHub & Diff Proposals',
+        label: 'Go to Code & Diffs',
         subtitle: `${repoFiles.length} synced repo files`,
         icon: GitBranch,
         run: () => onNavigateArea('github'),
       },
       {
+        id: 'nav-training',
+        group: 'Navigate',
+        label: 'Go to Training, DPO Arena & Evals',
+        subtitle: 'A/B preference ranking, eval suite, RAM self-optimizer',
+        icon: FlaskConical,
+        run: () => onNavigateArea('training'),
+      },
+      {
+        id: 'nav-export',
+        group: 'Navigate',
+        label: 'Go to Model Export Studio',
+        subtitle: 'Name AI, verify bundle, download Chatroom App & Colab QLoRA',
+        icon: Download,
+        run: () => onNavigateArea('export'),
+      },
+      {
         id: 'nav-settings',
         group: 'Navigate',
-        label: 'Go to Settings & Appearance',
+        label: 'Go to Settings & Compute Diagnostics',
         subtitle: 'Routes, themes, Phase 6 SQL',
         icon: Settings,
         run: () => onNavigateArea('settings'),
+      },
+      {
+        id: 'act-execute',
+        group: 'Quick Actions',
+        label: 'Smart-Assassin Parallel Prep (/execute)',
+        subtitle: 'Pre-fill parallel memory + repo diff brief',
+        icon: Crosshair,
+        run: onPrefillExecute,
       },
       {
         id: 'act-teach',
@@ -217,6 +257,8 @@ export function CommandPalette({
     folderMap,
     query,
     onNavigateArea,
+    onOpenGraph,
+    onPrefillExecute,
     onOpenTeach,
     onSync,
     onToggleLeftPane,

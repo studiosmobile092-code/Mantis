@@ -1,4 +1,25 @@
-export type AreaId = 'studio' | 'knowledge' | 'ingest' | 'github' | 'settings';
+export type AreaId =
+  | 'studio'
+  | 'knowledge'
+  | 'ingest'
+  | 'github'
+  | 'training'
+  | 'export'
+  | 'settings';
+
+export type StudioTabId = 'stream' | 'graph' | 'arena' | 'evals';
+
+export type ComputeBackendKind = 'webgpu-vulkan' | 'webgpu' | 'worker-wasm' | 'main-thread';
+
+export interface ComputeEngineStatus {
+  backend: ComputeBackendKind;
+  adapterLabel: string;
+  workerActive: boolean;
+  indexedVectorsCount: number;
+  vectorBytesUsed: number;
+  float32BytesSaved: number;
+  lastComputeMs: number | null;
+}
 
 export type BrainRouteKind =
   | 'primary-worker'
@@ -23,6 +44,10 @@ export type LearningEventKind =
   | 'ocr_distilled'
   | 'reinforced'
   | 'cloud_assisted'
+  | 'teacher_distilled'
+  | 'dpo_logged'
+  | 'eval_passed'
+  | 'self_optimized'
   | 'repo_indexed';
 
 export interface LearningEvent {
@@ -157,7 +182,12 @@ export interface CodeSuggestion {
 }
 
 export type AuditSeverity = 'high' | 'medium' | 'low';
-export type AuditCategory = 'security' | 'accessibility' | 'reliability' | 'maintainability' | 'knowledge';
+export type AuditCategory =
+  | 'security'
+  | 'accessibility'
+  | 'reliability'
+  | 'maintainability'
+  | 'knowledge';
 
 export interface SelfAuditFinding {
   id: string;
@@ -206,6 +236,17 @@ export interface RetrievalMatch {
   folderName: string;
   score: number;
   reasons: string[];
+  bm25Score?: number;
+  vectorScore?: number;
+  rrfScore?: number;
+}
+
+export interface ContradictionAlert {
+  newTitle: string;
+  existingEntryId: string;
+  existingTitle: string;
+  existingFolder: string;
+  reason: string;
 }
 
 export interface RepoMatch {
@@ -225,4 +266,155 @@ export interface MemoryReadinessMetrics {
   reviewedSuggestions: number;
   selfAuditCount: number;
   readinessScore: number;
+}
+
+export interface ScratchSkillRule {
+  id: string;
+  triggerType: 'exact' | 'pattern' | 'intent' | 'arithmetic';
+  triggers: string[];
+  responses: string[];
+  folderName: string;
+  tags: string[];
+  learnedFrom: 'scratch' | 'teacher-distilled' | 'manual';
+  confidence: number;
+  usageCount: number;
+  createdAt: string;
+}
+
+export interface TrainingSample {
+  id: string;
+  format: 'sft' | 'dpo';
+  prompt: string;
+  chosenResponse: string;
+  rejectedResponse?: string;
+  modelChosen: string;
+  modelRejected?: string;
+  rationale?: string;
+  citedEntryIds: string[];
+  verifiablePassed: boolean;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+}
+
+export interface EvalCase {
+  id: string;
+  title: string;
+  prompt: string;
+  requiredTerms: string[];
+  forbiddenTerms: string[];
+  requireCitation: boolean;
+  requireSafeCode: boolean;
+  category: 'recall' | 'reasoning' | 'coding' | 'security';
+  createdAt: string;
+}
+
+export interface EvalCaseResult {
+  caseId: string;
+  title: string;
+  passed: boolean;
+  score: number;
+  latencyMs: number;
+  engineUsed: 'scratch' | 'cloud';
+  responsePreview: string;
+  failureReasons: string[];
+}
+
+export interface EvalRunSummary {
+  id: string;
+  runAt: string;
+  engineMode: 'scratch' | 'cloud' | 'hybrid';
+  totalCases: number;
+  passedCases: number;
+  passRate: number;
+  avgLatencyMs: number;
+  results: EvalCaseResult[];
+}
+
+export interface ResourceWasteItem {
+  id: string;
+  category: 'ram' | 'storage' | 'bundle' | 'duplicates';
+  severity: 'high' | 'medium' | 'low';
+  title: string;
+  detail: string;
+  estimatedBytesSaved: number;
+  targetPath?: string;
+  autoFixKind?: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache' | 'stage-code-opt';
+}
+
+export interface ResourceProfile {
+  measuredAt: string;
+  jsHeapUsedBytes: number | null;
+  jsHeapLimitBytes: number | null;
+  knowledgeBytes: number;
+  vectorInt8Bytes: number;
+  float32EquivalentBytes: number;
+  repoBytes: number;
+  duplicateClusterCount: number;
+  staleRawCount: number;
+  wasteItems: ResourceWasteItem[];
+}
+
+export interface ModelCardConfig {
+  modelName: string;
+  version: string;
+  author: string;
+  baseArchitecture: string;
+  personaPrompt: string;
+  tagline: string;
+  temperature: number;
+  includeOnlyTrusted: boolean;
+}
+
+export interface PortableBrainBundle {
+  schema: 'mantis-brain-bundle/v1';
+  exportedAt: string;
+  modelCard: ModelCardConfig;
+  evalSummary: {
+    passRate: number | null;
+    totalCases: number;
+  };
+  skills: ScratchSkillRule[];
+  knowledge: Array<{
+    id: string;
+    title: string;
+    content: string;
+    folder: string;
+    tags: string[];
+    status: KnowledgeStatus;
+    confidence: number;
+    vectorInt8: number[];
+    vectorScale: number;
+  }>;
+}
+
+export interface AssassinPrepBrief {
+  id: string;
+  goal: string;
+  matchedMemories: RetrievalMatch[];
+  matchedFiles: RepoMatch[];
+  proposedDiffs: Array<{
+    filePath: string;
+    title: string;
+    rationale: string;
+    originalContent: string;
+    proposedContent: string;
+  }>;
+  verifierChecks: Array<{
+    label: string;
+    passed: boolean;
+    detail: string;
+  }>;
+  prepLatencyMs: number;
+  createdAt: string;
+}
+
+export interface SelfOptimizationProposal {
+  id: string;
+  kind: 'memory-prune' | 'code-opt';
+  title: string;
+  rationale: string;
+  estimatedBytesSaved: number;
+  targetPath: string;
+  verifiedSafe: boolean;
+  canApplyDirectly: boolean;
 }

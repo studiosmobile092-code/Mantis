@@ -186,3 +186,20 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   2. **Mic Recording**: Open **Capture → AI Mic & Screenshot OCR**, pick your language, tap **Start Recording**, test **Pause / Resume**, speak a few sentences (with pauses for dialogue), and tap **Stop & AI Review** — confirm zero mic freezes, duplicate lines, or dropped trailing words.
   3. **3-Pane Knowledge & Shortcuts**: Open **Knowledge** on wide screen (`Folders` / `Note List` / `Reader`), press `/` to search and `↑` / `↓` to step through entries; press `Alt+N` to jump to **Teach** or `Ctrl+Shift+M` to toggle the right Context Monitor.
 
+---
+
+## Major Upgrade Phases 1–6 — Frontier Precision Workstation & Portable AI Studio
+
+- **Status**: Completed & Build/Lint Verified
+- **Summary**:
+  1. **Phase 1 (Vulkan WebGPU + Web Workers + Int8 Vectors)**: Added `src/lib/gpuCompute.ts` (WebGPU Dawn/Vulkan probe + WGSL batch cosine shader), `src/lib/vectorStore.ts` (384-d Int8 scalar quantization reducing vector RAM by 75% + LRU IndexedDB cache), and `src/lib/computeWorker.ts` + `src/lib/workerClient.ts` (off-thread BM25 + Int8 RRF + MMR Hybrid Search, LCS diffing, and RAM profiling).
+  2. **Phase 2 (VS Code + Grok Workstation UI Fusion)**: Added VS Code-inspired `ActivityRail`, slim `TopBar` with `Ctrl+K` Command Bar & compute popover, `24px` operational `StatusFooter`, and refactored `ChatWorkspace` into a Grok clean editorial canvas (`max-w-[78ch]`, 1px rules, zero AI speech bubbles, windowed virtualized stream, and inline Omnibar composer).
+  3. **Phase 3 (Teacher–Student Distillation Loop & Contradiction Guard)**: Added `src/lib/scratchEngine.ts` (zero-`eval` recursive-descent math parser for `"1+1"` etc., persistent `ScratchSkillRule` intent cache, confidence scoring) and `distillLessonWithTeacher` in `src/lib/aiBrain.ts` so prompts Scratch cannot answer trigger connected Cloud Teacher distillation into reusable offline skills + Knowledge folders, guarded by Worker-backed Contradiction detection.
+  4. **Phase 4 (Interactive Concept Graph & Smart-Assassin Mode)**: Added 60fps Canvas2D `ConceptGraphCanvas` with settle-pause power saving, pan/zoom/drag, and orphan note checks, plus `AssassinBriefCard` for `/execute <goal>` parallel context + static safety gate + approval-gated diff staging.
+  5. **Phase 5 (Frontier DPO Arena, Evals & Self-Optimizer)**: Added `src/lib/trainingStore.ts` and `TrainingPanel` with A/B DPO ranking (`dpo_train.jsonl`), PII/secret-scrubbed SFT curation, automated Eval Suite (`hi`, `1+1`, secret hygiene, custom cases), and live JS Heap / Int8 RAM Profiler with 1-click duplicate pruning & approval-gated code optimization diffs.
+  6. **Phase 6 (Custom Model Naming & Portable Export Studio)**: Added `src/lib/modelExporter.ts` and `ExportStudioPanel` with custom Model Card naming, isolated round-trip bundle verifier (`Verify Export Bundle`), 1-click standalone Drop-In Chatroom App (`.html`), Chatroom Runtime SDK, `.mantisbrain.json`, `sft_train.jsonl` / `dpo_train.jsonl`, Free Colab T4 Unsloth/TRL QLoRA notebook (`.ipynb`), and Ollama `Modelfile`.
+- **Verification**:
+  1. Run `npm run lint && VITE_BASE_PATH=./ npm run build` cleanly with 0 errors.
+  2. In **Studio Workbench**, type `hi` and `1+1` (`Scratch Leads` mode) and confirm instant math parsing & Teacher-to-Scratch distillation; switch to **Concept Graph** tab to inspect linked Folders, Concepts, and Repo nodes.
+  3. Run `/execute Improve error handling in App.tsx` to preview parallel context + static checks inside **Smart-Assassin Execution Brief**, then click **Approve & Stage Diff** or **Reject & Log DPO**.
+  4. Open **Training** (`DPO Arena`, `Eval Bench → Run All Evals`, `RAM & Self-Opt`), then open **Export**, customize your Model Name, click **Verify Export Bundle**, and download **Standalone Chatroom App (.html)** to test your named model in any browser tab completely offline.

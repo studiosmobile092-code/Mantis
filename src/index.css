@@ -4,16 +4,16 @@
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --m-canvas: #0b1120;
-  --m-surface: #0f172a;
-  --m-inset: #080d1a;
-  --m-elevated: #1e293b;
-  --m-border: #1e293b;
-  --m-border-strong: #334155;
+  --m-canvas: #0b0f17;
+  --m-surface: #0e1420;
+  --m-inset: #090d14;
+  --m-elevated: #141c2c;
+  --m-border: #1c2538;
+  --m-border-strong: #2d3b55;
   --m-text: #f1f5f9;
   --m-text-muted: #94a3b8;
   --m-text-subtle: #64748b;
-  --m-scrollbar-thumb: #334155;
+  --m-scrollbar-thumb: #2d3b55;
   --m-scrollbar-hover: #475569;
 }
 
@@ -144,6 +144,12 @@
     color: var(--m-text);
   }
 
+  .dark body,
+  html[data-theme="dark"] body,
+  html[data-theme="dim"] body {
+    letter-spacing: 0.008em;
+  }
+
   ::selection {
     background-color: var(--m-accent-soft);
     color: var(--m-text);
@@ -161,15 +167,14 @@
     outline-offset: 2px;
   }
 
-  /* Subtle IDE scrollbars across dark, dim, and light themes */
   * {
     scrollbar-width: thin;
     scrollbar-color: var(--m-scrollbar-thumb) transparent;
   }
 
   *::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
   }
 
   *::-webkit-scrollbar-track {
@@ -186,6 +191,11 @@
   *::-webkit-scrollbar-thumb:hover {
     background-color: var(--m-scrollbar-hover);
   }
+}
+
+.mantis-virtual-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 @keyframes mantisFadeIn {
@@ -220,15 +230,15 @@
 }
 
 .mantis-fade-in {
-  animation: mantisFadeIn 160ms ease-out both;
+  animation: mantisFadeIn 150ms ease-out both;
 }
 
 .mantis-slide-up {
-  animation: mantisSlideUp 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: mantisSlideUp 170ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .mantis-modal-in {
-  animation: mantisModalIn 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: mantisModalIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
