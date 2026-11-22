@@ -302,12 +302,12 @@ export function retrieveRelevantKnowledge(
 
 export function retrieveRelevantRepoFiles(
   query: string,
-  repoFiles: RepoFile[],
+  repoFiles: RepoFile[] = [],
   limit = 3,
 ): RepoMatch[] {
   const normalizedQuery = query.trim().toLowerCase();
   const tokens = tokenizeQuery(query);
-  if (!normalizedQuery || repoFiles.length === 0) return [];
+  if (!normalizedQuery || !Array.isArray(repoFiles) || repoFiles.length === 0) return [];
 
   const scored: RepoMatch[] = [];
 

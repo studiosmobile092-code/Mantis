@@ -66,6 +66,8 @@ interface InspectorDrawerProps {
   onSelectFolder: (folderId: string) => void;
   onQueryConcept: (conceptLabel: string) => void;
   onInspectRepoFile: (filePath: string) => void;
+  latestEvalPassRate?: number | null;
+  enabledPrinciplesCount?: number;
 }
 
 function formatRouteLabel(routeStatus: BrainRouteStatus): string {
@@ -148,6 +150,8 @@ export function InspectorDrawer({
   onSelectFolder,
   onQueryConcept,
   onInspectRepoFile,
+  latestEvalPassRate = null,
+  enabledPrinciplesCount = 0,
 }: InspectorDrawerProps) {
   const [confirmResetBlank, setConfirmResetBlank] = useState(false);
   useEffect(() => {
@@ -377,6 +381,13 @@ export function InspectorDrawer({
                   {activeCheckpoint.metrics.lastLoss !== null
                     ? `${activeCheckpoint.metrics.lastLoss.toFixed(3)} · |∇| ${activeCheckpoint.metrics.avgGradNorm.toFixed(2)}`
                     : 'Untrained (0 steps)'}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Blind Eval · Rules</dt>
+                <dd className="text-ink">
+                  {latestEvalPassRate !== null ? `${latestEvalPassRate}% pass` : 'Not run'} ·{' '}
+                  {enabledPrinciplesCount} rules
                 </dd>
               </div>
             </dl>

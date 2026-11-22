@@ -198,7 +198,19 @@ export function mineKnowledgeFromText(
     .replace(/^(please\s+)?(remember\s+(that|this)?|note:|rule:|fix:)\s*/i, '')
     .trim();
 
-  if (cleanedContent.length < 14) {
+  if (cleanedContent.length < 18) {
+    return [];
+  }
+
+  // Anti-poisoning guard: reject raw secret leaks, browser crash stack traces, or trivial low-signal noise
+  if (
+    /(sb_secret_[A-Za-z0-9_-]{6,}|hf_[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._-]{16,})/i.test(
+      cleanedContent,
+    ) ||
+    /\bat\s+\S+\.(ts|tsx|js|jsx|mjs|cjs):\d+:\d+/i.test(cleanedContent) ||
+    /\b(Uncaught\s+)?(TypeError|ReferenceError|SyntaxError):\s*/i.test(cleanedContent) ||
+    cleanedContent.split(/\s+/).length < 4
+  ) {
     return [];
   }
 

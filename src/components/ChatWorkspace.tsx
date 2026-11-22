@@ -15,6 +15,7 @@ import {
   PlusCircle,
   Scale,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Terminal,
@@ -29,6 +30,7 @@ import type {
   BrainRouteStatus,
   ChatMessage,
   ChatTurnTelemetry,
+  ConstitutionalCritiqueResult,
   GitHubConnection,
   HardwareTelemetry,
   KnowledgeEntry,
@@ -121,6 +123,14 @@ interface ChatWorkspaceProps {
   showOnboarding?: boolean;
   onOpenKnowledge?: () => void;
   onDismissOnboarding?: () => void;
+  critiquingMsgId?: string | null;
+  critiqueByMsgId?: Record<string, ConstitutionalCritiqueResult>;
+  onCritiqueMessage?: (msgId: string) => Promise<void>;
+  onStepTrainCritiqueRevision?: (
+    prompt: string,
+    revisedAnswer: string,
+    msgId: string,
+  ) => Promise<boolean>;
 }
 
 function deriveChatTitle(text: string): string {
@@ -283,6 +293,10 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   showOnboarding = false,
   onOpenKnowledge,
   onDismissOnboarding,
+  critiquingMsgId = null,
+  critiqueByMsgId,
+  onCritiqueMessage,
+  onStepTrainCritiqueRevision,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState('');
   const [composerMode, setComposerMode] = useState<StudioComposerMode>(
@@ -305,6 +319,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [fixDraft, setFixDraft] = useState('');
   const [isSavingFix, setIsSavingFix] = useState(false);
   const [fixedMsgIds, setFixedMsgIds] = useState<Record<string, string>>({});
+  const [steppingCritiqueMsgId, setSteppingCritiqueMsgId] = useState<string | null>(null);
 
   // Slash command palette state
   const [slashIndex, setSlashIndex] = useState(0);
@@ -925,6 +940,26 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                     </button>
                                   )}
 
+                                  {!isUser && prevUserMsg && onCritiqueMessage && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      disabled={critiquingMsgId === msg.id || isSending}
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        void onCritiqueMessage(msg.id);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated disabled:opacity-50"
+                                    >
+                                      <ShieldCheck className="h-3.5 w-3.5 text-accent-text" />
+                                      <span>
+                                        {critiquingMsgId === msg.id
+                                          ? 'Critiquing…'
+                                          : 'Constitutional Critique'}
+                                      </span>
+                                    </button>
+                                  )}
+
                                   {!isUser && prevUserMsg && (
                                     <button
                                       type="button"
@@ -1030,6 +1065,107 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   .join(' · ')}
                               </div>
                             )}
+
+                          {/* Inline Constitutional Critique Trace & Step-Train Action */}
+                          {!isUser && critiqueByMsgId?.[msg.id] && (
+                            <div className="mt-3 space-y-2 rounded-md border border-line bg-inset p-3 text-xs">
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2 font-mono text-[11px]">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <ShieldCheck className="h-3.5 w-3.5 text-accent-text" />
+                                  <span className="font-semibold text-ink">
+                                    Constitutional Critique
+                                  </span>
+                                  <span aria-hidden="true" className="text-ink-subtle">
+                                    ·
+                                  </span>
+                                  <span
+                                    className={`tabular-nums font-semibold ${
+                                      critiqueByMsgId[msg.id].overallScore >= 85
+                                        ? 'text-accent-text'
+                                        : 'text-warn'
+                                    }`}
+                                  >
+                                    {critiqueByMsgId[msg.id].overallScore}%
+                                  </span>
+                                  <span aria-hidden="true" className="text-ink-subtle">
+                                    ·
+                                  </span>
+                                  <span className="text-ink-muted">
+                                    {critiqueByMsgId[msg.id].usedTeacher
+                                      ? critiqueByMsgId[msg.id].modelUsed
+                                      : 'Deterministic Verifier'}
+                                  </span>
+                                  {critiqueByMsgId[msg.id].dpoPairLogged && (
+                                    <>
+                                      <span aria-hidden="true" className="text-ink-subtle">
+                                        ·
+                                      </span>
+                                      <span className="text-accent-text">DPO Logged ✓</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+
+                              <p className="text-xs leading-relaxed text-ink-muted">
+                                {critiqueByMsgId[msg.id].critiqueSummary}
+                              </p>
+
+                              {critiqueByMsgId[msg.id].violatedPrinciples.length > 0 && (
+                                <div className="divide-y divide-line border-t border-line pt-1.5 font-mono text-[11px]">
+                                  {critiqueByMsgId[msg.id].violatedPrinciples.map((v) => (
+                                    <div key={v.principleId} className="py-1 text-warn">
+                                      {v.title}: <span className="text-ink-muted">{v.reason}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              <div className="space-y-1 border-t border-line pt-2">
+                                <div className="font-mono text-[10px] uppercase tracking-wide text-ink-subtle">
+                                  Revised Answer
+                                </div>
+                                <div className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-ink">
+                                  {critiqueByMsgId[msg.id].revisedAnswer}
+                                </div>
+                              </div>
+
+                              {prevUserMsg && onStepTrainCritiqueRevision && (
+                                <div className="flex justify-end pt-1">
+                                  <button
+                                    type="button"
+                                    disabled={steppingCritiqueMsgId === msg.id}
+                                    onClick={async () => {
+                                      if (!prevUserMsg) return;
+                                      setSteppingCritiqueMsgId(msg.id);
+                                      try {
+                                        const ok = await onStepTrainCritiqueRevision(
+                                          prevUserMsg.content,
+                                          critiqueByMsgId[msg.id].revisedAnswer,
+                                          msg.id,
+                                        );
+                                        if (ok) {
+                                          setFixedMsgIds((prev) => ({
+                                            ...prev,
+                                            [msg.id]: activeCheckpoint?.id || 'trained',
+                                          }));
+                                        }
+                                      } finally {
+                                        setSteppingCritiqueMsgId(null);
+                                      }
+                                    }}
+                                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-accent-border bg-accent-soft px-3 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white disabled:opacity-50"
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                    <span>
+                                      {steppingCritiqueMsgId === msg.id
+                                        ? 'Step-Training…'
+                                        : 'Step-Train Revision'}
+                                    </span>
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* Inline Skill Correction & Step-Train Drawer */}
                           {!isUser && prevUserMsg && onTeachScratchFix && fixingMsgId === msg.id && (

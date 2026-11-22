@@ -333,6 +333,8 @@ export interface TrainingSample {
   createdAt: string;
 }
 
+export type EvalSplit = 'blind' | 'regression' | 'training';
+
 export interface EvalCase {
   id: string;
   title: string;
@@ -342,6 +344,10 @@ export interface EvalCase {
   requireCitation: boolean;
   requireSafeCode: boolean;
   category: 'recall' | 'reasoning' | 'coding' | 'security';
+  split?: EvalSplit;
+  paraphraseProbes?: string[];
+  expectUntrainedRefusal?: boolean;
+  domainTag?: string;
   createdAt: string;
 }
 
@@ -354,6 +360,12 @@ export interface EvalCaseResult {
   engineUsed: 'scratch' | 'cloud';
   responsePreview: string;
   failureReasons: string[];
+  split?: EvalSplit;
+  leakageFlagged?: boolean;
+  leakageReason?: string | null;
+  paraphrasePassedCount?: number;
+  paraphraseTotalCount?: number;
+  refusalCheckPassed?: boolean;
 }
 
 export interface EvalRunSummary {
@@ -365,6 +377,12 @@ export interface EvalRunSummary {
   passRate: number;
   avgLatencyMs: number;
   results: EvalCaseResult[];
+  checkpointId?: string;
+  blindPassRate?: number;
+  regressionPassRate?: number;
+  leakageBlockedCount?: number;
+  beforePassRate?: number | null;
+  promotedCheckpoint?: boolean;
 }
 
 export interface ResourceWasteItem {
@@ -539,6 +557,7 @@ export interface NeuralTrainingExample {
   source?: NeuralPrototypeTarget['source'];
   entryId?: string;
   skillId?: string;
+  weight?: number;
 }
 
 export interface NeuralTokenActivation {
@@ -637,6 +656,70 @@ export interface ChatTurnTelemetry {
   isUntrained: boolean;
   tokensPerSec?: number | null;
   localModelId?: string | null;
+}
+
+export interface ConstitutionalPrinciple {
+  id: string;
+  title: string;
+  rule: string;
+  weight: number;
+  category: 'truthfulness' | 'security' | 'grounding' | 'conciseness' | 'domain';
+  enabled: boolean;
+}
+
+export interface ConstitutionalCritiqueResult {
+  id: string;
+  prompt: string;
+  studentAnswer: string;
+  checkpointId: string;
+  overallScore: number;
+  passedPrinciples: string[];
+  violatedPrinciples: Array<{
+    principleId: string;
+    title: string;
+    reason: string;
+  }>;
+  critiqueSummary: string;
+  revisedAnswer: string;
+  modelUsed: string;
+  usedTeacher: boolean;
+  dpoPairLogged: boolean;
+  createdAt: string;
+}
+
+export interface SyntheticFailureDrill {
+  id: string;
+  sourceEvalCaseId: string;
+  sourceEvalTitle: string;
+  failedPrompt: string;
+  failureReasons: string[];
+  paraphrases: Array<{
+    prompt: string;
+    idealResponse: string;
+    takeaway: string;
+  }>;
+  negativeCounterExample: {
+    badPrompt: string;
+    whyInvalid: string;
+    safeRefusal: string;
+  };
+  reasoningChain: string;
+  modelUsed: string;
+  usedTeacher: boolean;
+}
+
+export interface FailureMiningFlywheelResult {
+  baselineRun: EvalRunSummary;
+  postTrainRun: EvalRunSummary;
+  drillsGenerated: SyntheticFailureDrill[];
+  beforeCheckpointId: string;
+  afterCheckpointId: string;
+  beforePassRate: number;
+  afterPassRate: number;
+  passDelta: number;
+  regressionDetected: boolean;
+  rolledBack: boolean;
+  summaryText: string;
 }
 
 

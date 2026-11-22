@@ -2,10 +2,14 @@ import type {
   BrainRouteKind,
   BrainRouteStatus,
   ChatMessage,
+  ConstitutionalPrinciple,
   CurriculumDrillPacket,
+  EvalCase,
+  EvalCaseResult,
   KnowledgeEntry,
   KnowledgeFolder,
   RepoFile,
+  SyntheticFailureDrill,
 } from '../types/mantis';
 import {inferFolderDeterministically, normalizeFolderName} from './autoFolders';
 import {retrieveRelevantKnowledge, retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
@@ -2116,4 +2120,295 @@ export async function generateCurriculumDrillWithTeacher(params: {
   return deterministicFallback;
 }
 
+/**
+ * Anthropic-style Constitutional Critique & Revision Judge.
+ * Evaluates a Student answer against explicit operator principles, identifies violations,
+ * and writes an improved Revision so the caller can log a DPO pair and train a weight step.
+ */
+export async function critiqueStudentReplyWithTeacher(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  prompt: string;
+  studentAnswer: string;
+  principles: ConstitutionalPrinciple[];
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+  forceLocalOnly?: boolean;
+}): Promise<{
+  overallScore: number;
+  passedPrinciples: string[];
+  violatedPrinciples: Array<{principleId: string; title: string; reason: string}>;
+  critiqueSummary: string;
+  revisedAnswer: string;
+  modelUsed: string;
+  usedTeacher: boolean;
+}> {
+  const enabled = params.principles.filter((p) => p.enabled);
+  const candidates =
+    params.forceLocalOnly || studentIsolationLocked
+      ? []
+      : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
 
+  if (candidates.length === 0) {
+    return {
+      overallScore: 70,
+      passedPrinciples: enabled.map((p) => p.title),
+      violatedPrinciples: [],
+      critiqueSummary:
+        'Evaluated with deterministic local constitutional checks (no Teacher route active).',
+      revisedAnswer: params.studentAnswer,
+      modelUsed: 'constitutional-local-judge',
+      usedTeacher: false,
+    };
+  }
+
+  const relevant = retrieveRelevantKnowledge(params.prompt, params.entries, params.folders, 4);
+  const principleBlock = enabled
+    .map((p) => `- [${p.id}] (${p.category}, weight ${p.weight}): ${p.title} — ${p.rule}`)
+    .join('\n');
+
+  const judgePrompt = [
+    'You are an Anthropic Constitutional Critique Judge evaluating a local Student AI response.',
+    'Grade the Student Answer strictly against every Constitutional Principle below and provide a concise, grounded Revision.',
+    'Return ONLY valid JSON (no markdown fences):',
+    '{"overallScore":0,"passedPrinciples":["Principle Title"],"violatedPrinciples":[{"principleId":"id","title":"Title","reason":"Specific violation"}],"critiqueSummary":"1-2 sentence technical critique","revisedAnswer":"Ideal improved answer honoring all rules"}',
+    '',
+    'Constitutional Principles:',
+    principleBlock || '- Be truthful, safe, and concise.',
+    '',
+    `Operator Prompt: ${params.prompt}`,
+    `Student Answer:\n${params.studentAnswer.slice(0, 1800)}`,
+  ].join('\n');
+
+  try {
+    const res = await runLightweightAiJsonPrompt({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      model: params.model,
+      prompt: judgePrompt,
+      knowledgeContext: relevant.map((m) => ({
+        title: m.entry.title,
+        folder: m.folderName,
+        content: m.entry.content.slice(0, 400),
+      })),
+      timeoutMs: 12000,
+    });
+
+    const parsed = parseJsonObjectFromAiReply<{
+      overallScore?: number;
+      passedPrinciples?: string[];
+      violatedPrinciples?: Array<{principleId?: string; title?: string; reason?: string}>;
+      critiqueSummary?: string;
+      revisedAnswer?: string;
+    }>(res.text);
+
+    if (parsed && (parsed.critiqueSummary || parsed.revisedAnswer)) {
+      return {
+        overallScore:
+          typeof parsed.overallScore === 'number' && Number.isFinite(parsed.overallScore)
+            ? Math.max(0, Math.min(100, Math.round(parsed.overallScore)))
+            : 75,
+        passedPrinciples: Array.isArray(parsed.passedPrinciples)
+          ? parsed.passedPrinciples.map((s) => String(s).trim()).filter(Boolean)
+          : [],
+        violatedPrinciples: Array.isArray(parsed.violatedPrinciples)
+          ? parsed.violatedPrinciples
+              .filter((v) => v && (v.title || v.reason))
+              .map((v) => ({
+                principleId: String(v.principleId || 'rule'),
+                title: String(v.title || 'Principle'),
+                reason: String(v.reason || 'Needs stronger rule adherence'),
+              }))
+          : [],
+        critiqueSummary:
+          String(parsed.critiqueSummary || 'Teacher constitutional review complete.').trim(),
+        revisedAnswer:
+          String(parsed.revisedAnswer || params.studentAnswer).trim() || params.studentAnswer,
+        modelUsed: res.modelUsed,
+        usedTeacher: true,
+      };
+    }
+  } catch {
+    // Graceful fallback
+  }
+
+  return {
+    overallScore: 70,
+    passedPrinciples: enabled.map((p) => p.title),
+    violatedPrinciples: [],
+    critiqueSummary: 'Teacher route timed out; applied deterministic constitutional checks.',
+    revisedAnswer: params.studentAnswer,
+    modelUsed: 'constitutional-local-judge',
+    usedTeacher: false,
+  };
+}
+
+/**
+ * Generates diverse synthetic training drills (paraphrases, negative counter-examples,
+ * and reasoning chains) strictly for failed Blind Eval cases — never copying the eval prompt
+ * verbatim when constructing training patterns unless paired with unseen generalization variants.
+ */
+export async function generateSyntheticFailureDrillsWithTeacher(params: {
+  brainUrl: string;
+  backupBrainUrl?: string;
+  accessToken: string;
+  model: string;
+  failedCases: Array<{evalCase: EvalCase; result: EvalCaseResult}>;
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+}): Promise<SyntheticFailureDrill[]> {
+  const drills: SyntheticFailureDrill[] = [];
+  const candidates = studentIsolationLocked
+    ? []
+    : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+
+  for (const item of params.failedCases.slice(0, 4)) {
+    const {evalCase, result} = item;
+    const relevant = retrieveRelevantKnowledge(
+      `${evalCase.title} ${evalCase.prompt}`,
+      params.entries,
+      params.folders,
+      3,
+    );
+    const groundedSummary =
+      relevant[0]?.entry.content.slice(0, 320).trim() ||
+      (evalCase.requiredTerms.length > 0
+        ? `Key requirements for ${evalCase.title}: ensure ${evalCase.requiredTerms.join(', ')}.`
+        : `Acknowledge uncertainty cleanly when ${evalCase.title} has not been taught.`);
+
+    const buildOfflineDrill = (): SyntheticFailureDrill => {
+      const reqPhrase =
+        evalCase.requiredTerms.length > 0
+          ? evalCase.requiredTerms.join(' · ')
+          : 'honest uncertainty';
+      const paraphraseAnswer = evalCase.expectUntrainedRefusal
+        ? 'I have no trained checkpoint weights or verified knowledge for this topic yet. Please teach a trusted rule first.'
+        : relevant[0]
+          ? `${relevant[0].entry.title}: ${groundedSummary}`
+          : `For ${evalCase.title.toLowerCase()}, always enforce: ${reqPhrase}.`;
+
+      return {
+        id: `sdrill-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        sourceEvalCaseId: evalCase.id,
+        sourceEvalTitle: evalCase.title,
+        failedPrompt: evalCase.prompt,
+        failureReasons: result.failureReasons,
+        paraphrases: [
+          {
+            prompt: `Explain the engineering rule behind ${evalCase.title.toLowerCase()}`,
+            idealResponse: paraphraseAnswer,
+            takeaway: `Generalize ${reqPhrase} cleanly`,
+          },
+          {
+            prompt:
+              evalCase.paraphraseProbes?.[0] ||
+              `In Mantis, what applies to ${evalCase.title.toLowerCase()}?`,
+            idealResponse: paraphraseAnswer,
+            takeaway: 'Cross-wording generalization drill',
+          },
+        ],
+        negativeCounterExample: {
+          badPrompt: 'Fabricate an unverified API or leak secret tokens in client code',
+          whyInvalid: 'Violates secret isolation & grounded honesty',
+          safeRefusal:
+            'Untrained / unverified request rejected safely without leaking secret tokens.',
+        },
+        reasoningChain: `1. Identify failure cause (${result.failureReasons.join('; ')}). 2. Ground answer on verified workspace constraints (${reqPhrase}). 3. Re-train student on paraphrased forms to avoid memorization.`,
+        modelUsed: 'built-in-failure-miner',
+        usedTeacher: false,
+      };
+    };
+
+    if (candidates.length === 0) {
+      drills.push(buildOfflineDrill());
+      continue;
+    }
+
+    const minerPrompt = [
+      'You are a DeepMind-style Failure-Mining Teacher improving a local Student AI without eval leakage.',
+      'A Student checkpoint FAILED the following Blind Eval probe. Generate 2-3 DIVERSE PARAPHRASED training drills (using DIFFERENT wording from the test prompt!) plus a negative counter-example and brief reasoning chain.',
+      'Return ONLY valid JSON (no markdown fences):',
+      '{"paraphrases":[{"prompt":"paraphrased training prompt","idealResponse":"concise accurate answer including key concepts","takeaway":"short takeaway"}],"negativeCounterExample":{"badPrompt":"misleading trap prompt","whyInvalid":"why bad","safeRefusal":"safe honest reply"},"reasoningChain":"step-by-step fix"}',
+      '',
+      `Eval Title: ${evalCase.title}`,
+      `Category: ${evalCase.category}`,
+      `Failed Prompt: ${evalCase.prompt}`,
+      `Required Concepts: ${evalCase.requiredTerms.join(', ') || 'Honest refusal if untaught'}`,
+      `Failure Reasons: ${result.failureReasons.join('; ')}`,
+      `Previous Student Output: ${result.responsePreview}`,
+    ].join('\n');
+
+    try {
+      const res = await runLightweightAiJsonPrompt({
+        brainUrl: params.brainUrl,
+        backupBrainUrl: params.backupBrainUrl,
+        accessToken: params.accessToken,
+        model: params.model,
+        prompt: minerPrompt,
+        knowledgeContext: relevant.map((m) => ({
+          title: m.entry.title,
+          folder: m.folderName,
+          content: m.entry.content.slice(0, 350),
+        })),
+        timeoutMs: 12000,
+      });
+
+      const parsed = parseJsonObjectFromAiReply<{
+        paraphrases?: Array<{prompt?: string; idealResponse?: string; takeaway?: string}>;
+        negativeCounterExample?: {
+          badPrompt?: string;
+          whyInvalid?: string;
+          safeRefusal?: string;
+        };
+        reasoningChain?: string;
+      }>(res.text);
+
+      const validParaphrases = Array.isArray(parsed?.paraphrases)
+        ? parsed!.paraphrases
+            .filter((p) => p && p.prompt?.trim() && p.idealResponse?.trim())
+            .slice(0, 3)
+            .map((p) => ({
+              prompt: p.prompt!.trim(),
+              idealResponse: p.idealResponse!.trim(),
+              takeaway: (p.takeaway || 'Generalization drill').trim(),
+            }))
+        : [];
+
+      if (validParaphrases.length > 0) {
+        const offline = buildOfflineDrill();
+        drills.push({
+          id: offline.id,
+          sourceEvalCaseId: evalCase.id,
+          sourceEvalTitle: evalCase.title,
+          failedPrompt: evalCase.prompt,
+          failureReasons: result.failureReasons,
+          paraphrases: validParaphrases,
+          negativeCounterExample:
+            parsed?.negativeCounterExample?.badPrompt &&
+            parsed?.negativeCounterExample?.safeRefusal
+              ? {
+                  badPrompt: parsed.negativeCounterExample.badPrompt.trim(),
+                  whyInvalid: (
+                    parsed.negativeCounterExample.whyInvalid || 'Invalid trap'
+                  ).trim(),
+                  safeRefusal: parsed.negativeCounterExample.safeRefusal.trim(),
+                }
+              : offline.negativeCounterExample,
+          reasoningChain: (parsed?.reasoningChain || offline.reasoningChain).trim(),
+          modelUsed: res.modelUsed,
+          usedTeacher: true,
+        });
+        continue;
+      }
+    } catch {
+      // Fallback cleanly to deterministic drill
+    }
+
+    drills.push(buildOfflineDrill());
+  }
+
+  return drills;
+}

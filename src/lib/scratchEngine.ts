@@ -217,9 +217,14 @@ export function tryEvaluateMathExpression(input: string): {
   }
 }
 
+let scratchSkillsMemoryFallback: string | null = null;
+
 export function loadScratchSkills(): ScratchSkillRule[] {
   try {
-    const raw = window.localStorage.getItem(SCRATCH_SKILLS_KEY);
+    const raw =
+      typeof window !== 'undefined' && window.localStorage
+        ? window.localStorage.getItem(SCRATCH_SKILLS_KEY)
+        : scratchSkillsMemoryFallback;
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as ScratchSkillRule[]) : [];
@@ -229,8 +234,12 @@ export function loadScratchSkills(): ScratchSkillRule[] {
 }
 
 export function saveScratchSkills(skills: ScratchSkillRule[]): void {
+  const serialized = JSON.stringify(skills.slice(0, 400));
+  scratchSkillsMemoryFallback = serialized;
   try {
-    window.localStorage.setItem(SCRATCH_SKILLS_KEY, JSON.stringify(skills.slice(0, 400)));
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(SCRATCH_SKILLS_KEY, serialized);
+    }
   } catch {
     // ignore quota issues cleanly
   }

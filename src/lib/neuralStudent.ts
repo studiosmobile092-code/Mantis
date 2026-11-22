@@ -591,6 +591,9 @@ export function trainNeuralBatchCore(params: {
       source: ex.source || 'manual',
       entryId: ex.entryId,
       skillId: ex.skillId,
+      weight: typeof ex.weight === 'number' && Number.isFinite(ex.weight)
+        ? Math.max(0.25, Math.min(2.5, ex.weight))
+        : 1.0,
     }))
     .filter((ex) => ex.prompt.length > 0 && ex.response.length > 0);
 
@@ -657,7 +660,12 @@ export function trainNeuralBatchCore(params: {
   );
 
   // Pre-encode training batch + explicit OOD (<unk>) negative anchor
-  const encodedSamples: Array<{tokenIds: number[]; targetClass: number; targetArrIdx: number}> = [];
+  const encodedSamples: Array<{
+    tokenIds: number[];
+    targetClass: number;
+    targetArrIdx: number;
+    weight: number;
+  }> = [];
   for (let i = 0; i < cleanedExamples.length; i += 1) {
     const enc = encodeBpe(cleanedExamples[i].prompt, nextTokenizer);
     if (enc.tokenIds.length === 0) continue;
@@ -667,6 +675,7 @@ export function trainNeuralBatchCore(params: {
         tokenIds: enc.tokenIds,
         targetClass: classIdx,
         targetArrIdx: classIdx - 1,
+        weight: cleanedExamples[i].weight,
       });
     }
   }
@@ -682,9 +691,14 @@ export function trainNeuralBatchCore(params: {
   }
 
   // Add synthetic negative calibration patterns mapped to OOD class 0
-  const oodAnchors: Array<{tokenIds: number[]; targetClass: number; targetArrIdx: number}> = [
-    {tokenIds: [1], targetClass: 0, targetArrIdx: -1},
-    {tokenIds: [1, 1], targetClass: 0, targetArrIdx: -1},
+  const oodAnchors: Array<{
+    tokenIds: number[];
+    targetClass: number;
+    targetArrIdx: number;
+    weight: number;
+  }> = [
+    {tokenIds: [1], targetClass: 0, targetArrIdx: -1, weight: 0.35},
+    {tokenIds: [1, 1], targetClass: 0, targetArrIdx: -1, weight: 0.35},
   ];
 
   const adam = makeAdamMoments(tensors);
@@ -718,7 +732,7 @@ export function trainNeuralBatchCore(params: {
       const sample = epochItems[sIdx];
       const fwd = forwardPass(sample.tokenIds, tensors);
       const targetProb = Math.max(1e-7, fwd.probs[sample.targetClass] ?? 1e-7);
-      const sampleWeight = sample.targetClass === 0 ? 0.35 : 1.0;
+      const sampleWeight = sample.targetClass === 0 ? 0.35 : sample.weight;
       const loss = -Math.log(targetProb) * sampleWeight;
       epochLoss += loss;
 
@@ -1029,59 +1043,116 @@ export function inferNeuralCore(
 }
 
 /**
- * Converts approved SFT pairs, learned scratch skills, and trusted knowledge rules
- * into clean neural batch training examples.
+ * Converts approved SFT/DPO pairs (weighted toward DPO chosen revisions), learned skills,
+ * Trusted knowledge rules, and optional 30% anti-forgetting curriculum replay anchors into
+ * clean neural batch training examples.
  */
 export function buildTrainingExamplesFromWorkspace(params: {
   trainingSamples: TrainingSample[];
   scratchSkills: ScratchSkillRule[];
   entries: KnowledgeEntry[];
   folders: KnowledgeFolder[];
+  activeCheckpoint?: NeuralCheckpoint;
 }): NeuralTrainingExample[] {
   const examples: NeuralTrainingExample[] = [];
-  const seenPrompts = new Set<string>();
+  const seenPrompts = new Map<string, number>();
+  const rejectedResponses = new Set<string>();
   const folderMap = new Map(params.folders.map((f) => [f.id, f.name]));
 
-  const pushUnique = (ex: NeuralTrainingExample) => {
+  // Track explicitly rejected responses so lower-priority skills cannot resurrect DPO losers
+  for (const s of params.trainingSamples) {
+    if (s.status !== 'rejected' && s.format === 'dpo' && s.rejectedResponse?.trim()) {
+      rejectedResponses.add(s.rejectedResponse.trim().slice(0, 120).toLowerCase());
+    }
+  }
+
+  const pushOrUpgrade = (ex: NeuralTrainingExample) => {
     const key = ex.prompt.trim().toLowerCase();
-    if (!key || !ex.response.trim() || seenPrompts.has(key)) return;
-    seenPrompts.add(key);
+    if (!key || !ex.response.trim()) return;
+    const existingIdx = seenPrompts.get(key);
+    if (existingIdx !== undefined) {
+      const prev = examples[existingIdx];
+      if ((ex.weight ?? 1) > (prev.weight ?? 1)) {
+        examples[existingIdx] = ex;
+      }
+      return;
+    }
+    seenPrompts.set(key, examples.length);
     examples.push(ex);
   };
 
+  // 1. DPO preference winners receive highest gradient weight (1.75x); approved SFT gets 1.2x
   for (const s of params.trainingSamples) {
     if (s.status === 'rejected') continue;
-    pushUnique({
+    const weight =
+      s.format === 'dpo'
+        ? s.status === 'approved'
+          ? 1.85
+          : 1.35
+        : s.status === 'approved'
+          ? 1.25
+          : 0.85;
+    pushOrUpgrade({
       prompt: s.prompt,
       response: s.chosenResponse,
-      folderName: 'Training',
+      folderName: s.format === 'dpo' ? 'Constitutional DPO' : 'Training',
       source: s.format === 'dpo' ? 'dpo' : 'sft',
+      weight,
     });
   }
 
+  // 2. Active taught skills (skipping any overwritten DPO loser phrasing)
   for (const sk of params.scratchSkills) {
     const bestReply = sk.responses[0] || '';
+    if (!bestReply.trim()) continue;
+    if (rejectedResponses.has(bestReply.trim().slice(0, 120).toLowerCase())) {
+      continue;
+    }
     for (const trig of sk.triggers.slice(0, 4)) {
-      pushUnique({
+      pushOrUpgrade({
         prompt: trig,
         response: bestReply,
         folderName: sk.folderName,
         source: sk.learnedFrom === 'teacher-distilled' ? 'teacher-distilled' : 'manual',
         skillId: sk.id,
+        weight: sk.learnedFrom === 'teacher-distilled' ? 1.15 : 1.05,
       });
     }
   }
 
+  // 3. Trusted Knowledge Rules (raw captures are quarantined out of neural training)
   for (const entry of params.entries) {
     if (getEntryStatus(entry) !== 'trusted') continue;
     const fName = (entry.folder_id && folderMap.get(entry.folder_id)) || 'Patterns';
-    pushUnique({
+    pushOrUpgrade({
       prompt: entry.title,
       response: entry.content.slice(0, 800),
       folderName: fName,
       source: 'knowledge',
       entryId: entry.id,
+      weight: 1.15,
     });
+  }
+
+  // 4. Anti-Forgetting Curriculum Replay: ensure ~30% previously converged checkpoint targets stay mixed in
+  if (params.activeCheckpoint && params.activeCheckpoint.targets.length > 0) {
+    const replayBudget = Math.max(2, Math.ceil(examples.length * 0.3));
+    const convergedTargets = [...params.activeCheckpoint.targets]
+      .filter((t) => !rejectedResponses.has(t.responseText.trim().slice(0, 120).toLowerCase()))
+      .sort((a, b) => a.lastLoss - b.lastLoss)
+      .slice(0, replayBudget);
+
+    for (const tgt of convergedTargets) {
+      pushOrUpgrade({
+        prompt: tgt.promptPattern,
+        response: tgt.responseText,
+        folderName: tgt.folderName,
+        source: tgt.source,
+        entryId: tgt.entryId,
+        skillId: tgt.skillId,
+        weight: 1.0,
+      });
+    }
   }
 
   return examples.slice(0, MAX_TARGETS);

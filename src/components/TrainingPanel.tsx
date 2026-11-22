@@ -15,6 +15,8 @@ import {
   RefreshCw,
   RotateCcw,
   Scale,
+  Search,
+  ShieldCheck,
   Sparkles,
   Square,
   Trash2,
@@ -26,6 +28,12 @@ import {
   generateCurriculumDrillWithTeacher,
   runArenaDuelWithBrain,
 } from '../lib/aiBrain';
+import {
+  addConstitutionalPrinciple,
+  deleteConstitutionalPrinciple,
+  resetConstitutionalPrinciples,
+  toggleConstitutionalPrinciple,
+} from '../lib/constitutionalEngine';
 import {
   LOCAL_LLM_CATALOG,
   buildAdapterConditionedMessages,
@@ -43,10 +51,13 @@ import {
 import {
   addEvalCase,
   addTrainingSample,
+  batchUpdateTrainingSampleStatus,
   buildSelfOptimizationProposals,
+  deduplicateTrainingSamples,
   deleteEvalCase,
   deleteTrainingSample,
   executeEvalSuite,
+  scrubAllTrainingSamples,
   updateTrainingSample,
 } from '../lib/trainingStore';
 import {
@@ -56,9 +67,13 @@ import {
 } from '../lib/workerClient';
 import type {
   ComputeEngineStatus,
+  ConstitutionalCritiqueResult,
+  ConstitutionalPrinciple,
   CurriculumDrillPacket,
   EvalCase,
   EvalRunSummary,
+  EvalSplit,
+  FailureMiningFlywheelResult,
   HardwareTelemetry,
   KnowledgeEntry,
   KnowledgeFolder,
@@ -123,6 +138,16 @@ interface TrainingPanelProps {
   onClearLocalLlmCache: () => Promise<boolean>;
   onStopLocalLlmGeneration: () => void;
   openLocalModelsSignal?: number;
+  principles: ConstitutionalPrinciple[];
+  onUpdatePrinciples: (next: ConstitutionalPrinciple[]) => void;
+  critiqueHistory: ConstitutionalCritiqueResult[];
+  onRunManualCritique: (
+    prompt: string,
+    studentAnswer: string,
+  ) => Promise<ConstitutionalCritiqueResult>;
+  onRunFailureMiningFlywheel: () => Promise<FailureMiningFlywheelResult | null>;
+  isMiningFailures: boolean;
+  latestFlywheelResult: FailureMiningFlywheelResult | null;
 }
 
 type TrainingTab =
@@ -183,6 +208,13 @@ export function TrainingPanel({
   onClearLocalLlmCache,
   onStopLocalLlmGeneration,
   openLocalModelsSignal,
+  principles,
+  onUpdatePrinciples,
+  critiqueHistory,
+  onRunManualCritique,
+  onRunFailureMiningFlywheel,
+  isMiningFailures,
+  latestFlywheelResult,
 }: TrainingPanelProps) {
   const [activeTab, setActiveTab] = useState<TrainingTab>('neural');
   const [batchEpochs, setBatchEpochs] = useState<number>(20);
@@ -229,12 +261,29 @@ export function TrainingPanel({
   const [editResponsesText, setEditResponsesText] = useState('');
   const [editFolderText, setEditFolderText] = useState('');
 
-  // Eval Bench State
+  // Constitutional Rubric & DPO Ledger State
+  const [newRuleTitle, setNewRuleTitle] = useState('');
+  const [newRuleBody, setNewRuleBody] = useState('');
+  const [newRuleCategory, setNewRuleCategory] =
+    useState<ConstitutionalPrinciple['category']>('domain');
+  const [judgePrompt, setJudgePrompt] = useState('');
+  const [judgeAnswer, setJudgeAnswer] = useState('');
+  const [isRunningJudge, setIsRunningJudge] = useState(false);
+  const [latestJudgeResult, setLatestJudgeResult] =
+    useState<ConstitutionalCritiqueResult | null>(null);
+  const [ledgerFilter, setLedgerFilter] = useState<'all' | 'dpo' | 'sft' | 'pending'>('all');
+  const [ledgerSearch, setLedgerSearch] = useState('');
+  const [ledgerFeedback, setLedgerFeedback] = useState<string | null>(null);
+
+  // Eval Bench & Failure-Mining State
   const [evalMode, setEvalMode] = useState<'scratch' | 'hybrid' | 'cloud'>('scratch');
   const [isRunningEval, setIsRunningEval] = useState(false);
   const [newCaseTitle, setNewCaseTitle] = useState('');
   const [newCasePrompt, setNewCasePrompt] = useState('');
+  const [newCaseParaphrase, setNewCaseParaphrase] = useState('');
   const [newCaseRequired, setNewCaseRequired] = useState('');
+  const [newCaseSplit, setNewCaseSplit] = useState<EvalSplit>('blind');
+  const [newCaseExpectRefusal, setNewCaseExpectRefusal] = useState(false);
 
   // Resource Profiler State
   const [profile, setProfile] = useState<ResourceProfile | null>(null);
@@ -254,9 +303,27 @@ export function TrainingPanel({
         scratchSkills,
         entries,
         folders,
+        activeCheckpoint,
       }),
-    [trainingSamples, scratchSkills, entries, folders],
+    [trainingSamples, scratchSkills, entries, folders, activeCheckpoint],
   );
+
+  const filteredLedgerSamples = useMemo(() => {
+    const q = ledgerSearch.trim().toLowerCase();
+    return trainingSamples.filter((s) => {
+      if (ledgerFilter === 'dpo' && s.format !== 'dpo') return false;
+      if (ledgerFilter === 'sft' && s.format !== 'sft') return false;
+      if (ledgerFilter === 'pending' && s.status !== 'pending') return false;
+      if (
+        q &&
+        !s.prompt.toLowerCase().includes(q) &&
+        !s.chosenResponse.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [trainingSamples, ledgerFilter, ledgerSearch]);
 
   useEffect(() => {
     if (arenaInitialPrompt) {
@@ -403,6 +470,7 @@ export function TrainingPanel({
     if (isRunningEval || evalCases.length === 0) return;
     setIsRunningEval(true);
     try {
+      const previousPassRate = evalRuns[0]?.passRate ?? null;
       const summary = await executeEvalSuite({
         cases: evalCases,
         entries,
@@ -412,6 +480,9 @@ export function TrainingPanel({
         cloudResponder: onCloudAsk,
         mode: evalMode,
         activeCheckpoint,
+        trainingSamples,
+        scratchSkills,
+        beforePassRate: previousPassRate,
       });
       onAddEvalRun(summary);
     } finally {
@@ -432,12 +503,22 @@ export function TrainingPanel({
       forbiddenTerms: ['undefined', 'sb_secret_', 'hf_'],
       requireCitation: false,
       requireSafeCode: true,
-      category: 'coding',
+      category: newCaseExpectRefusal ? 'reasoning' : 'coding',
+      split: newCaseSplit,
+      paraphraseProbes: newCaseParaphrase.trim()
+        ? newCaseParaphrase
+            .split('|')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined,
+      expectUntrainedRefusal: newCaseExpectRefusal,
     });
     onChangeEvalCases(next);
     setNewCaseTitle('');
     setNewCasePrompt('');
+    setNewCaseParaphrase('');
     setNewCaseRequired('');
+    setNewCaseExpectRefusal(false);
   }
 
   async function handleRunCurriculumDrill(params: {
@@ -549,8 +630,12 @@ export function TrainingPanel({
             },
             {id: 'arena', label: 'Preference Eval', icon: Scale},
             {id: 'curriculum', label: `Curriculum (${curriculumCoverage.gaps.length})`, icon: GraduationCap},
-            {id: 'dataset', label: `Dataset & Skills (${trainingSamples.length + scratchSkills.length})`, icon: FlaskConical},
-            {id: 'evals', label: `Eval Bench (${evalCases.length})`, icon: Gauge},
+            {
+              id: 'dataset',
+              label: `Critique & DPO (${trainingSamples.length + scratchSkills.length})`,
+              icon: ShieldCheck,
+            },
+            {id: 'evals', label: `Blind Eval & Mining (${evalCases.length})`, icon: Gauge},
             {id: 'profiler', label: 'RAM & Self-Opt', icon: Wrench},
           ] as const
         ).map((tab) => {
@@ -1499,187 +1584,538 @@ export function TrainingPanel({
         </div>
       )}
 
-      {/* TAB 3: DATASET & LEARNED SCRATCH SKILLS */}
+      {/* TAB 3: CONSTITUTIONAL CRITIQUE, DPO LEDGER & LEARNED SKILLS */}
       {activeTab === 'dataset' && (
-        <div className="grid gap-5 lg:grid-cols-2">
-          {/* Training Samples Table */}
-          <div className="space-y-3">
-            <h2 className="text-xs font-semibold tracking-wide text-ink-muted uppercase">
-              Curated SFT &amp; DPO Samples ({trainingSamples.length})
-            </h2>
-            {trainingSamples.length === 0 ? (
-              <div className="rounded-lg border border-line bg-surface p-5 text-xs text-ink-muted">
-                No training pairs recorded yet. Approve patches, distill lessons from Teacher, or log winners in Preference Eval.
+        <div className="space-y-5">
+          {/* Constitutional Principles & Quick Critique Judge */}
+          <div className="grid gap-5 lg:grid-cols-2">
+            {/* Constitutional Principles Rubric */}
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
+                <div>
+                  <h2 className="text-xs font-semibold text-ink">
+                    Constitutional Principles ({principles.filter((p) => p.enabled).length}/
+                    {principles.length} active)
+                  </h2>
+                  <p className="text-[11px] text-ink-muted">
+                    Editable alignment rubric enforced on chat critiques and DPO revision generation.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onUpdatePrinciples(resetConstitutionalPrinciples())}
+                  className="min-h-[40px] rounded border border-line bg-inset px-2.5 text-[11px] font-medium text-ink-muted hover:text-ink"
+                >
+                  Reset Defaults
+                </button>
               </div>
-            ) : (
-              <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
-                {trainingSamples.map((s) => (
+
+              <div className="divide-y divide-line">
+                {principles.map((p) => (
                   <div
-                    key={s.id}
-                    className="space-y-2 rounded-lg border border-line bg-surface p-3 text-xs"
+                    key={p.id}
+                    className="flex items-start justify-between gap-3 py-2.5 text-xs"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[11px] font-semibold text-accent-text uppercase">
-                        {s.format} · {s.modelChosen}
+                    <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5">
+                      <input
+                        type="checkbox"
+                        checked={p.enabled}
+                        onChange={() => onUpdatePrinciples(toggleConstitutionalPrinciple(p.id))}
+                        className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-500"
+                      />
+                      <span className="min-w-0 space-y-0.5">
+                        <span className="block font-medium text-ink">
+                          {p.title}{' '}
+                          <span className="font-mono text-[10px] text-ink-subtle">
+                            · {p.category} · {p.weight.toFixed(1)}x
+                          </span>
+                        </span>
+                        <span className="block text-[11px] leading-relaxed text-ink-muted">
+                          {p.rule}
+                        </span>
                       </span>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onChangeTrainingSamples(
-                              updateTrainingSample(s.id, {
-                                status: s.status === 'approved' ? 'rejected' : 'approved',
-                              }),
-                            )
-                          }
-                          className="min-h-[40px] rounded border border-line px-2.5 py-0.5 font-mono text-[11px] text-ink-muted hover:text-ink"
-                        >
-                          {s.status}
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Delete training sample"
-                          onClick={() => onChangeTrainingSamples(deleteTrainingSample(s.id))}
-                          className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="font-medium text-ink">{s.prompt}</div>
-                    <div className="line-clamp-3 font-mono text-[11px] text-ink-muted">
-                      {s.chosenResponse}
-                    </div>
+                    </label>
+                    <button
+                      type="button"
+                      aria-label={`Delete principle ${p.title}`}
+                      onClick={() => onUpdatePrinciples(deleteConstitutionalPrinciple(p.id))}
+                      className="inline-flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded text-ink-subtle hover:text-danger"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 ))}
               </div>
-            )}
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newRuleTitle.trim() || !newRuleBody.trim()) return;
+                  onUpdatePrinciples(
+                    addConstitutionalPrinciple({
+                      title: newRuleTitle,
+                      rule: newRuleBody,
+                      category: newRuleCategory,
+                    }),
+                  );
+                  setNewRuleTitle('');
+                  setNewRuleBody('');
+                }}
+                className="space-y-2 border-t border-line pt-3"
+              >
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                  <input
+                    type="text"
+                    value={newRuleTitle}
+                    onChange={(e) => setNewRuleTitle(e.target.value)}
+                    placeholder="Principle title (e.g. Explicit TypeScript Boundaries)"
+                    className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                  />
+                  <select
+                    value={newRuleCategory}
+                    onChange={(e) =>
+                      setNewRuleCategory(e.target.value as ConstitutionalPrinciple['category'])
+                    }
+                    className="min-h-[40px] rounded border border-line-strong bg-inset px-2.5 text-xs text-ink focus:border-accent focus:outline-none"
+                  >
+                    <option value="domain">domain</option>
+                    <option value="truthfulness">truthfulness</option>
+                    <option value="security">security</option>
+                    <option value="grounding">grounding</option>
+                    <option value="conciseness">conciseness</option>
+                  </select>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    type="text"
+                    value={newRuleBody}
+                    onChange={(e) => setNewRuleBody(e.target.value)}
+                    placeholder="Constitutional rule description…"
+                    className="min-h-[40px] min-w-[180px] flex-1 rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!newRuleTitle.trim() || !newRuleBody.trim()}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-elevated px-3.5 text-xs font-semibold text-ink hover:bg-accent hover:text-white disabled:opacity-45"
+                  >
+                    <PlusCircle className="h-3.5 w-3.5" />
+                    <span>Add Rule</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Constitutional Critique Judge & Recent Log */}
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex items-center justify-between border-b border-line pb-2.5">
+                <div>
+                  <h2 className="text-xs font-semibold text-ink">
+                    Constitutional Judge &amp; Auto-DPO Critic
+                  </h2>
+                  <p className="text-[11px] text-ink-muted">
+                    Critiques any Student answer against active rules, writes a clean revision, and logs a DPO preference pair.
+                  </p>
+                </div>
+                <span className="font-mono text-[11px] tabular-nums text-ink-subtle">
+                  {critiqueHistory.length} runs
+                </span>
+              </div>
+
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!judgePrompt.trim() || !judgeAnswer.trim() || isRunningJudge) return;
+                  setIsRunningJudge(true);
+                  try {
+                    const res = await onRunManualCritique(judgePrompt.trim(), judgeAnswer.trim());
+                    setLatestJudgeResult(res);
+                  } finally {
+                    setIsRunningJudge(false);
+                  }
+                }}
+                className="space-y-2"
+              >
+                <input
+                  type="text"
+                  value={judgePrompt}
+                  onChange={(e) => setJudgePrompt(e.target.value)}
+                  placeholder="User prompt to critique…"
+                  className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                />
+                <textarea
+                  rows={2}
+                  value={judgeAnswer}
+                  onChange={(e) => setJudgeAnswer(e.target.value)}
+                  placeholder="Student response draft to inspect & revise…"
+                  className="w-full rounded border border-line-strong bg-inset p-2.5 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                />
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={!judgePrompt.trim() || isRunningJudge}
+                    onClick={async () => {
+                      if (!judgePrompt.trim()) return;
+                      const [hybrid, neuralPred] = await Promise.all([
+                        runHybridRetrievalAsync({
+                          query: judgePrompt,
+                          entries,
+                          folders,
+                          limit: 4,
+                        }),
+                        inferNeuralStudentAsync(judgePrompt, activeCheckpoint),
+                      ]);
+                      const scratch = synthesizeScratchWithHybrid({
+                        prompt: judgePrompt,
+                        hybridMatches: hybrid,
+                        entries,
+                        folders,
+                        repoFiles,
+                        repoLabel,
+                        growth: computeKnowledgeGrowth(entries),
+                        recordUsage: false,
+                        activeCheckpoint,
+                        neuralPrediction: neuralPred,
+                      });
+                      setJudgeAnswer(scratch.replyText);
+                    }}
+                    className="min-h-[40px] rounded border border-line bg-inset px-3 text-xs font-medium text-ink-muted hover:text-ink disabled:opacity-45"
+                  >
+                    Sample {activeCheckpoint.id}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isRunningJudge || !judgePrompt.trim() || !judgeAnswer.trim()}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-4 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-45"
+                  >
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    <span>{isRunningJudge ? 'Critiquing…' : 'Run Critique + Log DPO'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {(latestJudgeResult || critiqueHistory[0]) &&
+                (() => {
+                  const shown = latestJudgeResult || critiqueHistory[0];
+                  return (
+                    <div className="space-y-1.5 border-t border-line pt-2.5 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+                        <span className="font-semibold text-ink">
+                          Score {shown.overallScore}% · {shown.checkpointId}
+                        </span>
+                        <span className="text-accent-text">
+                          {shown.dpoPairLogged ? 'DPO Pair Saved ✓' : 'Rule Check Passed'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-ink-muted">{shown.critiqueSummary}</p>
+                      <div className="max-h-24 overflow-y-auto rounded border border-line bg-inset p-2 font-mono text-[11px] text-ink">
+                        {shown.revisedAnswer}
+                      </div>
+                    </div>
+                  );
+                })()}
+            </div>
           </div>
 
-          {/* Learned Scratch Skills */}
-          <div className="space-y-3">
-            <h2 className="text-xs font-semibold tracking-wide text-ink-muted uppercase">
-              Distilled Offline Scratch Skills ({scratchSkills.length})
-            </h2>
-            {scratchSkills.length === 0 ? (
-              <div className="rounded-lg border border-line bg-surface p-5 text-xs text-ink-muted">
-                When Scratch AI encounters a prompt it doesn&apos;t know (like greetings or domain questions), Cloud Teacher teaches it multi-variant trigger rules saved here for permanent offline use.
+          {/* High-Density SFT & DPO Ledger + Learned Scratch Skills */}
+          <div className="grid gap-5 lg:grid-cols-2">
+            {/* Training Samples Ledger */}
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
+                <h2 className="text-xs font-semibold text-ink">
+                  SFT &amp; DPO Preference Ledger ({trainingSamples.length})
+                </h2>
+                <span className="font-mono text-[11px] tabular-nums text-ink-subtle">
+                  {trainingSamples.filter((s) => s.format === 'dpo').length} DPO ·{' '}
+                  {trainingSamples.filter((s) => s.status === 'pending').length} pending
+                </span>
               </div>
-            ) : (
-              <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
-                {scratchSkills.map((sk) => {
-                  const isEditing = editingSkillId === sk.id;
-                  return (
-                    <div
-                      key={sk.id}
-                      className="space-y-2 rounded-lg border border-line bg-surface p-3 text-xs"
-                    >
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(['all', 'dpo', 'sft', 'pending'] as const).map((flt) => (
+                  <button
+                    key={flt}
+                    type="button"
+                    onClick={() => setLedgerFilter(flt)}
+                    className={`min-h-[38px] rounded border px-2.5 font-mono text-[11px] uppercase ${
+                      ledgerFilter === flt
+                        ? 'border-accent-border bg-accent-soft text-accent-text'
+                        : 'border-line bg-inset text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {flt}
+                  </button>
+                ))}
+                <div className="relative min-w-[140px] flex-1">
+                  <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-ink-subtle" />
+                  <input
+                    type="text"
+                    value={ledgerSearch}
+                    onChange={(e) => setLedgerSearch(e.target.value)}
+                    placeholder="Filter samples…"
+                    className="min-h-[38px] w-full rounded border border-line bg-inset pr-2.5 pl-8 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const pendingIds = trainingSamples
+                      .filter((s) => s.status === 'pending')
+                      .map((s) => s.id);
+                    if (pendingIds.length === 0) {
+                      setLedgerFeedback('No pending samples to approve.');
+                      return;
+                    }
+                    onChangeTrainingSamples(
+                      batchUpdateTrainingSampleStatus(pendingIds, 'approved'),
+                    );
+                    setLedgerFeedback(`Approved ${pendingIds.length} pending sample(s).`);
+                  }}
+                  className="min-h-[40px] rounded border border-line bg-inset px-2.5 text-[11px] font-medium text-ink hover:border-line-strong"
+                >
+                  Approve Pending
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = deduplicateTrainingSamples();
+                    onChangeTrainingSamples(res.samples);
+                    setLedgerFeedback(
+                      res.removedCount > 0
+                        ? `Deduplicated ${res.removedCount} redundant row(s).`
+                        : 'Dataset ledger has 0 duplicates.',
+                    );
+                  }}
+                  className="min-h-[40px] rounded border border-line bg-inset px-2.5 text-[11px] font-medium text-ink hover:border-line-strong"
+                >
+                  Deduplicate
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = scrubAllTrainingSamples();
+                    onChangeTrainingSamples(res.samples);
+                    setLedgerFeedback(
+                      res.scrubbedCount > 0
+                        ? `Redacted secrets in ${res.scrubbedCount} row(s).`
+                        : 'Secret scan clean across all rows.',
+                    );
+                  }}
+                  className="min-h-[40px] rounded border border-line bg-inset px-2.5 text-[11px] font-medium text-ink hover:border-line-strong"
+                >
+                  Scrub Secrets
+                </button>
+                <button
+                  type="button"
+                  disabled={isTrainingNeural || readyBatchExamples.length === 0}
+                  onClick={async () => {
+                    const res = await onTrainNeuralBatch(20);
+                    if (res) {
+                      setLedgerFeedback(
+                        `Trained ${res.checkpointId} with weighted DPO + 30% replay (${res.firstLoss.toFixed(3)} -> ${res.lastLoss.toFixed(3)}).`,
+                      );
+                    }
+                  }}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-3 text-[11px] font-semibold text-white hover:bg-accent-hover disabled:opacity-45"
+                >
+                  <Play className="h-3 w-3" />
+                  <span>Train Weighted + Replay</span>
+                </button>
+              </div>
+
+              {ledgerFeedback && (
+                <div className="rounded border border-accent-border bg-accent-soft px-3 py-2 font-mono text-[11px] text-accent-text">
+                  {ledgerFeedback}
+                </div>
+              )}
+
+              {filteredLedgerSamples.length === 0 ? (
+                <div className="py-6 text-center text-xs text-ink-muted">
+                  No matching training pairs yet. Run Constitutional Critique, Preference Eval, or Drills.
+                </div>
+              ) : (
+                <div className="max-h-[420px] divide-y divide-line overflow-y-auto pr-1">
+                  {filteredLedgerSamples.map((s) => (
+                    <div key={s.id} className="space-y-1.5 py-2.5 text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-mono text-[11px] font-semibold text-accent-text">
-                          {sk.folderName} · {sk.usageCount} recalls · conf {sk.confidence.toFixed(1)}
+                        <span className="font-mono text-[11px] tabular-nums text-ink-muted">
+                          <span className="font-semibold uppercase text-accent-text">
+                            {s.format}
+                          </span>{' '}
+                          · {s.format === 'dpo' ? '1.85x weight' : '1.25x weight'} · {s.modelChosen}
                         </span>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            aria-label="Edit distilled skill"
-                            onClick={() => {
-                              if (isEditing) {
-                                setEditingSkillId(null);
-                              } else {
-                                setEditingSkillId(sk.id);
-                                setEditFolderText(sk.folderName);
-                                setEditTriggersText(sk.triggers.join(', '));
-                                setEditResponsesText(sk.responses.join('\n'));
-                              }
-                            }}
-                            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-ink"
+                            onClick={() =>
+                              onChangeTrainingSamples(
+                                updateTrainingSample(s.id, {
+                                  status: s.status === 'approved' ? 'rejected' : 'approved',
+                                }),
+                              )
+                            }
+                            className={`min-h-[40px] rounded border px-2.5 font-mono text-[11px] ${
+                              s.status === 'approved'
+                                ? 'border-accent-border bg-accent-soft text-accent-text'
+                                : 'border-line bg-inset text-ink-muted hover:text-ink'
+                            }`}
                           >
-                            <Edit3 className="h-3.5 w-3.5" />
+                            {s.status}
                           </button>
                           <button
                             type="button"
-                            aria-label="Delete distilled skill"
-                            onClick={() => onDeleteScratchSkill(sk.id)}
+                            aria-label="Delete training sample"
+                            onClick={() => onChangeTrainingSamples(deleteTrainingSample(s.id))}
                             className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         </div>
                       </div>
+                      <div className="font-medium text-ink">{s.prompt}</div>
+                      <div className="line-clamp-2 font-mono text-[11px] text-ink-muted">
+                        + {s.chosenResponse}
+                      </div>
+                      {s.rejectedResponse && (
+                        <div className="line-clamp-1 font-mono text-[10px] text-warn">
+                          - Demoted: {s.rejectedResponse}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
-                      {isEditing ? (
-                        <div className="space-y-2 border-t border-line pt-2">
-                          <input
-                            type="text"
-                            value={editFolderText}
-                            onChange={(e) => setEditFolderText(e.target.value)}
-                            placeholder="Folder name"
-                            className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 text-xs text-ink"
-                          />
-                          <input
-                            type="text"
-                            value={editTriggersText}
-                            onChange={(e) => setEditTriggersText(e.target.value)}
-                            placeholder="Comma-separated triggers"
-                            className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 font-mono text-xs text-ink"
-                          />
-                          <textarea
-                            rows={3}
-                            value={editResponsesText}
-                            onChange={(e) => setEditResponsesText(e.target.value)}
-                            placeholder="One response variant per line"
-                            className="w-full rounded border border-line-strong bg-inset p-2.5 text-xs text-ink"
-                          />
-                          <div className="flex justify-end gap-2">
+            {/* Learned Scratch Skills */}
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex items-center justify-between border-b border-line pb-2.5">
+                <h2 className="text-xs font-semibold text-ink">
+                  Distilled Offline Scratch Skills ({scratchSkills.length})
+                </h2>
+                <span className="font-mono text-[11px] tabular-nums text-ink-subtle">
+                  Zero-call recall
+                </span>
+              </div>
+              {scratchSkills.length === 0 ? (
+                <div className="py-6 text-xs leading-relaxed text-ink-muted">
+                  When Student encounters an unfamiliar prompt, Teacher distillation or Fix Answer teaches multi-variant trigger rules stored locally here.
+                </div>
+              ) : (
+                <div className="max-h-[480px] divide-y divide-line overflow-y-auto pr-1">
+                  {scratchSkills.map((sk) => {
+                    const isEditing = editingSkillId === sk.id;
+                    return (
+                      <div key={sk.id} className="space-y-2 py-2.5 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-[11px] font-semibold tabular-nums text-accent-text">
+                            {sk.folderName} · {sk.usageCount} recalls · conf {sk.confidence.toFixed(1)}
+                          </span>
+                          <div className="flex items-center gap-1">
                             <button
                               type="button"
-                              onClick={() => setEditingSkillId(null)}
-                              className="min-h-[40px] rounded border border-line px-3 text-xs text-ink-muted"
+                              aria-label="Edit distilled skill"
+                              onClick={() => {
+                                if (isEditing) {
+                                  setEditingSkillId(null);
+                                } else {
+                                  setEditingSkillId(sk.id);
+                                  setEditFolderText(sk.folderName);
+                                  setEditTriggersText(sk.triggers.join(', '));
+                                  setEditResponsesText(sk.responses.join('\n'));
+                                }
+                              }}
+                              className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-ink"
                             >
-                              Cancel
+                              <Edit3 className="h-3.5 w-3.5" />
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                onUpdateScratchSkill(sk.id, {
-                                  folderName: editFolderText.trim() || sk.folderName,
-                                  triggers: editTriggersText
-                                    .split(',')
-                                    .map((t) => t.trim())
-                                    .filter(Boolean),
-                                  responses: editResponsesText
-                                    .split('\n')
-                                    .map((r) => r.trim())
-                                    .filter(Boolean),
-                                });
-                                setEditingSkillId(null);
-                              }}
-                              className="min-h-[40px] rounded bg-accent px-3 text-xs font-semibold text-white hover:bg-accent-hover"
+                              aria-label="Delete distilled skill"
+                              onClick={() => onDeleteScratchSkill(sk.id)}
+                              className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-subtle hover:text-danger"
                             >
-                              Save Skill
+                              <Trash2 className="h-3.5 w-3.5" />
                             </button>
                           </div>
                         </div>
-                      ) : (
-                        <>
-                          <div className="font-mono text-[11px] text-ink">
-                            Triggers: {sk.triggers.join(' · ')}
+
+                        {isEditing ? (
+                          <div className="space-y-2 border-t border-line pt-2">
+                            <input
+                              type="text"
+                              value={editFolderText}
+                              onChange={(e) => setEditFolderText(e.target.value)}
+                              placeholder="Folder name"
+                              className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 text-xs text-ink"
+                            />
+                            <input
+                              type="text"
+                              value={editTriggersText}
+                              onChange={(e) => setEditTriggersText(e.target.value)}
+                              placeholder="Comma-separated triggers"
+                              className="min-h-[40px] w-full rounded border border-line-strong bg-inset px-2.5 font-mono text-xs text-ink"
+                            />
+                            <textarea
+                              rows={3}
+                              value={editResponsesText}
+                              onChange={(e) => setEditResponsesText(e.target.value)}
+                              placeholder="One response variant per line"
+                              className="w-full rounded border border-line-strong bg-inset p-2.5 text-xs text-ink"
+                            />
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setEditingSkillId(null)}
+                                className="min-h-[40px] rounded border border-line px-3 text-xs text-ink-muted"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onUpdateScratchSkill(sk.id, {
+                                    folderName: editFolderText.trim() || sk.folderName,
+                                    triggers: editTriggersText
+                                      .split(',')
+                                      .map((t) => t.trim())
+                                      .filter(Boolean),
+                                    responses: editResponsesText
+                                      .split('\n')
+                                      .map((r) => r.trim())
+                                      .filter(Boolean),
+                                  });
+                                  setEditingSkillId(null);
+                                }}
+                                className="min-h-[40px] rounded bg-accent px-3 text-xs font-semibold text-white hover:bg-accent-hover"
+                              >
+                                Save Skill
+                              </button>
+                            </div>
                           </div>
-                          <div className="line-clamp-2 text-[11px] text-ink-muted">
-                            {sk.responses[0]}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+                        ) : (
+                          <>
+                            <div className="font-mono text-[11px] text-ink">
+                              Triggers: {sk.triggers.join(' · ')}
+                            </div>
+                            <div className="line-clamp-2 text-[11px] text-ink-muted">
+                              {sk.responses[0]}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* TAB 3: EVAL BENCH */}
+      {/* TAB 4: BLIND EVAL HARNESS, ANTI-LEAKAGE GATE & FAILURE-MINING FLYWHEEL */}
       {activeTab === 'evals' && (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface p-3.5">
@@ -1701,34 +2137,114 @@ export function TrainingPanel({
               ))}
             </div>
 
-            <button
-              type="button"
-              disabled={isRunningEval || evalCases.length === 0}
-              onClick={() => void handleRunEvalSuite()}
-              className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-4 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
-            >
-              <Play className="h-3.5 w-3.5" />
-              <span>{isRunningEval ? 'Running Suite…' : `Run All ${evalCases.length} Evals`}</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isMiningFailures || isTrainingNeural || evalCases.length === 0}
+                onClick={() => void onRunFailureMiningFlywheel()}
+                className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-accent-border bg-accent-soft px-3.5 py-1.5 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white disabled:opacity-50"
+              >
+                <FlaskConical className="h-3.5 w-3.5" />
+                <span>
+                  {isMiningFailures
+                    ? 'Mining & Re-Eval…'
+                    : 'Mine Failures & Train Flywheel'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isRunningEval || evalCases.length === 0}
+                onClick={() => void handleRunEvalSuite()}
+                className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-4 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>
+                  {isRunningEval ? 'Running Suite…' : `Run Blind Eval (${evalCases.length})`}
+                </span>
+              </button>
+            </div>
           </div>
 
+          {latestFlywheelResult && (
+            <div
+              className={`space-y-3 rounded-lg border p-4 text-xs ${
+                latestFlywheelResult.rolledBack
+                  ? 'border-warn-border bg-warn-soft'
+                  : 'border-accent-border bg-surface'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
+                <div className="font-mono text-xs font-semibold text-ink">
+                  Failure-Mining Flywheel ·{' '}
+                  {latestFlywheelResult.rolledBack
+                    ? 'Regression Detected — Rolled Back Checkpoint'
+                    : 'Promoted Candidate Checkpoint ✓'}
+                </div>
+                <div className="font-mono text-xs font-semibold tabular-nums text-accent-text">
+                  {latestFlywheelResult.beforeCheckpointId} ({latestFlywheelResult.beforePassRate}%)
+                  {' → '}
+                  {latestFlywheelResult.afterCheckpointId} ({latestFlywheelResult.afterPassRate}%)
+                  {' · '}
+                  {latestFlywheelResult.passDelta >= 0
+                    ? `+${latestFlywheelResult.passDelta}%`
+                    : `${latestFlywheelResult.passDelta}%`}
+                </div>
+              </div>
+              <p className="text-xs text-ink-muted">{latestFlywheelResult.summaryText}</p>
+              {latestFlywheelResult.drillsGenerated.length > 0 && (
+                <div className="divide-y divide-line border-t border-line pt-1">
+                  {latestFlywheelResult.drillsGenerated.map((drill) => (
+                    <div key={drill.id} className="space-y-1 py-2">
+                      <div className="font-mono text-[11px] font-semibold text-ink">
+                        Drill for &quot;{drill.sourceEvalTitle}&quot; · {drill.paraphrases.length}{' '}
+                        paraphrases ({drill.usedTeacher ? drill.modelUsed : 'Local Miner'})
+                      </div>
+                      <div className="text-[11px] text-ink-muted">
+                        Reasoning: {drill.reasoningChain}
+                      </div>
+                      <div className="font-mono text-[10px] text-ink-subtle">
+                        Counter-Example Guard: {drill.negativeCounterExample.badPrompt} →{' '}
+                        {drill.negativeCounterExample.safeRefusal}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {latestRun && (
-            <div className="space-y-2 rounded-lg border border-line bg-surface p-4">
+            <div className="space-y-2.5 rounded-lg border border-line bg-surface p-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
-                <span className="text-xs font-semibold text-ink">
-                  Latest Run ({latestRun.engineMode.toUpperCase()})
+                <span className="font-mono text-xs font-semibold text-ink">
+                  Latest Blind Eval · {latestRun.checkpointId || activeCheckpoint.id} (
+                  {latestRun.engineMode.toUpperCase()})
                 </span>
                 <span className="font-mono text-xs font-semibold tabular-nums text-accent-text">
-                  {latestRun.passedCases}/{latestRun.totalCases} passed ({latestRun.passRate}%) ·{' '}
-                  {latestRun.avgLatencyMs} ms avg
+                  {latestRun.beforePassRate !== null &&
+                  latestRun.beforePassRate !== undefined
+                    ? `${latestRun.beforePassRate}% → ${latestRun.passRate}%`
+                    : `${latestRun.passRate}%`}{' '}
+                  ({latestRun.passedCases}/{latestRun.totalCases})
+                  {typeof latestRun.blindPassRate === 'number'
+                    ? ` · Blind ${latestRun.blindPassRate}%`
+                    : ''}
+                  {typeof latestRun.regressionPassRate === 'number'
+                    ? ` · Regr ${latestRun.regressionPassRate}%`
+                    : ''}
+                  {latestRun.leakageBlockedCount
+                    ? ` · ${latestRun.leakageBlockedCount} Leakage Guarded`
+                    : ''}{' '}
+                  · {latestRun.avgLatencyMs} ms avg
                 </span>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="divide-y divide-line">
                 {latestRun.results.map((r) => (
                   <div
                     key={r.caseId}
-                    className="flex flex-wrap items-start justify-between gap-2 rounded border border-line bg-inset px-3 py-2 text-xs"
+                    className="flex flex-wrap items-start justify-between gap-2 py-2 text-xs"
                   >
                     <div className="flex items-start gap-2">
                       {r.passed ? (
@@ -1737,7 +2253,27 @@ export function TrainingPanel({
                         <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
                       )}
                       <div>
-                        <div className="font-medium text-ink">{r.title}</div>
+                        <div className="font-medium text-ink">
+                          <span className="mr-1.5 font-mono text-[10px] uppercase text-ink-subtle">
+                            [{r.split || 'blind'}]
+                          </span>
+                          {r.title}
+                        </div>
+                        {typeof r.paraphraseTotalCount === 'number' &&
+                          r.paraphraseTotalCount > 0 && (
+                            <div className="font-mono text-[10px] tabular-nums text-ink-muted">
+                              Paraphrase probes: {r.paraphrasePassedCount}/
+                              {r.paraphraseTotalCount} passed
+                              {r.refusalCheckPassed !== undefined
+                                ? ` · OOD refusal ${r.refusalCheckPassed ? 'verified' : 'failed'}`
+                                : ''}
+                            </div>
+                          )}
+                        {r.leakageFlagged && r.leakageReason && (
+                          <div className="font-mono text-[11px] text-warn">
+                            Anti-Leakage: {r.leakageReason}
+                          </div>
+                        )}
                         {r.failureReasons.length > 0 && (
                           <div className="text-[11px] text-danger">
                             {r.failureReasons.join(' · ')}
@@ -1754,52 +2290,91 @@ export function TrainingPanel({
             </div>
           )}
 
-          {/* Add Custom Eval Case */}
+          {/* Add Custom Held-Out Eval Case */}
           <form
             onSubmit={handleAddEvalCase}
-            className="grid gap-2.5 rounded-lg border border-line bg-surface p-4 md:grid-cols-[1fr_1.5fr_1fr_auto]"
+            className="space-y-2.5 rounded-lg border border-line bg-surface p-4"
           >
-            <input
-              type="text"
-              value={newCaseTitle}
-              onChange={(e) => setNewCaseTitle(e.target.value)}
-              placeholder="Eval name (e.g. Auth rule check)"
-              className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
-            />
-            <input
-              type="text"
-              value={newCasePrompt}
-              onChange={(e) => setNewCasePrompt(e.target.value)}
-              placeholder="Test prompt..."
-              className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
-            />
-            <input
-              type="text"
-              value={newCaseRequired}
-              onChange={(e) => setNewCaseRequired(e.target.value)}
-              placeholder="Required keywords (comma sep)"
-              className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
-            />
-            <button
-              type="submit"
-              className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded bg-elevated px-3.5 text-xs font-semibold text-ink hover:bg-accent hover:text-white"
-            >
-              <PlusCircle className="h-3.5 w-3.5" />
-              <span>Add Case</span>
-            </button>
+            <div className="grid gap-2.5 md:grid-cols-[1fr_1.4fr_auto]">
+              <input
+                type="text"
+                value={newCaseTitle}
+                onChange={(e) => setNewCaseTitle(e.target.value)}
+                placeholder="Eval name (e.g. Auth rule check)"
+                className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+              />
+              <input
+                type="text"
+                value={newCasePrompt}
+                onChange={(e) => setNewCasePrompt(e.target.value)}
+                placeholder="Held-out prompt…"
+                className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+              />
+              <select
+                value={newCaseSplit}
+                onChange={(e) => setNewCaseSplit(e.target.value as EvalSplit)}
+                className="min-h-[40px] rounded border border-line-strong bg-inset px-2.5 font-mono text-xs text-ink focus:border-accent focus:outline-none"
+              >
+                <option value="blind">blind split</option>
+                <option value="regression">regression split</option>
+                <option value="training">training split</option>
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <input
+                type="text"
+                value={newCaseParaphrase}
+                onChange={(e) => setNewCaseParaphrase(e.target.value)}
+                placeholder="Unseen paraphrase probes (sep by |)…"
+                className="min-h-[40px] min-w-[200px] flex-1 rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+              />
+              <input
+                type="text"
+                value={newCaseRequired}
+                onChange={(e) => setNewCaseRequired(e.target.value)}
+                placeholder="Required terms (comma sep)"
+                className="min-h-[40px] min-w-[180px] flex-1 rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+              />
+              <label className="inline-flex min-h-[40px] cursor-pointer items-center gap-2 rounded border border-line bg-inset px-3 text-xs text-ink-muted">
+                <input
+                  type="checkbox"
+                  checked={newCaseExpectRefusal}
+                  onChange={(e) => setNewCaseExpectRefusal(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-emerald-500"
+                />
+                <span>Expect OOD Refusal</span>
+              </label>
+              <button
+                type="submit"
+                className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 rounded bg-elevated px-3.5 text-xs font-semibold text-ink hover:bg-accent hover:text-white"
+              >
+                <PlusCircle className="h-3.5 w-3.5" />
+                <span>Add Case</span>
+              </button>
+            </div>
           </form>
 
           {/* Eval Cases Inventory */}
-          <div className="space-y-1.5">
+          <div className="divide-y divide-line rounded-lg border border-line bg-surface px-3.5">
             {evalCases.map((c) => (
               <div
                 key={c.id}
-                className="flex items-center justify-between gap-3 rounded-md border border-line bg-surface px-3 py-2 text-xs"
+                className="flex items-center justify-between gap-3 py-2.5 text-xs"
               >
-                <div className="min-w-0">
-                  <div className="truncate font-medium text-ink">{c.title}</div>
+                <div className="min-w-0 space-y-0.5">
+                  <div className="truncate font-medium text-ink">
+                    <span className="mr-1.5 font-mono text-[10px] uppercase text-accent-text">
+                      [{c.split || 'blind'}]
+                    </span>
+                    {c.title}
+                    {c.expectUntrainedRefusal ? ' · OOD Refusal Gate' : ''}
+                  </div>
                   <div className="truncate font-mono text-[11px] text-ink-muted">
-                    Prompt: &quot;{c.prompt}&quot; · Require: {c.requiredTerms.join(', ') || 'Safe output'}
+                    Prompt: &quot;{c.prompt}&quot;
+                    {c.paraphraseProbes && c.paraphraseProbes.length > 0
+                      ? ` · ${c.paraphraseProbes.length} paraphrase probe(s)`
+                      : ''}
+                    {' · '}Require: {c.requiredTerms.join(', ') || 'Safe refusal/output'}
                   </div>
                 </div>
                 <button

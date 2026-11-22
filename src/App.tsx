@@ -20,6 +20,7 @@ import {
   DEFAULT_BRAIN_MODEL,
   askAiBrainChat,
   distillLessonWithTeacher,
+  generateSyntheticFailureDrillsWithTeacher,
   getLocalBrainConfig,
   getRouteStatus,
   normalizeBrainUrl,
@@ -31,6 +32,11 @@ import {
   suggestSemanticFolderWithAi,
   type DistilledKnowledgeItem,
 } from './lib/aiBrain';
+import {
+  loadConstitutionalPrinciples,
+  loadCritiqueHistory,
+  runConstitutionalCritique,
+} from './lib/constitutionalEngine';
 import {ensureAutoFolderExists, inferFolderDeterministically} from './lib/autoFolders';
 import {
   fetchGitHubFileContent,
@@ -118,6 +124,8 @@ import {
 } from './lib/theme';
 import {
   addTrainingSample,
+  evaluateCheckpointPromotion,
+  executeEvalSuite,
   loadEvalCases,
   loadEvalRuns,
   loadTrainingSamples,
@@ -141,10 +149,13 @@ import type {
   ChatTurnTelemetry,
   CodeSuggestion,
   ComputeEngineStatus,
+  ConstitutionalCritiqueResult,
+  ConstitutionalPrinciple,
   ContradictionAlert,
   EvalCase,
   EvalRunSummary,
   EvalSubView,
+  FailureMiningFlywheelResult,
   GitHubConnection,
   HardwareTelemetry,
   KnowledgeEntry,
@@ -245,6 +256,19 @@ export default function App() {
   const [trainingSamples, setTrainingSamples] = useState<TrainingSample[]>(() => loadTrainingSamples());
   const [evalCases, setEvalCases] = useState<EvalCase[]>(() => loadEvalCases());
   const [evalRuns, setEvalRuns] = useState<EvalRunSummary[]>(() => loadEvalRuns());
+  const [constitutionalPrinciples, setConstitutionalPrinciples] = useState<
+    ConstitutionalPrinciple[]
+  >(() => loadConstitutionalPrinciples());
+  const [critiqueHistory, setCritiqueHistory] = useState<ConstitutionalCritiqueResult[]>(() =>
+    loadCritiqueHistory(),
+  );
+  const [critiqueByMsgId, setCritiqueByMsgId] = useState<
+    Record<string, ConstitutionalCritiqueResult>
+  >({});
+  const [critiquingMsgId, setCritiquingMsgId] = useState<string | null>(null);
+  const [isMiningFailures, setIsMiningFailures] = useState(false);
+  const [latestFlywheelResult, setLatestFlywheelResult] =
+    useState<FailureMiningFlywheelResult | null>(null);
   const [modelCard, setModelCard] = useState<ModelCardConfig>(() => loadModelCard());
   const [activeAssassinBrief, setActiveAssassinBrief] = useState<AssassinPrepBrief | null>(null);
   const [contradictionAlerts, setContradictionAlerts] = useState<ContradictionAlert[]>([]);
@@ -498,6 +522,7 @@ export default function App() {
         scratchSkills,
         entries,
         folders: foldersRef.current,
+        activeCheckpoint: activeCheckpointRef.current,
       });
       const seenPrompts = new Map<string, number>();
       const mergedExamples: NeuralTrainingExample[] = [];
@@ -518,6 +543,7 @@ export default function App() {
           source: extra.source || 'manual',
           entryId: extra.entryId,
           skillId: extra.skillId,
+          weight: extra.weight,
         };
         const existingIdx = seenPrompts.get(key);
         if (existingIdx !== undefined) {
@@ -3405,6 +3431,231 @@ export default function App() {
     return saved ? ensured.folder?.name || folderGuess.folderName : null;
   }
 
+  async function handleCritiqueChatMessage(msgId: string) {
+    if (!session) return;
+    const msgIdx = messages.findIndex((m) => m.id === msgId);
+    if (msgIdx < 0) return;
+    const targetMsg = messages[msgIdx];
+    let userMsg: ChatMessage | null = null;
+    for (let i = msgIdx - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') {
+        userMsg = messages[i];
+        break;
+      }
+    }
+    if (!userMsg || !targetMsg) return;
+
+    setCritiquingMsgId(msgId);
+    try {
+      const ckptId = turnTelemetryByMsgId[msgId]?.checkpointId || activeCheckpointRef.current.id;
+      const result = await runConstitutionalCritique({
+        prompt: userMsg.content,
+        studentAnswer: targetMsg.content,
+        checkpointId: ckptId,
+        checkpoint: activeCheckpointRef.current,
+        principles: constitutionalPrinciples,
+        brainUrl,
+        backupBrainUrl,
+        accessToken: session.access_token,
+        model: brainModel,
+        entries,
+        folders: foldersRef.current,
+        autoLogDpo: true,
+      });
+      setCritiqueByMsgId((prev) => ({...prev, [msgId]: result}));
+      setCritiqueHistory(loadCritiqueHistory());
+      setTrainingSamples(loadTrainingSamples());
+      if (result.dpoPairLogged) {
+        pushLearningEvent(
+          'dpo_logged',
+          `Constitutional Critique (${result.overallScore}%)`,
+          `Logged DPO revision for "${userMsg.content.slice(0, 48)}"`,
+          result.modelUsed,
+        );
+      }
+    } finally {
+      setCritiquingMsgId(null);
+    }
+  }
+
+  async function handleRunManualCritique(
+    prompt: string,
+    studentAnswer: string,
+  ): Promise<ConstitutionalCritiqueResult> {
+    const ckpt = activeCheckpointRef.current;
+    const result = await runConstitutionalCritique({
+      prompt,
+      studentAnswer,
+      checkpointId: ckpt.id,
+      checkpoint: ckpt,
+      principles: constitutionalPrinciples,
+      brainUrl,
+      backupBrainUrl,
+      accessToken: session?.access_token || '',
+      model: brainModel,
+      entries,
+      folders: foldersRef.current,
+      autoLogDpo: true,
+    });
+    setCritiqueHistory(loadCritiqueHistory());
+    setTrainingSamples(loadTrainingSamples());
+    if (result.dpoPairLogged) {
+      pushLearningEvent(
+        'dpo_logged',
+        `Judge DPO Pair (${result.overallScore}%)`,
+        prompt.slice(0, 60),
+        result.modelUsed,
+      );
+    }
+    return result;
+  }
+
+  async function handleRunFailureMiningFlywheel(): Promise<FailureMiningFlywheelResult | null> {
+    if (!session || isMiningFailures || evalCases.length === 0) return null;
+    setIsMiningFailures(true);
+    try {
+      const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
+      const beforeCheckpoint = activeCheckpointRef.current;
+      const baselineRun = await executeEvalSuite({
+        cases: evalCases,
+        entries,
+        folders: foldersRef.current,
+        repoFiles,
+        repoLabel,
+        mode: 'scratch',
+        activeCheckpoint: beforeCheckpoint,
+        trainingSamples,
+        scratchSkills,
+      });
+
+      const failedPairs = baselineRun.results
+        .filter((r) => !r.passed)
+        .map((r) => {
+          const matchedCase = evalCases.find((c) => c.id === r.caseId);
+          return matchedCase ? {evalCase: matchedCase, result: r} : null;
+        })
+        .filter((pair): pair is {evalCase: EvalCase; result: (typeof baselineRun.results)[number]} =>
+          Boolean(pair),
+        );
+
+      if (failedPairs.length === 0) {
+        const cleanSummary: FailureMiningFlywheelResult = {
+          baselineRun,
+          postTrainRun: {...baselineRun, promotedCheckpoint: true},
+          drillsGenerated: [],
+          beforeCheckpointId: beforeCheckpoint.id,
+          afterCheckpointId: beforeCheckpoint.id,
+          beforePassRate: baselineRun.passRate,
+          afterPassRate: baselineRun.passRate,
+          passDelta: 0,
+          regressionDetected: false,
+          rolledBack: false,
+          summaryText: `Baseline Blind Eval passed 100% (${baselineRun.passedCases}/${baselineRun.totalCases}) on ${beforeCheckpoint.id}; zero failures to mine.`,
+        };
+        setEvalRuns(loadEvalRuns());
+        setLatestFlywheelResult(cleanSummary);
+        return cleanSummary;
+      }
+
+      const drills = await generateSyntheticFailureDrillsWithTeacher({
+        brainUrl,
+        backupBrainUrl,
+        accessToken: session.access_token,
+        model: brainModel,
+        failedCases: failedPairs,
+        entries,
+        folders: foldersRef.current,
+      });
+
+      const drillExamples: NeuralTrainingExample[] = [];
+      let nextSamples = loadTrainingSamples();
+      for (const drill of drills) {
+        for (const para of drill.paraphrases) {
+          drillExamples.push({
+            prompt: para.prompt,
+            response: para.idealResponse,
+            folderName: 'Curriculum',
+            source: drill.usedTeacher ? 'teacher-distilled' : 'sft',
+            weight: 1.35,
+          });
+          nextSamples = addTrainingSample({
+            format: 'sft',
+            prompt: para.prompt,
+            chosenResponse: para.idealResponse,
+            modelChosen: drill.modelUsed,
+            citedEntryIds: [],
+            status: 'approved',
+          });
+        }
+        if (drill.negativeCounterExample.badPrompt && drill.negativeCounterExample.safeRefusal) {
+          drillExamples.push({
+            prompt: drill.negativeCounterExample.badPrompt,
+            response: drill.negativeCounterExample.safeRefusal,
+            folderName: 'Security',
+            source: 'dpo',
+            weight: 1.4,
+          });
+        }
+      }
+      setTrainingSamples(nextSamples);
+
+      const trainRes = await handleTrainNeuralBatch(
+        24,
+        drillExamples,
+        `Flywheel: ${drills.length} failure drills`,
+      );
+      const afterCheckpoint = activeCheckpointRef.current;
+
+      const postTrainRun = await executeEvalSuite({
+        cases: evalCases,
+        entries,
+        folders: foldersRef.current,
+        repoFiles,
+        repoLabel,
+        mode: 'scratch',
+        activeCheckpoint: afterCheckpoint,
+        trainingSamples: nextSamples,
+        scratchSkills,
+        beforePassRate: baselineRun.passRate,
+      });
+
+      const gate = evaluateCheckpointPromotion(baselineRun, postTrainRun);
+      let rolledBack = false;
+      if (gate.regressionDetected && trainRes) {
+        await handleRollbackCheckpoint(beforeCheckpoint.id);
+        rolledBack = true;
+      }
+
+      const finalResult: FailureMiningFlywheelResult = {
+        baselineRun,
+        postTrainRun: {...postTrainRun, promotedCheckpoint: !rolledBack},
+        drillsGenerated: drills,
+        beforeCheckpointId: beforeCheckpoint.id,
+        afterCheckpointId: rolledBack ? beforeCheckpoint.id : afterCheckpoint.id,
+        beforePassRate: baselineRun.passRate,
+        afterPassRate: postTrainRun.passRate,
+        passDelta: gate.passDelta,
+        regressionDetected: gate.regressionDetected,
+        rolledBack,
+        summaryText: rolledBack
+          ? `Candidate ${afterCheckpoint.id} regressed (${gate.regressedTitles.join(', ') || `${gate.passDelta}%`}); automatically rolled back to ${beforeCheckpoint.id}.`
+          : `Mined ${drills.length} failure drill(s) -> promoted ${afterCheckpoint.id} (${baselineRun.passRate}% -> ${postTrainRun.passRate}%, ${gate.passDelta >= 0 ? '+' : ''}${gate.passDelta}%).`,
+      };
+
+      setEvalRuns(loadEvalRuns());
+      setLatestFlywheelResult(finalResult);
+      pushLearningEvent(
+        'eval_passed',
+        rolledBack ? `Regression Guard Rolled Back` : `Flywheel Promoted ${afterCheckpoint.id}`,
+        finalResult.summaryText,
+        'flywheel',
+      );
+      return finalResult;
+    } finally {
+      setIsMiningFailures(false);
+    }
+  }
+
   async function handleSignOut() {
     await supabase.auth.signOut();
     setSession(null);
@@ -3732,6 +3983,12 @@ export default function App() {
                   // ignore
                 }
               }}
+              critiquingMsgId={critiquingMsgId}
+              critiqueByMsgId={critiqueByMsgId}
+              onCritiqueMessage={handleCritiqueChatMessage}
+              onStepTrainCritiqueRevision={async (prompt, revisedAnswer) =>
+                handleTeachScratchFix(prompt, revisedAnswer)
+              }
             />
           )
         ) : workspaceMode === 'memory' ? (
@@ -3981,6 +4238,13 @@ export default function App() {
                       onClearLocalLlmCache={clearLocalLlmBrowserCache}
                       onStopLocalLlmGeneration={stopLocalLlmGeneration}
                       openLocalModelsSignal={openLocalModelsSignal}
+                      principles={constitutionalPrinciples}
+                      onUpdatePrinciples={setConstitutionalPrinciples}
+                      critiqueHistory={critiqueHistory}
+                      onRunManualCritique={handleRunManualCritique}
+                      onRunFailureMiningFlywheel={handleRunFailureMiningFlywheel}
+                      isMiningFailures={isMiningFailures}
+                      latestFlywheelResult={latestFlywheelResult}
                     />
                   )}
 
@@ -4060,6 +4324,8 @@ export default function App() {
           setGithubSubTab('files');
           navigateToArea('github');
         }}
+        latestEvalPassRate={evalRuns[0]?.passRate ?? null}
+        enabledPrinciplesCount={constitutionalPrinciples.filter((p) => p.enabled).length}
       />
 
       <CommandPalette
