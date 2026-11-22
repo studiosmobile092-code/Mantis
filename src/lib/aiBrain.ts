@@ -44,6 +44,24 @@ let currentRouteStatus: BrainRouteStatus = {
 
 const routeListeners = new Set<(status: BrainRouteStatus) => void>();
 
+let studentIsolationLocked = false;
+
+export function setStudentIsolationLock(locked: boolean): void {
+  studentIsolationLocked = locked;
+}
+
+export function isStudentIsolationLocked(): boolean {
+  return studentIsolationLocked;
+}
+
+function assertNotStudentIsolated(operation: string): void {
+  if (studentIsolationLocked) {
+    throw new Error(
+      `Blocked by Student-Only Isolation (${operation}): 0 outbound Teacher/Cloud calls permitted.`,
+    );
+  }
+}
+
 export function getRouteStatus(): BrainRouteStatus {
   return currentRouteStatus;
 }
@@ -652,6 +670,7 @@ async function postBrainEndpointWithFailover<T>(params: {
   body: Record<string, unknown>;
   timeoutMs?: number;
 }): Promise<{payload: T; endpointUsed: string}> {
+  assertNotStudentIsolated(params.path);
   const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   if (candidates.length === 0) {
     throw new Error('No Cloud Assist endpoint configured. Add Worker or Supabase Backup URL in Settings.');
@@ -756,6 +775,7 @@ async function callDirectOllamaChat(
   messages: Array<{role: string; content: string}>,
   maxTokens = 1400,
 ): Promise<{text: string; model: string}> {
+  assertNotStudentIsolated('ollama/chat');
   let chosenModel = 'qwen2.5-coder:7b';
   try {
     const tagsRes = await fetchWithTimeout(`${ollamaUrl}/api/tags`, {}, 3000);
@@ -812,6 +832,7 @@ export async function askAiBrainChat(params: {
   citedRepoPaths: string[];
   learnedItems: ParsedLearnDirective[];
 }> {
+  assertNotStudentIsolated('askAiBrainChat');
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
   const folderMap = new Map(params.folders.map((f) => [f.id, f.name]));
 
@@ -921,6 +942,7 @@ export async function distillWithAiBrain(params: {
   sourceTitle: string;
   sourceType: string;
 }): Promise<{summary: string; entries: DistilledKnowledgeItem[]; model: string}> {
+  assertNotStudentIsolated('distillWithAiBrain');
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
 
   if (getLocalBrainMode() === 'ollama') {
@@ -985,6 +1007,7 @@ export async function suggestCodeWithAiBrain(params: {
   entries: KnowledgeEntry[];
   folders: KnowledgeFolder[];
 }): Promise<{title: string; rationale: string; proposedContent: string; model: string}> {
+  assertNotStudentIsolated('suggestCodeWithAiBrain');
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
   const matches = retrieveRelevantKnowledge(
     `${params.filePath} ${params.goal}`,
@@ -1439,7 +1462,9 @@ export async function enhanceSpeechTranscriptWithAi(params: {
     params.existingFolders,
   );
 
-  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const candidates = studentIsolationLocked
+    ? []
+    : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   if (candidates.length === 0 || !rawCombined) {
     return {
       cleanedTranscript: rawCombined,
@@ -1585,7 +1610,9 @@ export async function suggestSemanticFolderWithAi(params: {
     params.existingFolders,
   );
 
-  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const candidates = studentIsolationLocked
+    ? []
+    : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   if (candidates.length === 0 || !params.content.trim()) {
     return {
       folderName: deterministic.folderName,
@@ -1678,18 +1705,20 @@ export async function distillLessonWithTeacher(params: {
 }): Promise<TeacherLessonPacket> {
   const cleanPrompt = params.prompt.trim();
   const deterministic = inferFolderDeterministically(cleanPrompt, cleanPrompt, params.folders);
-  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const candidates = studentIsolationLocked
+    ? []
+    : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
 
   if (candidates.length === 0) {
     return {
-      answer: `I saved "${cleanPrompt}" so you can teach or expand it in Teach Rule, or connect your Worker/Backup AI route in Settings for automatic Teacher distillation.`,
+      answer: `Student-Only Isolation active or no Teacher route configured — saved "${cleanPrompt}" locally.`,
       triggers: [cleanPrompt.toLowerCase()],
       responseVariants: [cleanPrompt],
       knowledgeTitle: cleanPrompt.slice(0, 68),
       knowledgeContent: cleanPrompt,
       folderName: deterministic.folderName,
       tags: deterministic.suggestedTags,
-      modelUsed: 'built-in-teacher-fallback',
+      modelUsed: 'student-isolated',
       usedTeacher: false,
     };
   }
@@ -1817,7 +1846,9 @@ export async function runArenaDuelWithBrain(params: {
   candidateB: {label: string; text: string};
   citedEntryIds: string[];
 }> {
-  const hasCloud = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl).length > 0;
+  const hasCloud =
+    !studentIsolationLocked &&
+    getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl).length > 0;
   if (!hasCloud) {
     return {
       candidateA: {label: 'Scratch Hybrid RAG', text: params.scratchCandidate},
@@ -1916,7 +1947,9 @@ export async function generateCurriculumDrillWithTeacher(params: {
     usedTeacher: false,
   };
 
-  const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const candidates = studentIsolationLocked
+    ? []
+    : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   if (candidates.length === 0) {
     return deterministicFallback;
   }

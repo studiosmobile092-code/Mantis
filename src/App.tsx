@@ -25,6 +25,7 @@ import {
   normalizeBrainUrl,
   probeActiveBrainRoute,
   setLocalBrainConfig,
+  setStudentIsolationLock,
   subscribeRouteStatus,
   suggestCodeWithAiBrain,
   suggestSemanticFolderWithAi,
@@ -65,6 +66,14 @@ import {
 import {STARTER_FOLDERS, computeMemoryReadiness, retrieveRelevantRepoFiles} from './lib/memory';
 import {loadModelCard} from './lib/modelExporter';
 import {
+  buildTrainingExamplesFromWorkspace,
+  cloneCheckpointAsProfile,
+  createBlankSlateCheckpoint,
+  loadNeuralCheckpointState,
+  resetNeuralProfileToBlankSlate,
+  rollbackToCheckpoint,
+} from './lib/neuralStudent';
+import {
   deleteScratchSkill,
   loadScratchSkills,
   synthesizeScratchWithHybrid,
@@ -102,9 +111,11 @@ import {
 import {
   detectContradictionsAsync,
   getComputeStatus,
+  inferNeuralStudentAsync,
   initComputeEngine,
   runHybridRetrievalAsync,
   subscribeComputeStatus,
+  trainNeuralStudentAsync,
 } from './lib/workerClient';
 import type {
   AccentColor,
@@ -112,6 +123,7 @@ import type {
   AssassinPrepBrief,
   BrainRouteStatus,
   ChatMessage,
+  ChatTurnTelemetry,
   CodeSuggestion,
   ComputeEngineStatus,
   ContradictionAlert,
@@ -126,6 +138,8 @@ import type {
   LearningEventKind,
   MemorySubView,
   ModelCardConfig,
+  NeuralCheckpoint,
+  NeuralTrainingExample,
   RepoFile,
   SaveFeedbackInfo,
   ScratchSkillRule,
@@ -185,6 +199,21 @@ export default function App() {
   const [githubSubTab, setGithubSubTab] = useState<'files' | 'suggestions' | 'self-improve'>('files');
 
   const [computeStatus, setComputeStatus] = useState<ComputeEngineStatus>(() => getComputeStatus());
+  const [activeCheckpoint, setActiveCheckpoint] = useState<NeuralCheckpoint>(() =>
+    createBlankSlateCheckpoint(),
+  );
+  const [checkpoints, setCheckpoints] = useState<NeuralCheckpoint[]>(() => [
+    createBlankSlateCheckpoint(),
+  ]);
+  const [isTrainingNeural, setIsTrainingNeural] = useState(false);
+  const [turnTelemetryByMsgId, setTurnTelemetryByMsgId] = useState<Record<string, ChatTurnTelemetry>>(
+    {},
+  );
+  const activeCheckpointRef = useRef<NeuralCheckpoint>(activeCheckpoint);
+  useEffect(() => {
+    activeCheckpointRef.current = activeCheckpoint;
+  }, [activeCheckpoint]);
+
   const [scratchSkills, setScratchSkills] = useState<ScratchSkillRule[]>(() => loadScratchSkills());
   const [trainingSamples, setTrainingSamples] = useState<TrainingSample[]>(() => loadTrainingSamples());
   const [evalCases, setEvalCases] = useState<EvalCase[]>(() => loadEvalCases());
@@ -281,6 +310,23 @@ export default function App() {
     });
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+    void loadNeuralCheckpointState()
+      .then((state) => {
+        if (!mounted) return;
+        activeCheckpointRef.current = state.activeCheckpoint;
+        setActiveCheckpoint(state.activeCheckpoint);
+        setCheckpoints(state.checkpoints);
+      })
+      .catch(() => {
+        // Retain default blank-slate ckpt-000
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const navigateToArea = useCallback((area: AreaId) => {
     setInspectorOpen(false);
     if (area === 'settings') {
@@ -368,6 +414,150 @@ export default function App() {
     },
     [],
   );
+
+  const handleTrainNeuralBatch = useCallback(
+    async (
+      epochs = 20,
+      extraExamples?: NeuralTrainingExample[],
+      customLabel?: string,
+    ): Promise<{
+      checkpointId: string;
+      firstLoss: number;
+      lastLoss: number;
+      stepsAdded: number;
+    } | null> => {
+      if (isTrainingNeural) return null;
+      const baseExamples = buildTrainingExamplesFromWorkspace({
+        trainingSamples,
+        scratchSkills,
+        entries,
+        folders: foldersRef.current,
+      });
+      const seenPrompts = new Map<string, number>();
+      const mergedExamples: NeuralTrainingExample[] = [];
+      for (const item of baseExamples) {
+        const key = item.prompt.toLowerCase();
+        seenPrompts.set(key, mergedExamples.length);
+        mergedExamples.push(item);
+      }
+      for (const extra of extraExamples || []) {
+        const cleanPrompt = extra.prompt.trim();
+        const cleanResp = extra.response.trim();
+        if (!cleanPrompt || !cleanResp) continue;
+        const key = cleanPrompt.toLowerCase();
+        const normalized: NeuralTrainingExample = {
+          prompt: cleanPrompt,
+          response: cleanResp,
+          folderName: extra.folderName?.trim() || 'Patterns',
+          source: extra.source || 'manual',
+          entryId: extra.entryId,
+          skillId: extra.skillId,
+        };
+        const existingIdx = seenPrompts.get(key);
+        if (existingIdx !== undefined) {
+          mergedExamples[existingIdx] = normalized;
+        } else {
+          seenPrompts.set(key, mergedExamples.length);
+          mergedExamples.unshift(normalized);
+        }
+      }
+
+      if (mergedExamples.length === 0) return null;
+
+      setIsTrainingNeural(true);
+      try {
+        const result = await trainNeuralStudentAsync({
+          checkpoint: activeCheckpointRef.current,
+          examples: mergedExamples,
+          epochs,
+          label:
+            customLabel ||
+            `Batch (${mergedExamples.length} examples · ${epochs} epochs)`,
+          persist: true,
+        });
+        if (result.stepsAdded > 0) {
+          activeCheckpointRef.current = result.checkpoint;
+          setActiveCheckpoint(result.checkpoint);
+          setCheckpoints(result.checkpoints);
+          pushLearningEvent(
+            'self_optimized',
+            `Trained ${result.checkpoint.id} (+${result.stepsAdded} steps)`,
+            `Loss ${result.firstLoss.toFixed(3)} -> ${result.lastLoss.toFixed(3)} · ${result.checkpoint.metrics.vocabSize} BPE tokens`,
+            'neural-worker',
+          );
+        }
+        return {
+          checkpointId: result.checkpoint.id,
+          firstLoss: result.firstLoss,
+          lastLoss: result.lastLoss,
+          stepsAdded: result.stepsAdded,
+        };
+      } finally {
+        setIsTrainingNeural(false);
+      }
+    },
+    [entries, isTrainingNeural, pushLearningEvent, scratchSkills, trainingSamples],
+  );
+
+  const handleRollbackCheckpoint = useCallback(
+    async (checkpointId: string) => {
+      const next = await rollbackToCheckpoint(checkpointId);
+      activeCheckpointRef.current = next.activeCheckpoint;
+      setActiveCheckpoint(next.activeCheckpoint);
+      setCheckpoints(next.checkpoints);
+      pushLearningEvent(
+        'self_optimized',
+        `Rolled back to ${next.activeCheckpoint.id}`,
+        `${next.activeCheckpoint.metrics.stepCount} steps · ${next.activeCheckpoint.metrics.vocabSize} BPE tokens`,
+        'checkpoint',
+      );
+      setTransientSaveFeedback({
+        state: 'saved',
+        message: `Rolled back to ${next.activeCheckpoint.id} ✓`,
+      });
+    },
+    [pushLearningEvent, setTransientSaveFeedback],
+  );
+
+  const handleCloneCheckpoint = useCallback(
+    async (checkpointId: string, profileName?: string) => {
+      const next = await cloneCheckpointAsProfile(
+        checkpointId,
+        profileName || `${modelCard.modelName} Fork`,
+      );
+      activeCheckpointRef.current = next.activeCheckpoint;
+      setActiveCheckpoint(next.activeCheckpoint);
+      setCheckpoints(next.checkpoints);
+      pushLearningEvent(
+        'self_optimized',
+        `Cloned ${checkpointId} -> ${next.activeCheckpoint.id}`,
+        next.activeCheckpoint.profileName,
+        'checkpoint',
+      );
+      setTransientSaveFeedback({
+        state: 'saved',
+        message: `Cloned profile: ${next.activeCheckpoint.profileName} ✓`,
+      });
+    },
+    [modelCard.modelName, pushLearningEvent, setTransientSaveFeedback],
+  );
+
+  const handleResetBlankSlate = useCallback(async () => {
+    const next = await resetNeuralProfileToBlankSlate(modelCard.modelName || 'Mantis Student');
+    activeCheckpointRef.current = next.activeCheckpoint;
+    setActiveCheckpoint(next.activeCheckpoint);
+    setCheckpoints(next.checkpoints);
+    pushLearningEvent(
+      'self_optimized',
+      `Reset to blank slate (${next.activeCheckpoint.id})`,
+      '0 gradient steps · 0 BPE vocab · zero world knowledge',
+      'checkpoint',
+    );
+    setTransientSaveFeedback({
+      state: 'saved',
+      message: `Reset to 0 steps (${next.activeCheckpoint.id}) ✓`,
+    });
+  }, [modelCard.modelName, pushLearningEvent, setTransientSaveFeedback]);
 
   useEffect(() => {
     return subscribeRouteStatus((next) => {
@@ -2116,6 +2306,20 @@ export default function App() {
       `Filed to ${ensured.folder?.name || lesson.folderName} (${lesson.responseVariants.length} variants)`,
       lesson.modelUsed,
     );
+
+    await handleTrainNeuralBatch(
+      14,
+      [
+        {
+          prompt,
+          response: lesson.answer,
+          folderName: ensured.folder?.name || lesson.folderName,
+          source: 'teacher-distilled',
+        },
+      ],
+      `Distill: ${prompt.slice(0, 32)}`,
+    );
+
     return lesson;
   }
 
@@ -2152,6 +2356,7 @@ export default function App() {
       let replyText = '';
       let citedEntryIds: string[] = [];
       let citedRepoPaths: string[] = [];
+      let pendingTelemetry: ChatTurnTelemetry | undefined;
       const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
       const hasCloudConfigured = Boolean(
         (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token,
@@ -2197,10 +2402,35 @@ export default function App() {
             source: 'chat',
             status: 'trusted',
           });
+          const trainRes = await handleTrainNeuralBatch(
+            14,
+            [
+              {
+                prompt: noteTitle,
+                response: noteContent,
+                folderName: ensured.folder?.name || semantic.folderName,
+                source: 'manual',
+              },
+            ],
+            `Teach: ${noteTitle.slice(0, 28)}`,
+          );
+          pendingTelemetry = {
+            checkpointId: trainRes?.checkpointId || activeCheckpointRef.current.id,
+            confidence: 0.9,
+            lossEstimate: trainRes ? trainRes.lastLoss : activeCheckpointRef.current.metrics.lastLoss,
+            topTokens: [],
+            isolationMode: 'student-strict',
+            cloudCalls: 0,
+            isUntrained: false,
+          };
           replyText = savedOk
             ? `Saved "${noteTitle}" as Trusted to ${
                 ensured.folder?.name || semantic.folderName
-              }. Mantis indexed it at 384-d Int8 priority.`
+              }${
+                trainRes
+                  ? ` and step-trained ${trainRes.checkpointId} (loss ${trainRes.firstLoss.toFixed(3)} -> ${trainRes.lastLoss.toFixed(3)}).`
+                  : '.'
+              }`
             : 'Could not save note to Supabase — tap Retry on the save status notice.';
         }
       } else if (isAssassinRequest) {
@@ -2398,6 +2628,15 @@ export default function App() {
           replyText = aiRes.replyText;
           citedEntryIds = aiRes.citedEntryIds;
           citedRepoPaths = aiRes.citedRepoPaths;
+          pendingTelemetry = {
+            checkpointId: activeCheckpointRef.current.id,
+            confidence: 1,
+            lossEstimate: null,
+            topTokens: [],
+            isolationMode: 'cloud-assist',
+            cloudCalls: 1,
+            isUntrained: activeCheckpointRef.current.metrics.stepCount === 0,
+          };
           pushLearningEvent('cloud_assisted', 'Cloud Assist Reply', prompt.slice(0, 75), aiRes.modelUsed);
 
           setTrainingSamples(
@@ -2424,12 +2663,16 @@ export default function App() {
             autoMinedCount += count;
           }
         } catch (aiErr) {
-          const hybridMatches = await runHybridRetrievalAsync({
-            query: prompt,
-            entries,
-            folders,
-            limit: 4,
-          });
+          const currentCkpt = activeCheckpointRef.current;
+          const [hybridMatches, neuralPred] = await Promise.all([
+            runHybridRetrievalAsync({
+              query: prompt,
+              entries,
+              folders,
+              limit: 4,
+            }),
+            inferNeuralStudentAsync(prompt, currentCkpt),
+          ]);
           const scratch = synthesizeScratchWithHybrid({
             prompt,
             hybridMatches,
@@ -2438,7 +2681,18 @@ export default function App() {
             repoFiles,
             repoLabel,
             growth: knowledgeGrowth,
+            activeCheckpoint: currentCkpt,
+            neuralPrediction: neuralPred,
           });
+          pendingTelemetry = {
+            checkpointId: currentCkpt.id,
+            confidence: scratch.confidence,
+            lossEstimate: neuralPred.lossEstimate,
+            topTokens: neuralPred.topTokens,
+            isolationMode: 'student-strict',
+            cloudCalls: 0,
+            isUntrained: Boolean(scratch.isUntrained),
+          };
           replyText = `[Scratch Fallback — Cloud Assist unavailable: ${
             aiErr instanceof Error ? aiErr.message : 'Network error'
           }]\n\n${scratch.replyText}`;
@@ -2446,29 +2700,51 @@ export default function App() {
           citedRepoPaths = scratch.citedRepoPaths;
         }
       } else {
-        // Scratch Leads via Hybrid BM25 + Int8 Dense RRF + Teacher Distillation when Scratch lacks confidence!
+        // Student Isolated Leads via Real Neural BPE+MLP/LoRA Core + Hybrid BM25/Int8 RRF
         const liveFolders = foldersRef.current;
-        const hybridMatches = await runHybridRetrievalAsync({
-          query: prompt,
-          entries,
-          folders: liveFolders,
-          limit: 4,
-        });
-        const scratch = synthesizeScratchWithHybrid({
-          prompt,
-          hybridMatches,
-          entries,
-          folders: liveFolders,
-          repoFiles,
-          repoLabel,
-          growth: knowledgeGrowth,
-        });
-        if (scratch.usedSkillId) {
-          setScratchSkills(loadScratchSkills());
+        const currentCkpt = activeCheckpointRef.current;
+        const isStrictIsolated = modeOverride !== 'distill';
+
+        if (isStrictIsolated) {
+          setStudentIsolationLock(true);
+        }
+
+        let hybridMatches;
+        let neuralPred;
+        let scratch;
+        try {
+          [hybridMatches, neuralPred] = await Promise.all([
+            runHybridRetrievalAsync({
+              query: prompt,
+              entries,
+              folders: liveFolders,
+              limit: 4,
+            }),
+            inferNeuralStudentAsync(prompt, currentCkpt),
+          ]);
+          scratch = synthesizeScratchWithHybrid({
+            prompt,
+            hybridMatches,
+            entries,
+            folders: liveFolders,
+            repoFiles,
+            repoLabel,
+            growth: knowledgeGrowth,
+            activeCheckpoint: currentCkpt,
+            neuralPrediction: neuralPred,
+          });
+          if (scratch.usedSkillId) {
+            setScratchSkills(loadScratchSkills());
+          }
+        } finally {
+          if (isStrictIsolated) {
+            setStudentIsolationLock(false);
+          }
         }
 
         const shouldDistill =
-          (modeOverride === 'distill' || scratch.needsTeacherDistill) &&
+          !isStrictIsolated &&
+          modeOverride === 'distill' &&
           hasCloudConfigured &&
           !prompt.toLowerCase().startsWith('/search ') &&
           !prompt.toLowerCase().startsWith('/repo ');
@@ -2476,24 +2752,64 @@ export default function App() {
         if (shouldDistill) {
           try {
             const lesson = await runTeacherDistillForPrompt(prompt);
+            const postCkpt = activeCheckpointRef.current;
             if (lesson?.usedTeacher) {
-              replyText = `${lesson.answer}\n\n[Teacher Distilled -> Scratch AI learned ${lesson.triggers.length} triggers in "${lesson.folderName}" for permanent offline recall]`;
+              pendingTelemetry = {
+                checkpointId: postCkpt.id,
+                confidence: 0.92,
+                lossEstimate: postCkpt.metrics.lastLoss,
+                topTokens: neuralPred.topTokens,
+                isolationMode: 'teacher-distill',
+                cloudCalls: 1,
+                isUntrained: postCkpt.metrics.stepCount === 0,
+              };
+              replyText = `${lesson.answer}\n\n[Teacher Distilled -> Trained ${postCkpt.id} & learned ${lesson.triggers.length} triggers in "${lesson.folderName}"]`;
               citedEntryIds = scratch.citedEntryIds;
               citedRepoPaths = scratch.citedRepoPaths;
             } else {
+              pendingTelemetry = {
+                checkpointId: currentCkpt.id,
+                confidence: scratch.confidence,
+                lossEstimate: neuralPred.lossEstimate,
+                topTokens: neuralPred.topTokens,
+                isolationMode: 'student-strict',
+                cloudCalls: 0,
+                isUntrained: Boolean(scratch.isUntrained),
+              };
               replyText = scratch.replyText;
               citedEntryIds = scratch.citedEntryIds;
               citedRepoPaths = scratch.citedRepoPaths;
             }
           } catch {
+            pendingTelemetry = {
+              checkpointId: currentCkpt.id,
+              confidence: scratch.confidence,
+              lossEstimate: neuralPred.lossEstimate,
+              topTokens: neuralPred.topTokens,
+              isolationMode: 'student-strict',
+              cloudCalls: 0,
+              isUntrained: Boolean(scratch.isUntrained),
+            };
             replyText = scratch.replyText;
             citedEntryIds = scratch.citedEntryIds;
             citedRepoPaths = scratch.citedRepoPaths;
           }
         } else {
+          pendingTelemetry = {
+            checkpointId: currentCkpt.id,
+            confidence: scratch.confidence,
+            lossEstimate: neuralPred.lossEstimate,
+            topTokens: neuralPred.topTokens,
+            isolationMode: 'student-strict',
+            cloudCalls: 0,
+            isUntrained: Boolean(scratch.isUntrained),
+          };
           const lowConfNotice =
-            scratch.needsTeacherDistill && scratch.confidence < 0.55 && !scratch.replyText.includes('found no')
-              ? '\n\n[Low Confidence · Use Teach Scratch or Fix Answer below to train this topic]'
+            scratch.needsTeacherDistill &&
+            scratch.confidence < 0.55 &&
+            !scratch.replyText.includes('found no') &&
+            !scratch.replyText.includes('Untrained')
+              ? '\n\n[Low Confidence · Use Fix Answer or Teacher Distill to step-train this topic]'
               : '';
           replyText = `${scratch.replyText}${lowConfNotice}`;
           citedEntryIds = scratch.citedEntryIds;
@@ -2528,8 +2844,16 @@ export default function App() {
         return;
       }
 
-      setMessages((prev) => [...prev, mantisMsgData as ChatMessage]);
+      const savedMantisMsg = mantisMsgData as ChatMessage;
+      if (pendingTelemetry) {
+        setTurnTelemetryByMsgId((prev) => ({
+          ...prev,
+          [savedMantisMsg.id]: pendingTelemetry!,
+        }));
+      }
+      setMessages((prev) => [...prev, savedMantisMsg]);
     } finally {
+      setStudentIsolationLock(false);
       setIsSendingChat(false);
     }
   }
@@ -2752,6 +3076,20 @@ export default function App() {
       `Saved to ${ensured.folder?.name || semantic.folderName}`,
       'feedback',
     );
+
+    await handleTrainNeuralBatch(
+      18,
+      [
+        {
+          prompt: cleanPrompt,
+          response: cleanAnswer,
+          folderName: ensured.folder?.name || semantic.folderName,
+          source: 'manual',
+        },
+      ],
+      `Fix: ${cleanPrompt.slice(0, 32)}`,
+    );
+
     return saved;
   }
 
@@ -2910,7 +3248,8 @@ export default function App() {
           setSettingsOpen(false);
           setWorkspaceMode(mode);
         }}
-        modelName={modelCard.modelName}
+        modelName={activeCheckpoint.profileName || modelCard.modelName}
+        checkpointId={activeCheckpoint.id}
         isOnline={isOnline}
         pendingOfflineCount={offlineQueueCount}
         inspectorOpen={inspectorOpen}
@@ -3141,6 +3480,8 @@ export default function App() {
               preferBuiltInFirst={preferBuiltInFirst}
               onTogglePreferBuiltIn={(next) => void handleTogglePreferBuiltIn(next)}
               brainModel={brainModel}
+              activeCheckpoint={activeCheckpoint}
+              turnTelemetryByMsgId={turnTelemetryByMsgId}
               isLoading={isLoadingData}
               isSending={isSendingChat}
               escalatingMsgId={escalatingMsgId}
@@ -3382,6 +3723,13 @@ export default function App() {
                       backupBrainUrl={backupBrainUrl}
                       brainModel={brainModel}
                       accessToken={session.access_token}
+                      activeCheckpoint={activeCheckpoint}
+                      checkpoints={checkpoints}
+                      isTrainingNeural={isTrainingNeural}
+                      onTrainNeuralBatch={(epochs) => handleTrainNeuralBatch(epochs)}
+                      onRollbackCheckpoint={handleRollbackCheckpoint}
+                      onCloneCheckpoint={handleCloneCheckpoint}
+                      onResetBlankSlate={handleResetBlankSlate}
                       trainingSamples={trainingSamples}
                       onChangeTrainingSamples={setTrainingSamples}
                       scratchSkills={scratchSkills}
@@ -3450,7 +3798,17 @@ export default function App() {
         onClose={() => setInspectorOpen(false)}
         routeStatus={routeStatus}
         computeStatus={computeStatus}
-        modelName={modelCard.modelName}
+        modelName={activeCheckpoint.profileName || modelCard.modelName}
+        activeCheckpoint={activeCheckpoint}
+        checkpoints={checkpoints}
+        isTrainingNeural={isTrainingNeural}
+        isStudentIsolated={preferBuiltInFirst}
+        onTrainNeuralBatch={async () => {
+          await handleTrainNeuralBatch(20);
+        }}
+        onRollbackCheckpoint={handleRollbackCheckpoint}
+        onCloneCheckpoint={handleCloneCheckpoint}
+        onResetBlankSlate={handleResetBlankSlate}
         entries={entries}
         folders={folders}
         growth={knowledgeGrowth}

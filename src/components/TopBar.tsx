@@ -5,6 +5,7 @@ interface TopBarProps {
   activeMode: WorkspaceMode;
   onSelectMode: (mode: WorkspaceMode) => void;
   modelName: string;
+  checkpointId?: string;
   isOnline: boolean;
   pendingOfflineCount: number;
   inspectorOpen: boolean;
@@ -22,6 +23,7 @@ export function TopBar({
   activeMode,
   onSelectMode,
   modelName,
+  checkpointId,
   isOnline,
   pendingOfflineCount,
   inspectorOpen,
@@ -46,7 +48,10 @@ export function TopBar({
           <span aria-hidden="true" className="text-ink-subtle">
             /
           </span>
-          <span className="truncate font-mono text-xs text-ink-muted">{modelName}</span>
+          <span className="truncate font-mono text-xs text-ink-muted">
+            {modelName}
+            {checkpointId ? ` · ${checkpointId}` : ''}
+          </span>
         </div>
 
         {/* Zone 2: Clean 3-Mode Navigation (Desktop & Landscape Tablet) */}

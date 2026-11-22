@@ -3,10 +3,10 @@ import {createClient} from '@supabase/supabase-js';
 // Public Supabase URL and Publishable key (safe for GitHub Pages static frontend).
 // Secret keys and Hugging Face tokens must NEVER be placed in frontend code.
 export const SUPABASE_URL =
-  import.meta.env.VITE_SUPABASE_URL || 'https://ncbtoawlltxukzzdyvhc.supabase.co';
+  import.meta.env?.VITE_SUPABASE_URL || 'https://ncbtoawlltxukzzdyvhc.supabase.co';
 
 export const SUPABASE_PUBLISHABLE_KEY =
-  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  import.meta.env?.VITE_SUPABASE_PUBLISHABLE_KEY ||
   'sb_publishable_wCDq_uAfoddEBuNLYeLcmQ_WqkXHnpx';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {

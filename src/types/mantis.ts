@@ -455,3 +455,116 @@ export interface SelfOptimizationProposal {
   verifiedSafe: boolean;
   canApplyDirectly: boolean;
 }
+
+export type ExecutionIsolationMode =
+  | 'student-strict'
+  | 'hybrid-assist'
+  | 'teacher-distill'
+  | 'parallel-patch';
+
+export type BpeMergePair = [string, string];
+
+export interface BpeTokenizerState {
+  vocab: string[];
+  merges: BpeMergePair[];
+}
+
+export interface NeuralWeightMetrics {
+  paramCount: number;
+  vocabSize: number;
+  hiddenDim: number;
+  classCount: number;
+  stepCount: number;
+  lastLoss: number | null;
+  firstLoss: number | null;
+  lossHistory: number[];
+  avgGradNorm: number;
+  memoryBytes: number;
+}
+
+export interface NeuralPrototypeTarget {
+  id: string;
+  promptPattern: string;
+  responseText: string;
+  folderName: string;
+  source: 'manual' | 'teacher-distilled' | 'sft' | 'dpo' | 'knowledge';
+  entryId?: string;
+  skillId?: string;
+  trainedSteps: number;
+  lastLoss: number;
+}
+
+export interface SerializedNeuralWeights {
+  dims: {
+    vocabSize: number;
+    embDim: number;
+    hiddenDim: number;
+    classCount: number;
+    loraRank: number;
+  };
+  embWeight: number[];
+  w1: number[];
+  b1: number[];
+  w2: number[];
+  b2: number[];
+  loraA: number[];
+  loraB: number[];
+}
+
+export interface NeuralCheckpoint {
+  id: string;
+  label: string;
+  profileId: string;
+  profileName: string;
+  parentCheckpointId: string | null;
+  createdAt: string;
+  metrics: NeuralWeightMetrics;
+  tokenizer: BpeTokenizerState;
+  targets: NeuralPrototypeTarget[];
+  weights: SerializedNeuralWeights;
+}
+
+export interface NeuralModelProfile {
+  id: string;
+  name: string;
+  activeCheckpointId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NeuralTrainingExample {
+  prompt: string;
+  response: string;
+  folderName?: string;
+  source?: NeuralPrototypeTarget['source'];
+  entryId?: string;
+  skillId?: string;
+}
+
+export interface NeuralTokenActivation {
+  token: string;
+  weight: number;
+}
+
+export interface NeuralPredictResult {
+  replyText: string;
+  confidence: number;
+  entropy: number;
+  lossEstimate: number | null;
+  predictedTargetId: string | null;
+  topTokens: NeuralTokenActivation[];
+  isUntrained: boolean;
+  checkpointId: string;
+  isolationVerified: boolean;
+}
+
+export interface ChatTurnTelemetry {
+  checkpointId: string;
+  confidence: number;
+  lossEstimate: number | null;
+  topTokens: NeuralTokenActivation[];
+  isolationMode: 'student-strict' | 'cloud-assist' | 'teacher-distill' | 'tool';
+  cloudCalls: number;
+  isUntrained: boolean;
+}
+

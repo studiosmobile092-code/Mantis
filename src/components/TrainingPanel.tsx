@@ -3,13 +3,16 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
+  Copy,
   Cpu,
   Edit3,
   FlaskConical,
   Gauge,
   GraduationCap,
+  Layers,
   Play,
   PlusCircle,
+  RotateCcw,
   Scale,
   Sparkles,
   Trash2,
@@ -22,6 +25,7 @@ import {
   runArenaDuelWithBrain,
 } from '../lib/aiBrain';
 import {computeKnowledgeGrowth} from '../lib/mantisBrain';
+import {buildTrainingExamplesFromWorkspace} from '../lib/neuralStudent';
 import {
   analyzeCurriculumCoverage,
   synthesizeScratchWithHybrid,
@@ -44,11 +48,13 @@ import type {
   EvalRunSummary,
   KnowledgeEntry,
   KnowledgeFolder,
+  NeuralCheckpoint,
   RepoFile,
   ResourceProfile,
   ScratchSkillRule,
   TrainingSample,
 } from '../types/mantis';
+import {LossSparkline} from './LossSparkline';
 
 interface TrainingPanelProps {
   entries: KnowledgeEntry[];
@@ -61,6 +67,18 @@ interface TrainingPanelProps {
   backupBrainUrl?: string;
   brainModel: string;
   accessToken: string;
+  activeCheckpoint: NeuralCheckpoint;
+  checkpoints: NeuralCheckpoint[];
+  isTrainingNeural: boolean;
+  onTrainNeuralBatch: (epochs?: number) => Promise<{
+    checkpointId: string;
+    firstLoss: number;
+    lastLoss: number;
+    stepsAdded: number;
+  } | null>;
+  onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
+  onCloneCheckpoint: (checkpointId: string, profileName?: string) => Promise<void>;
+  onResetBlankSlate: () => Promise<void>;
   trainingSamples: TrainingSample[];
   onChangeTrainingSamples: (next: TrainingSample[]) => void;
   scratchSkills: ScratchSkillRule[];
@@ -81,7 +99,7 @@ interface TrainingPanelProps {
   onConsumeArenaPrompt?: () => void;
 }
 
-type TrainingTab = 'arena' | 'curriculum' | 'dataset' | 'evals' | 'profiler';
+type TrainingTab = 'neural' | 'arena' | 'curriculum' | 'dataset' | 'evals' | 'profiler';
 
 function formatKb(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return 'N/A';
@@ -100,6 +118,13 @@ export function TrainingPanel({
   backupBrainUrl,
   brainModel,
   accessToken,
+  activeCheckpoint,
+  checkpoints,
+  isTrainingNeural,
+  onTrainNeuralBatch,
+  onRollbackCheckpoint,
+  onCloneCheckpoint,
+  onResetBlankSlate,
   trainingSamples,
   onChangeTrainingSamples,
   scratchSkills,
@@ -116,7 +141,11 @@ export function TrainingPanel({
   arenaInitialPrompt,
   onConsumeArenaPrompt,
 }: TrainingPanelProps) {
-  const [activeTab, setActiveTab] = useState<TrainingTab>('arena');
+  const [activeTab, setActiveTab] = useState<TrainingTab>('neural');
+  const [batchEpochs, setBatchEpochs] = useState<number>(20);
+  const [neuralFeedback, setNeuralFeedback] = useState<string | null>(null);
+  const [cloneNameInput, setCloneNameInput] = useState<string>('');
+  const [confirmResetZero, setConfirmResetZero] = useState<boolean>(false);
 
   // DPO Arena State
   const [arenaPrompt, setArenaPrompt] = useState('');
@@ -142,7 +171,7 @@ export function TrainingPanel({
   const [editFolderText, setEditFolderText] = useState('');
 
   // Eval Bench State
-  const [evalMode, setEvalMode] = useState<'scratch' | 'hybrid' | 'cloud'>('hybrid');
+  const [evalMode, setEvalMode] = useState<'scratch' | 'hybrid' | 'cloud'>('scratch');
   const [isRunningEval, setIsRunningEval] = useState(false);
   const [newCaseTitle, setNewCaseTitle] = useState('');
   const [newCasePrompt, setNewCasePrompt] = useState('');
@@ -157,6 +186,17 @@ export function TrainingPanel({
   const curriculumCoverage = useMemo(
     () => analyzeCurriculumCoverage(entries, folders, scratchSkills, evalCases),
     [entries, folders, scratchSkills, evalCases],
+  );
+
+  const readyBatchExamples = useMemo(
+    () =>
+      buildTrainingExamplesFromWorkspace({
+        trainingSamples,
+        scratchSkills,
+        entries,
+        folders,
+      }),
+    [trainingSamples, scratchSkills, entries, folders],
   );
 
   useEffect(() => {
@@ -266,6 +306,7 @@ export function TrainingPanel({
         repoLabel,
         cloudResponder: onCloudAsk,
         mode: evalMode,
+        activeCheckpoint,
       });
       onAddEvalRun(summary);
     } finally {
@@ -384,8 +425,8 @@ export function TrainingPanel({
           </p>
         </div>
         <div className="font-mono text-xs tabular-nums text-ink-muted">
-          {curriculumCoverage.coveragePercent}% skill coverage · {approvedSamples.length} SFT/DPO ·{' '}
-          {scratchSkills.length} skills · {latestRun ? `${latestRun.passRate}% eval` : 'No eval'}
+          {activeCheckpoint.id} · {activeCheckpoint.metrics.stepCount} steps ·{' '}
+          {activeCheckpoint.metrics.vocabSize} BPE · {latestRun ? `${latestRun.passRate}% eval` : 'No eval'}
         </div>
       </div>
 
@@ -393,6 +434,7 @@ export function TrainingPanel({
       <div className="flex flex-wrap gap-1 border-b border-line pb-2">
         {(
           [
+            {id: 'neural', label: `Neural Core (${activeCheckpoint.metrics.stepCount})`, icon: Layers},
             {id: 'arena', label: 'Preference Eval', icon: Scale},
             {id: 'curriculum', label: `Curriculum (${curriculumCoverage.gaps.length})`, icon: GraduationCap},
             {id: 'dataset', label: `Dataset & Skills (${trainingSamples.length + scratchSkills.length})`, icon: FlaskConical},
@@ -419,6 +461,253 @@ export function TrainingPanel({
           );
         })}
       </div>
+
+      {/* TAB 0: NEURAL STUDENT CORE & CHECKPOINT REGISTRY */}
+      {activeTab === 'neural' && (
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Active Checkpoint</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-accent-text">
+                {activeCheckpoint.id}
+              </div>
+              <div className="truncate font-mono text-[10px] text-ink-subtle">
+                {activeCheckpoint.profileName}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">AdamW Steps · Grad Norm</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {activeCheckpoint.metrics.stepCount} steps
+              </div>
+              <div className="font-mono text-[10px] tabular-nums text-ink-subtle">
+                {activeCheckpoint.metrics.lastLoss !== null
+                  ? `Loss ${activeCheckpoint.metrics.lastLoss.toFixed(3)} · |∇| ${activeCheckpoint.metrics.avgGradNorm.toFixed(2)}`
+                  : 'Untrained baseline (0 steps)'}
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Dynamic BPE Vocabulary</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {activeCheckpoint.metrics.vocabSize} tokens
+              </div>
+              <div className="font-mono text-[10px] tabular-nums text-ink-subtle">
+                {activeCheckpoint.tokenizer.merges.length} merges · {activeCheckpoint.targets.length} targets
+              </div>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Student Weights (Float32+LoRA)</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {activeCheckpoint.metrics.paramCount.toLocaleString()} params
+              </div>
+              <div className="font-mono text-[10px] tabular-nums text-ink-subtle">
+                {Math.round(activeCheckpoint.metrics.memoryBytes / 1024)} KB indexed
+              </div>
+            </div>
+          </div>
+
+          {/* Batch Trainer Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-surface p-4">
+            <div className="space-y-1">
+              <div className="text-xs font-semibold text-ink">
+                Worker AdamW Trainer ({readyBatchExamples.length} corpus pairs ready)
+              </div>
+              <p className="text-xs text-ink-muted">
+                Expands subword BPE merges and runs gradient descent across approved SFT turns, distilled skills, and Trusted rules inside your browser Web Worker.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {([10, 20, 40] as const).map((ep) => (
+                <button
+                  key={ep}
+                  type="button"
+                  onClick={() => setBatchEpochs(ep)}
+                  className={`min-h-[40px] rounded border px-3 font-mono text-xs tabular-nums ${
+                    batchEpochs === ep
+                      ? 'border-accent-border bg-accent-soft text-accent-text'
+                      : 'border-line bg-inset text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  {ep} epochs
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={isTrainingNeural || readyBatchExamples.length === 0}
+                onClick={async () => {
+                  setNeuralFeedback(null);
+                  const res = await onTrainNeuralBatch(batchEpochs);
+                  if (res) {
+                    setNeuralFeedback(
+                      `Saved ${res.checkpointId} (+${res.stepsAdded} AdamW steps): loss ${res.firstLoss.toFixed(3)} → ${res.lastLoss.toFixed(3)}.`,
+                    );
+                  } else {
+                    setNeuralFeedback(
+                      'No approved SFT samples, skills, or Trusted memories available yet. Teach a rule or fix a chat turn first.',
+                    );
+                  }
+                }}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-4 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>{isTrainingNeural ? 'Training Worker…' : 'Train Neural Batch'}</span>
+              </button>
+            </div>
+          </div>
+
+          {neuralFeedback && (
+            <div className="rounded-md border border-accent-border bg-accent-soft px-3.5 py-2.5 font-mono text-xs text-accent-text">
+              {neuralFeedback}
+            </div>
+          )}
+
+          {/* Loss Curve + BPE Subword Sample */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <h2 className="text-xs font-semibold text-ink">Cross-Entropy Convergence</h2>
+              <LossSparkline
+                history={activeCheckpoint.metrics.lossHistory}
+                height={108}
+                label="Batch Mean Loss"
+              />
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-ink">Learned BPE Subword Vocabulary</h2>
+                <span className="font-mono text-[11px] tabular-nums text-ink-subtle">
+                  {activeCheckpoint.tokenizer.merges.length} merges
+                </span>
+              </div>
+              {activeCheckpoint.tokenizer.vocab.length === 0 ? (
+                <p className="text-xs text-ink-muted">
+                  Vocabulary is empty (0 tokens). Train a batch or fix a turn to build subword tokens from scratch.
+                </p>
+              ) : (
+                <div className="max-h-28 overflow-y-auto rounded border border-line bg-inset p-2.5 font-mono text-[11px] leading-relaxed text-ink-muted">
+                  {activeCheckpoint.tokenizer.vocab
+                    .slice(0, 64)
+                    .map((tok) => tok.replace('</w>', '·'))
+                    .join('  ')}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2.5">
+                <input
+                  type="text"
+                  value={cloneNameInput}
+                  onChange={(e) => setCloneNameInput(e.target.value)}
+                  placeholder="Fork profile name (optional)…"
+                  className="min-h-[40px] min-w-[160px] flex-1 rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle"
+                />
+                <button
+                  type="button"
+                  disabled={isTrainingNeural}
+                  onClick={async () => {
+                    await onCloneCheckpoint(activeCheckpoint.id, cloneNameInput.trim() || undefined);
+                    setCloneNameInput('');
+                    setNeuralFeedback(`Cloned ${activeCheckpoint.id} into a new profile.`);
+                  }}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink hover:border-line-strong"
+                >
+                  <Copy className="h-3.5 w-3.5 text-ink-muted" />
+                  <span>Clone Profile</span>
+                </button>
+                {confirmResetZero ? (
+                  <button
+                    type="button"
+                    disabled={isTrainingNeural}
+                    onClick={async () => {
+                      await onResetBlankSlate();
+                      setConfirmResetZero(false);
+                      setNeuralFeedback('Reset active profile to 0-step blank slate.');
+                    }}
+                    className="inline-flex min-h-[40px] items-center rounded bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-500"
+                  >
+                    Confirm Reset 0
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isTrainingNeural}
+                    onClick={() => setConfirmResetZero(true)}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink-muted hover:text-ink"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Blank-Slate Reset</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Checkpoint History & Rollback Registry */}
+          <div className="space-y-2 rounded-lg border border-line bg-surface p-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-semibold text-ink">
+                Immutable Checkpoint Registry ({checkpoints.length})
+              </h2>
+              <span className="font-mono text-[11px] text-ink-subtle">
+                IndexedDB Local Persistence
+              </span>
+            </div>
+
+            <div className="divide-y divide-line">
+              {checkpoints.map((ckpt) => {
+                const isCurrent = ckpt.id === activeCheckpoint.id;
+                return (
+                  <div
+                    key={ckpt.id}
+                    className="flex flex-wrap items-center justify-between gap-3 py-2.5 text-xs"
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                        <span className={isCurrent ? 'font-semibold text-accent-text' : 'text-ink'}>
+                          {ckpt.id}
+                        </span>
+                        <span className="text-ink-subtle">·</span>
+                        <span className="text-ink-muted">{ckpt.profileName}</span>
+                        <span className="text-ink-subtle">·</span>
+                        <span className="tabular-nums text-ink-muted">
+                          {ckpt.metrics.stepCount} steps · {ckpt.metrics.vocabSize} BPE ·{' '}
+                          {ckpt.targets.length} targets
+                        </span>
+                        {ckpt.metrics.lastLoss !== null && (
+                          <>
+                            <span className="text-ink-subtle">·</span>
+                            <span className="tabular-nums text-accent-text">
+                              Loss {ckpt.metrics.lastLoss.toFixed(3)}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="truncate text-[11px] text-ink-subtle">
+                        {ckpt.label} · {new Date(ckpt.createdAt).toLocaleString()}
+                      </div>
+                    </div>
+
+                    {isCurrent ? (
+                      <span className="font-mono text-xs font-semibold text-accent-text">
+                        Active Checkpoint
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void onRollbackCheckpoint(ckpt.id)}
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink hover:border-line-strong"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5 text-ink-muted" />
+                        <span>Rollback</span>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* TAB 1: DPO ARENA */}
       {activeTab === 'arena' && (

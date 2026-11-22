@@ -25,10 +25,12 @@ import type {
   AssassinPrepBrief,
   BrainRouteStatus,
   ChatMessage,
+  ChatTurnTelemetry,
   GitHubConnection,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeGrowthStats,
+  NeuralCheckpoint,
   RepoFile,
 } from '../types/mantis';
 import {AssassinBriefCard} from './AssassinBriefCard';
@@ -40,7 +42,7 @@ export type StudioComposerMode = 'scratch' | 'cloud' | 'distill' | 'assassin';
 const SLASH_COMMANDS: Array<{cmd: string; template: string; desc: string}> = [
   {cmd: '/search', template: '/search ', desc: 'Search Hybrid BM25 + Int8 Knowledge memory'},
   {cmd: '/repo', template: '/repo ', desc: 'Search synced GitHub repository files'},
-  {cmd: '/teach', template: '/teach Title :: ', desc: 'Save a Trusted rule with auto-folder classification'},
+  {cmd: '/teach', template: '/teach Title :: ', desc: 'Save a Trusted rule & step-train Student weights'},
   {cmd: '/execute', template: '/execute ', desc: 'Parallel patch prep + static safety gate'},
   {cmd: '/suggest', template: '/suggest ', desc: 'Propose an approval-gated diff for a file'},
   {cmd: '/self-audit', template: '/self-audit', desc: 'Scan Mantis codebase for safety & health'},
@@ -49,7 +51,11 @@ const SLASH_COMMANDS: Array<{cmd: string; template: string; desc: string}> = [
 function isLowConfidenceReply(content: string): boolean {
   return (
     content.includes('[Low Confidence') ||
-    content.includes('found no high-confidence stored skill') ||
+    content.includes('Untrained baseline') ||
+    content.includes('Untrained student') ||
+    content.includes('Untrained subwords') ||
+    content.includes('Low neural confidence') ||
+    content.includes('found no high-confidence') ||
     content.includes('found no stored skill or knowledge entry') ||
     content.includes('[Scratch Fallback')
   );
@@ -66,6 +72,8 @@ interface ChatWorkspaceProps {
   preferBuiltInFirst: boolean;
   onTogglePreferBuiltIn: (next: boolean) => void;
   brainModel: string;
+  activeCheckpoint?: NeuralCheckpoint;
+  turnTelemetryByMsgId?: Record<string, ChatTurnTelemetry>;
   isLoading: boolean;
   isSending: boolean;
   escalatingMsgId: string | null;
@@ -224,6 +232,8 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   preferBuiltInFirst,
   onTogglePreferBuiltIn,
   brainModel,
+  activeCheckpoint,
+  turnTelemetryByMsgId,
   isLoading,
   isSending,
   escalatingMsgId,
@@ -274,7 +284,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [fixingMsgId, setFixingMsgId] = useState<string | null>(null);
   const [fixDraft, setFixDraft] = useState('');
   const [isSavingFix, setIsSavingFix] = useState(false);
-  const [fixedMsgIds, setFixedMsgIds] = useState<Record<string, boolean>>({});
+  const [fixedMsgIds, setFixedMsgIds] = useState<Record<string, string>>({});
 
   // Slash command palette state
   const [slashIndex, setSlashIndex] = useState(0);
@@ -707,18 +717,58 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   minute: '2-digit',
                                 })}
                               </span>
+                              {!isUser && turnTelemetryByMsgId?.[msg.id] && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="tabular-nums text-ink-muted">
+                                    {turnTelemetryByMsgId[msg.id].checkpointId}
+                                  </span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="tabular-nums text-ink-muted">
+                                    Conf {turnTelemetryByMsgId[msg.id].confidence.toFixed(2)}
+                                  </span>
+                                  {turnTelemetryByMsgId[msg.id].lossEstimate !== null && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="tabular-nums text-ink-muted">
+                                        Loss {turnTelemetryByMsgId[msg.id].lossEstimate?.toFixed(2)}
+                                      </span>
+                                    </>
+                                  )}
+                                  <span aria-hidden="true">·</span>
+                                  <span
+                                    className={
+                                      turnTelemetryByMsgId[msg.id].cloudCalls === 0
+                                        ? 'text-accent-text'
+                                        : 'text-ink-muted'
+                                    }
+                                  >
+                                    {turnTelemetryByMsgId[msg.id].cloudCalls === 0
+                                      ? '0 Cloud Calls'
+                                      : `${turnTelemetryByMsgId[msg.id].cloudCalls} Cloud Call`}
+                                  </span>
+                                </>
+                              )}
                               {isLowConf && !fixedMsgIds[msg.id] && (
                                 <>
                                   <span aria-hidden="true">·</span>
                                   <span className="text-warn">
-                                    Low confidence · teach needed
+                                    {turnTelemetryByMsgId?.[msg.id]?.isUntrained
+                                      ? 'Untrained (0 steps)'
+                                      : 'Low confidence · step-train needed'}
                                   </span>
                                 </>
                               )}
-                              {fixedMsgIds[msg.id] && (
+                              {fixedMsgIds[msg.id] && prevUserMsg && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="text-accent-text">Skill taught</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => void onSendMessage(prevUserMsg.content, 'scratch')}
+                                    className="font-semibold text-accent-text underline underline-offset-2 hover:opacity-90"
+                                  >
+                                    Step-trained ({fixedMsgIds[msg.id]}) · Re-test Prompt
+                                  </button>
                                 </>
                               )}
                               {storedFolder && (
@@ -916,18 +966,31 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                           {/* Editorial Prose Body */}
                           <RichMessageContent content={msg.content} />
 
-                          {/* Inline Skill Correction Drawer */}
+                          {/* Activated Subword Attribution (Neural Forward Telemetry) */}
+                          {!isUser &&
+                            turnTelemetryByMsgId?.[msg.id] &&
+                            turnTelemetryByMsgId[msg.id].topTokens.length > 0 && (
+                              <div className="mt-2 font-mono text-[11px] tabular-nums text-ink-subtle">
+                                Subwords:{' '}
+                                {turnTelemetryByMsgId[msg.id].topTokens
+                                  .slice(0, 5)
+                                  .map((t) => `${t.token} (${t.weight.toFixed(2)})`)
+                                  .join(' · ')}
+                              </div>
+                            )}
+
+                          {/* Inline Skill Correction & Step-Train Drawer */}
                           {!isUser && prevUserMsg && onTeachScratchFix && fixingMsgId === msg.id && (
                             <div className="mt-3 space-y-2 rounded-lg border border-line-strong bg-inset p-3">
                               <div className="text-[11px] font-medium text-ink-muted">
-                                Teach local student the preferred answer for:{' '}
+                                Correct &amp; Step-Train neural weights for:{' '}
                                 <span className="font-mono text-ink">&quot;{prevUserMsg.content}&quot;</span>
                               </div>
                               <textarea
                                 rows={2}
                                 value={fixDraft}
                                 onChange={(e) => setFixDraft(e.target.value)}
-                                placeholder="Enter the preferred rule or answer to save as a Trusted note and local skill…"
+                                placeholder="Enter the ideal response to run AdamW gradient descent and save a new checkpoint…"
                                 className="w-full rounded-md border border-line-strong bg-surface px-3 py-2 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                               />
                               <div className="flex flex-wrap items-center justify-end gap-2">
@@ -953,7 +1016,10 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                         fixDraft.trim(),
                                       );
                                       if (ok) {
-                                        setFixedMsgIds((prev) => ({...prev, [msg.id]: true}));
+                                        setFixedMsgIds((prev) => ({
+                                          ...prev,
+                                          [msg.id]: activeCheckpoint?.id || 'trained',
+                                        }));
                                         setFixingMsgId(null);
                                         setFixDraft('');
                                       }
@@ -964,7 +1030,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-3.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                                 >
                                   <Check className="h-3.5 w-3.5" />
-                                  <span>{isSavingFix ? 'Saving…' : 'Save Skill & Rule'}</span>
+                                  <span>{isSavingFix ? 'Stepping…' : 'Save & Step-Train'}</span>
                                 </button>
                               </div>
                             </div>
@@ -1126,7 +1192,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                   </button>
                   {(
                     [
-                      {id: 'scratch', label: 'Local Student'},
+                      {id: 'scratch', label: 'Student Isolated'},
                       {id: 'cloud', label: 'Cloud Assist'},
                       {id: 'distill', label: 'Teacher Distill'},
                       {id: 'assassin', label: 'Parallel Patch'},
@@ -1156,7 +1222,12 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                     );
                   })}
 
-                  {!hasCloudRoute && (
+                  <span className="hidden font-mono text-[11px] tabular-nums text-ink-subtle sm:inline">
+                    · {activeCheckpoint ? activeCheckpoint.id : 'ckpt-000'}
+                    {composerMode === 'scratch' ? ' · 0 Cloud Calls' : ''}
+                  </span>
+
+                  {!hasCloudRoute && composerMode !== 'scratch' && (
                     <button
                       type="button"
                       onClick={onOpenSettings}

@@ -1,13 +1,16 @@
 import {
+  Copy,
   FileCode2,
   Folder,
   Moon,
+  Play,
   RefreshCw,
+  RotateCcw,
   Settings,
   Sun,
   X,
 } from 'lucide-react';
-import {useEffect, useMemo} from 'react';
+import {useEffect, useMemo, useState} from 'react';
 import type {
   BrainRouteStatus,
   ComputeEngineStatus,
@@ -16,9 +19,11 @@ import type {
   KnowledgeFolder,
   KnowledgeGrowthStats,
   LearningEvent,
+  NeuralCheckpoint,
   RepoFile,
   ThemeMode,
 } from '../types/mantis';
+import {LossSparkline} from './LossSparkline';
 
 interface InspectorDrawerProps {
   isOpen: boolean;
@@ -26,6 +31,14 @@ interface InspectorDrawerProps {
   routeStatus: BrainRouteStatus;
   computeStatus: ComputeEngineStatus;
   modelName: string;
+  activeCheckpoint: NeuralCheckpoint;
+  checkpoints: NeuralCheckpoint[];
+  isTrainingNeural: boolean;
+  isStudentIsolated: boolean;
+  onTrainNeuralBatch: () => Promise<void>;
+  onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
+  onCloneCheckpoint: (checkpointId: string) => Promise<void>;
+  onResetBlankSlate: () => Promise<void>;
   entries: KnowledgeEntry[];
   folders: KnowledgeFolder[];
   growth: KnowledgeGrowthStats;
@@ -94,6 +107,14 @@ export function InspectorDrawer({
   routeStatus,
   computeStatus,
   modelName,
+  activeCheckpoint,
+  checkpoints,
+  isTrainingNeural,
+  isStudentIsolated,
+  onTrainNeuralBatch,
+  onRollbackCheckpoint,
+  onCloneCheckpoint,
+  onResetBlankSlate,
   entries,
   folders,
   growth,
@@ -113,6 +134,7 @@ export function InspectorDrawer({
   onQueryConcept,
   onInspectRepoFile,
 }: InspectorDrawerProps) {
+  const [confirmResetBlank, setConfirmResetBlank] = useState(false);
   useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -239,10 +261,12 @@ export function InspectorDrawer({
 
             <dl className="space-y-1.5 font-mono text-xs tabular-nums">
               <div className="flex items-center justify-between gap-2">
-                <dt className="text-ink-muted">Teacher Route</dt>
-                <dd className="text-ink">
-                  {formatRouteLabel(routeStatus)}
-                  {routeStatus.latencyMs !== null ? ` · ${routeStatus.latencyMs} ms` : ''}
+                <dt className="text-ink-muted">Isolation Gate</dt>
+                <dd className={isStudentIsolated ? 'text-accent-text' : 'text-ink'}>
+                  {isStudentIsolated ? 'Student Strict (0 Cloud)' : formatRouteLabel(routeStatus)}
+                  {!isStudentIsolated && routeStatus.latencyMs !== null
+                    ? ` · ${routeStatus.latencyMs} ms`
+                    : ''}
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-2">
@@ -288,6 +312,149 @@ export function InspectorDrawer({
                 >
                   Inspect
                 </button>
+              </div>
+            )}
+          </section>
+
+          {/* Neural Student Weights, Loss Curve & Checkpoint Rollback */}
+          <section className="space-y-3 py-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-semibold text-ink">Neural Student &amp; Checkpoints</h2>
+              <span className="font-mono text-[11px] tabular-nums text-accent-text">
+                {activeCheckpoint.id}
+              </span>
+            </div>
+
+            <LossSparkline
+              history={activeCheckpoint.metrics.lossHistory}
+              label="AdamW Loss Curve"
+            />
+
+            <dl className="space-y-1 font-mono text-xs tabular-nums">
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Profile</dt>
+                <dd className="truncate text-ink">{activeCheckpoint.profileName}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Steps · Targets</dt>
+                <dd className="text-ink">
+                  {activeCheckpoint.metrics.stepCount} steps · {activeCheckpoint.targets.length}{' '}
+                  targets
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">BPE Vocabulary</dt>
+                <dd className="text-ink">
+                  {activeCheckpoint.metrics.vocabSize} tokens (
+                  {activeCheckpoint.tokenizer.merges.length} merges)
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Weight Footprint</dt>
+                <dd className="text-ink">
+                  {activeCheckpoint.metrics.paramCount.toLocaleString()} params ·{' '}
+                  {Math.round(activeCheckpoint.metrics.memoryBytes / 1024)} KB
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Last Loss · Grad</dt>
+                <dd className="text-ink">
+                  {activeCheckpoint.metrics.lastLoss !== null
+                    ? `${activeCheckpoint.metrics.lastLoss.toFixed(3)} · |∇| ${activeCheckpoint.metrics.avgGradNorm.toFixed(2)}`
+                    : 'Untrained (0 steps)'}
+                </dd>
+              </div>
+            </dl>
+
+            <div className="grid grid-cols-3 gap-1.5">
+              <button
+                type="button"
+                disabled={isTrainingNeural}
+                onClick={() => void onTrainNeuralBatch()}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1 rounded-md bg-accent px-2 text-xs font-semibold text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+              >
+                <Play className="h-3 w-3" />
+                <span>{isTrainingNeural ? 'Training…' : 'Train'}</span>
+              </button>
+              <button
+                type="button"
+                disabled={isTrainingNeural}
+                onClick={() => void onCloneCheckpoint(activeCheckpoint.id)}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1 rounded-md border border-line bg-inset px-2 text-xs font-medium text-ink hover:border-line-strong disabled:opacity-50"
+              >
+                <Copy className="h-3 w-3 text-ink-muted" />
+                <span>Clone</span>
+              </button>
+              {confirmResetBlank ? (
+                <button
+                  type="button"
+                  disabled={isTrainingNeural}
+                  onClick={async () => {
+                    await onResetBlankSlate();
+                    setConfirmResetBlank(false);
+                  }}
+                  className="inline-flex min-h-[40px] items-center justify-center rounded-md bg-red-600 px-2 text-xs font-semibold text-white hover:bg-red-500"
+                >
+                  Confirm 0
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isTrainingNeural}
+                  onClick={() => setConfirmResetBlank(true)}
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1 rounded-md border border-line bg-inset px-2 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  <span>Reset 0</span>
+                </button>
+              )}
+            </div>
+
+            {checkpoints.length > 0 && (
+              <div className="divide-y divide-line border-t border-line pt-1">
+                {checkpoints.slice(0, 6).map((ckpt) => {
+                  const isCurrent = ckpt.id === activeCheckpoint.id;
+                  return (
+                    <div
+                      key={ckpt.id}
+                      className="flex items-center justify-between gap-2 py-2 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                          <span className={isCurrent ? 'font-semibold text-accent-text' : 'text-ink'}>
+                            {ckpt.id}
+                          </span>
+                          <span className="text-ink-subtle">·</span>
+                          <span className="tabular-nums text-ink-muted">
+                            {ckpt.metrics.stepCount} stp
+                          </span>
+                          {ckpt.metrics.lastLoss !== null && (
+                            <>
+                              <span className="text-ink-subtle">·</span>
+                              <span className="tabular-nums text-ink-muted">
+                                L {ckpt.metrics.lastLoss.toFixed(2)}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        <div className="truncate text-[11px] text-ink-subtle">{ckpt.label}</div>
+                      </div>
+                      {isCurrent ? (
+                        <span className="shrink-0 font-mono text-[11px] font-semibold text-accent-text">
+                          Active
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void onRollbackCheckpoint(ckpt.id)}
+                          className="min-h-[36px] shrink-0 rounded border border-line bg-inset px-2.5 text-[11px] font-medium text-ink hover:border-line-strong"
+                        >
+                          Rollback
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>

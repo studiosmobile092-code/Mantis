@@ -4,12 +4,15 @@ import type {
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeGrowthStats,
+  NeuralCheckpoint,
+  NeuralPredictResult,
   RepoFile,
   RetrievalMatch,
   ScratchSkillRule,
 } from '../types/mantis';
 import {getEntryStatus} from './knowledgeSync';
 import {matchTokenStrength, retrieveRelevantRepoFiles, tokenizeQuery} from './memory';
+import {inferNeuralCore} from './neuralStudent';
 
 const SCRATCH_SKILLS_KEY = 'mantis_scratch_skills_v1';
 
@@ -439,11 +442,16 @@ export interface ScratchSynthesisResult {
   matchedSkillId?: string;
   usedSkillId?: string;
   nearMissSkillTrigger?: string;
+  neuralResult?: NeuralPredictResult;
+  isUntrained?: boolean;
 }
 
 /**
- * Confidence-aware Scratch AI responder powered by Hybrid RAG matches,
- * learned Teacher-distilled Skills, safe math evaluation, and Repo context.
+ * Confidence-aware Local Student AI responder powered by:
+ * 1) Safe deterministic expression parser (arithmetic tool),
+ * 2) Trainable BPE + MLP/LoRA Neural Student weights (zero hardcoded greetings),
+ * 3) Explicitly taught Skill rules, and
+ * 4) Hybrid BM25 + Int8 Dense RRF + Repo recall.
  */
 export function synthesizeScratchWithHybrid(params: {
   prompt: string;
@@ -454,27 +462,58 @@ export function synthesizeScratchWithHybrid(params: {
   repoLabel: string | null;
   growth: KnowledgeGrowthStats;
   recordUsage?: boolean;
+  activeCheckpoint?: NeuralCheckpoint;
+  neuralPrediction?: NeuralPredictResult;
 }): ScratchSynthesisResult {
-  const {prompt, hybridMatches, entries, folders, repoFiles, repoLabel, growth} = params;
+  const {
+    prompt,
+    hybridMatches,
+    entries,
+    folders,
+    repoFiles,
+    repoLabel,
+    growth,
+    activeCheckpoint,
+  } = params;
   const trimmed = prompt.trim();
   const lower = trimmed.toLowerCase();
   const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
+  const isCommandQuery = lower.startsWith('/search ') || lower.startsWith('/repo ');
 
-  // 1. Safe Math / Logic Skill
+  const neuralPred =
+    params.neuralPrediction ??
+    (activeCheckpoint ? inferNeuralCore(trimmed, activeCheckpoint) : undefined);
+
+  // 1. Safe Math / Logic Tool (pure operator parser — zero pre-baked facts)
   const mathEval = tryEvaluateMathExpression(trimmed);
   if (mathEval) {
     return {
-      replyText: `${mathEval.formatted}\n\nComputed directly by Scratch AI's safe expression parser.`,
+      replyText: `${mathEval.formatted}\n\nComputed by built-in expression parser tool.`,
       citedEntryIds: [],
       citedRepoPaths: [],
       confidence: 0.96,
       needsTeacherDistill: false,
+      neuralResult: neuralPred,
+      isUntrained: false,
     };
   }
 
-  // 2. Learned Scratch Skills (from Teacher Distillation or manual training)
+  // 2. Neural Student Core Forward Pass (trained BPE + MLP/LoRA logits)
+  if (!isCommandQuery && neuralPred && !neuralPred.isUntrained && neuralPred.confidence >= 0.42) {
+    return {
+      replyText: neuralPred.replyText,
+      citedEntryIds: hybridMatches.slice(0, 2).map((m) => m.entry.id),
+      citedRepoPaths: [],
+      confidence: neuralPred.confidence,
+      needsTeacherDistill: false,
+      neuralResult: neuralPred,
+      isUntrained: false,
+    };
+  }
+
+  // 3. Learned Explicit Skills (from Teacher Distillation or operator corrections — never hardcoded)
   const skills = loadScratchSkills();
-  const skillHit = matchScratchSkill(trimmed, skills);
+  const skillHit = isCommandQuery ? null : matchScratchSkill(trimmed, skills);
   if (skillHit && skillHit.score >= 0.72) {
     let usedSkillId: string | undefined;
     if (params.recordUsage !== false) {
@@ -483,18 +522,16 @@ export function synthesizeScratchWithHybrid(params: {
     }
     const variants = skillHit.skill.responses;
     const picked = variants[skillHit.skill.usageCount % variants.length] || variants[0];
-    const altNote =
-      variants.length > 1
-        ? `\n\nTrained Scratch Skill (${skillHit.skill.folderName} · ${variants.length} learned response variants)`
-        : '';
     return {
-      replyText: `${picked}${altNote}`,
+      replyText: picked,
       citedEntryIds: hybridMatches.slice(0, 2).map((m) => m.entry.id),
       citedRepoPaths: [],
-      confidence: Math.min(0.95, skillHit.score),
+      confidence: Math.max(neuralPred?.confidence || 0, Math.min(0.95, skillHit.score)),
       needsTeacherDistill: false,
       matchedSkillId: skillHit.skill.id,
       usedSkillId,
+      neuralResult: neuralPred,
+      isUntrained: false,
     };
   }
   const nearMissSkillTrigger =
@@ -502,54 +539,34 @@ export function synthesizeScratchWithHybrid(params: {
       ? skillHit.skill.triggers[0]
       : undefined;
 
-  // 3. Built-in Greeting Check (If Teacher hasn't enriched greetings yet, still respond cleanly & allow enrichment!)
-  const cleanedGreeting = lower.replace(/[!?.]+$/g, '').trim();
-  const baseGreetings = new Set(['hi', 'hello', 'hey', 'yo', 'sup', 'howdy', 'greetings']);
-  if (baseGreetings.has(cleanedGreeting)) {
-    const topConceptNames = growth.topConcepts
-      .slice(0, 4)
-      .map((c) => `${c.label} (${c.count})`)
-      .join(', ');
-    return {
-      replyText: [
-        `Mantis Scratch AI online — ${entries.length} knowledge entries (${growth.uniqueConcepts} concepts)${
-          repoLabel ? ` and ${repoFiles.length} files in ${repoLabel}` : ''
-        }.`,
-        topConceptNames ? `Active clusters: ${topConceptNames}.` : '',
-      ]
-        .filter(Boolean)
-        .join('\n'),
-      citedEntryIds: [],
-      citedRepoPaths: [],
-      confidence: skills.some((s) => s.triggers.includes('hi')) ? 0.92 : 0.65,
-      needsTeacherDistill: !skills.some((s) => s.triggers.includes('hi')),
-    };
-  }
-
-  // 4. Memory Overview Queries
+  // 4. Honest Memory & Weight Inspection Queries
   if (
     lower.includes('what have i taught') ||
     lower.includes('what do you know') ||
     lower.includes('list memory') ||
-    lower.includes('show knowledge') ||
-    lower === 'help'
+    lower.includes('show knowledge')
   ) {
     const trusted = entries.filter((e) => getEntryStatus(e) === 'trusted');
     const sample = (trusted.length > 0 ? trusted : entries).slice(0, 6);
-    if (sample.length === 0 && repoFiles.length === 0) {
+    const steps = activeCheckpoint?.metrics.stepCount || 0;
+    const vocab = activeCheckpoint?.metrics.vocabSize || 0;
+
+    if (sample.length === 0 && skills.length === 0 && steps === 0 && repoFiles.length === 0) {
       return {
         replyText:
-          'Scratch memory is empty right now. Teach a rule with `Remember: ...`, ingest a link/mic capture, or run any question with Cloud Brain active so the Teacher distills skills into Scratch automatically.',
+          'Untrained baseline (0 steps · 0 BPE tokens · 0 stored memories). Teach a rule, distill from Teacher, or step-train your first turn below.',
         citedEntryIds: [],
         citedRepoPaths: [],
-        confidence: 0.75,
-        needsTeacherDistill: false,
+        confidence: 0,
+        needsTeacherDistill: true,
+        neuralResult: neuralPred,
+        isUntrained: true,
       };
     }
 
     return {
       replyText: [
-        `Scratch Knowledge Base: ${entries.length} entries (${trusted.length} trusted) · ${skills.length} distilled skills · ${growth.uniqueConcepts} concepts.`,
+        `Student State (${activeCheckpoint?.id || 'ckpt-000'}): ${steps} gradient steps · ${vocab} BPE tokens · ${entries.length} memories (${trusted.length} trusted) · ${skills.length} skills · ${growth.uniqueConcepts} concepts.`,
         '',
         ...sample.map((e) => {
           const fname = (e.folder_id && folderMap.get(e.folder_id)) || 'Uncategorized';
@@ -560,6 +577,8 @@ export function synthesizeScratchWithHybrid(params: {
       citedRepoPaths: [],
       confidence: 0.88,
       needsTeacherDistill: false,
+      neuralResult: neuralPred,
+      isUntrained: false,
     };
   }
 
@@ -577,16 +596,36 @@ export function synthesizeScratchWithHybrid(params: {
   const hasStrongMatch = topScore >= 3.2 || repoMatches.length > 0;
 
   if (hybridMatches.length === 0 && repoMatches.length === 0) {
+    const isZeroKnowledge =
+      (!activeCheckpoint || activeCheckpoint.metrics.stepCount === 0) && skills.length === 0;
+
+    if (isZeroKnowledge) {
+      return {
+        replyText: `Untrained student (${activeCheckpoint?.id || 'ckpt-000'} · 0 steps · 0 BPE tokens): I have no learned weights or memories matching "${searchTerm}". Correct & Step-Train this turn or use Teacher Distill to begin training.`,
+        citedEntryIds: [],
+        citedRepoPaths: [],
+        confidence: 0,
+        needsTeacherDistill: true,
+        neuralResult: neuralPred,
+        isUntrained: true,
+      };
+    }
+
     const nearMissHint = nearMissSkillTrigger
-      ? `\n\nRelated partial skill found ("${nearMissSkillTrigger}"), but confidence is below 72%. Use Teach Scratch or fix the reply below to generalize this pattern.`
+      ? `\n\nPartial skill candidate ("${nearMissSkillTrigger}"), confidence below threshold.`
       : '';
     return {
-      replyText: `Scratch AI found no high-confidence stored skill or knowledge entry matching "${searchTerm}".${nearMissHint}`,
+      replyText:
+        neuralPred && neuralPred.replyText
+          ? `${neuralPred.replyText}${nearMissHint}`
+          : `Local student (${activeCheckpoint?.id || 'ckpt'}) found no high-confidence match for "${searchTerm}".${nearMissHint}`,
       citedEntryIds: [],
       citedRepoPaths: [],
-      confidence: nearMissSkillTrigger ? 0.34 : 0.12,
+      confidence: Math.max(neuralPred?.confidence ?? 0, nearMissSkillTrigger ? 0.34 : 0.12),
       needsTeacherDistill: true,
       nearMissSkillTrigger,
+      neuralResult: neuralPred,
+      isUntrained: Boolean(neuralPred?.isUntrained),
     };
   }
 
@@ -596,7 +635,10 @@ export function synthesizeScratchWithHybrid(params: {
       `Hybrid Memory Recall (${hybridMatches.length} ranked via BM25 + Int8 Dense RRF):`,
       ...hybridMatches.map((m, idx) => {
         const why = m.reasons.length > 0 ? ` · ${m.reasons.join(' · ')}` : '';
-        const body = m.entry.content.length > 340 ? `${m.entry.content.slice(0, 340).trim()}…` : m.entry.content.trim();
+        const body =
+          m.entry.content.length > 340
+            ? `${m.entry.content.slice(0, 340).trim()}…`
+            : m.entry.content.trim();
         return `${idx + 1}. **${m.entry.title}** [${m.folderName}${why}]\n${body}`;
       }),
     );
@@ -617,7 +659,13 @@ export function synthesizeScratchWithHybrid(params: {
     replyText: lines.join('\n'),
     citedEntryIds: hybridMatches.map((m) => m.entry.id),
     citedRepoPaths: repoMatches.map((r) => r.file.path),
-    confidence: hasStrongMatch ? Math.min(0.88, 0.5 + topScore * 0.05) : 0.36,
+    confidence: Math.max(
+      neuralPred?.confidence || 0,
+      hasStrongMatch ? Math.min(0.88, 0.5 + topScore * 0.05) : 0.36,
+    ),
     needsTeacherDistill: !hasStrongMatch,
+    neuralResult: neuralPred,
+    isUntrained: false,
   };
 }
+

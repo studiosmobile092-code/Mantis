@@ -4,14 +4,16 @@ import type {
   EvalRunSummary,
   KnowledgeEntry,
   KnowledgeFolder,
+  NeuralCheckpoint,
   RepoFile,
   ResourceProfile,
   SelfOptimizationProposal,
   TrainingSample,
 } from '../types/mantis';
-import {runHybridRetrievalAsync} from './workerClient';
-import {synthesizeScratchWithHybrid} from './scratchEngine';
+import {isStudentIsolationLocked, setStudentIsolationLock} from './aiBrain';
 import {computeKnowledgeGrowth} from './mantisBrain';
+import {synthesizeScratchWithHybrid} from './scratchEngine';
+import {inferNeuralStudentAsync, runHybridRetrievalAsync} from './workerClient';
 
 const TRAINING_SAMPLES_KEY = 'mantis_training_samples_v1';
 const EVAL_CASES_KEY = 'mantis_eval_cases_v1';
@@ -236,91 +238,109 @@ export async function executeEvalSuite(params: {
   repoLabel: string | null;
   cloudResponder?: (prompt: string) => Promise<{replyText: string; citedEntryIds: string[]}>;
   mode: 'scratch' | 'cloud' | 'hybrid';
+  activeCheckpoint?: NeuralCheckpoint;
 }): Promise<EvalRunSummary> {
   const growth = computeKnowledgeGrowth(params.entries);
   const results: EvalCaseResult[] = [];
+  const wasLocked = isStudentIsolationLocked();
 
-  for (const testCase of params.cases) {
-    const start = performance.now();
-    let replyText = '';
-    let citedIds: string[] = [];
-    let engineUsed: 'scratch' | 'cloud' = 'scratch';
+  if (params.mode === 'scratch') {
+    setStudentIsolationLock(true);
+  }
 
-    const hybridMatches = await runHybridRetrievalAsync({
-      query: testCase.prompt,
-      entries: params.entries,
-      folders: params.folders,
-      limit: 4,
-    });
+  try {
+    for (const testCase of params.cases) {
+      const start = performance.now();
+      let replyText = '';
+      let citedIds: string[] = [];
+      let engineUsed: 'scratch' | 'cloud' = 'scratch';
 
-    const scratch = synthesizeScratchWithHybrid({
-      prompt: testCase.prompt,
-      hybridMatches,
-      entries: params.entries,
-      folders: params.folders,
-      repoFiles: params.repoFiles,
-      repoLabel: params.repoLabel,
-      growth,
-      recordUsage: false,
-    });
+      const [hybridMatches, neuralPred] = await Promise.all([
+        runHybridRetrievalAsync({
+          query: testCase.prompt,
+          entries: params.entries,
+          folders: params.folders,
+          limit: 4,
+        }),
+        params.activeCheckpoint
+          ? inferNeuralStudentAsync(testCase.prompt, params.activeCheckpoint)
+          : Promise.resolve(undefined),
+      ]);
 
-    if (
-      (params.mode === 'cloud' || (params.mode === 'hybrid' && scratch.needsTeacherDistill)) &&
-      params.cloudResponder
-    ) {
-      try {
-        const cloud = await params.cloudResponder(testCase.prompt);
-        replyText = cloud.replyText;
-        citedIds = cloud.citedEntryIds;
-        engineUsed = 'cloud';
-      } catch {
+      const scratch = synthesizeScratchWithHybrid({
+        prompt: testCase.prompt,
+        hybridMatches,
+        entries: params.entries,
+        folders: params.folders,
+        repoFiles: params.repoFiles,
+        repoLabel: params.repoLabel,
+        growth,
+        recordUsage: false,
+        activeCheckpoint: params.activeCheckpoint,
+        neuralPrediction: neuralPred,
+      });
+
+      if (
+        params.mode !== 'scratch' &&
+        (params.mode === 'cloud' || (params.mode === 'hybrid' && scratch.needsTeacherDistill)) &&
+        params.cloudResponder
+      ) {
+        try {
+          const cloud = await params.cloudResponder(testCase.prompt);
+          replyText = cloud.replyText;
+          citedIds = cloud.citedEntryIds;
+          engineUsed = 'cloud';
+        } catch {
+          replyText = scratch.replyText;
+          citedIds = scratch.citedEntryIds;
+        }
+      } else {
         replyText = scratch.replyText;
         citedIds = scratch.citedEntryIds;
       }
-    } else {
-      replyText = scratch.replyText;
-      citedIds = scratch.citedEntryIds;
-    }
 
-    const latencyMs = Math.round((performance.now() - start) * 10) / 10;
-    const lowerReply = replyText.toLowerCase();
-    const failureReasons: string[] = [];
+      const latencyMs = Math.round((performance.now() - start) * 10) / 10;
+      const lowerReply = replyText.toLowerCase();
+      const failureReasons: string[] = [];
 
-    for (const reqTerm of testCase.requiredTerms) {
-      if (reqTerm.trim() && !lowerReply.includes(reqTerm.trim().toLowerCase())) {
-        failureReasons.push(`Missing required term: "${reqTerm}"`);
+      for (const reqTerm of testCase.requiredTerms) {
+        if (reqTerm.trim() && !lowerReply.includes(reqTerm.trim().toLowerCase())) {
+          failureReasons.push(`Missing required term: "${reqTerm}"`);
+        }
       }
-    }
-    for (const forb of testCase.forbiddenTerms) {
-      if (forb.trim() && lowerReply.includes(forb.trim().toLowerCase())) {
-        failureReasons.push(`Contains forbidden term: "${forb}"`);
+      for (const forb of testCase.forbiddenTerms) {
+        if (forb.trim() && lowerReply.includes(forb.trim().toLowerCase())) {
+          failureReasons.push(`Contains forbidden term: "${forb}"`);
+        }
       }
-    }
-    if (testCase.requireCitation && citedIds.length === 0) {
-      failureReasons.push('Missing Knowledge citation');
-    }
-    if (testCase.requireSafeCode) {
-      const safety = runStaticCodeSafetyCheck(replyText);
-      if (!safety.passed) {
-        failureReasons.push(...safety.issues);
+      if (testCase.requireCitation && citedIds.length === 0) {
+        failureReasons.push('Missing Knowledge citation');
       }
+      if (testCase.requireSafeCode) {
+        const safety = runStaticCodeSafetyCheck(replyText);
+        if (!safety.passed) {
+          failureReasons.push(...safety.issues);
+        }
+      }
+
+      const passed = failureReasons.length === 0;
+      const score = passed
+        ? 100
+        : Math.max(0, Math.round(100 - failureReasons.length * 30));
+
+      results.push({
+        caseId: testCase.id,
+        title: testCase.title,
+        passed,
+        score,
+        latencyMs,
+        engineUsed,
+        responsePreview: replyText.slice(0, 220),
+        failureReasons,
+      });
     }
-
-    const passed = failureReasons.length === 0;
-    const score = passed
-      ? 100
-      : Math.max(0, Math.round(100 - failureReasons.length * 30));
-
-    results.push({
-      caseId: testCase.id,
-      title: testCase.title,
-      passed,
-      score,
-      latencyMs,
-      engineUsed,
-      responsePreview: replyText.slice(0, 220),
-      failureReasons,
-    });
+  } finally {
+    setStudentIsolationLock(wasLocked);
   }
 
   const passedCases = results.filter((r) => r.passed).length;

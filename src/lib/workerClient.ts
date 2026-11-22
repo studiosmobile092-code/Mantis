@@ -4,6 +4,9 @@ import type {
   DiffLine,
   KnowledgeEntry,
   KnowledgeFolder,
+  NeuralCheckpoint,
+  NeuralPredictResult,
+  NeuralTrainingExample,
   RepoFile,
   ResourceProfile,
   RetrievalMatch,
@@ -18,6 +21,12 @@ import {
 } from './computeWorker';
 import {computeLineDiff} from './diff';
 import {probeWebGpuHardware, webGpuBatchCosine} from './gpuCompute';
+import {
+  allocateNextCheckpointId,
+  inferNeuralCore,
+  persistNewNeuralCheckpoint,
+  trainNeuralBatchCore,
+} from './neuralStudent';
 import {
   EMBEDDING_DIMS,
   encodeDenseVector384,
@@ -344,3 +353,113 @@ export async function profileWorkspaceResourcesAsync(params: {
   }
   return profileResourcesCore(payload);
 }
+
+export async function trainNeuralStudentAsync(params: {
+  checkpoint: NeuralCheckpoint;
+  examples: NeuralTrainingExample[];
+  epochs?: number;
+  learningRate?: number;
+  label?: string;
+  persist?: boolean;
+}): Promise<{
+  checkpoint: NeuralCheckpoint;
+  checkpoints: NeuralCheckpoint[];
+  firstLoss: number;
+  lastLoss: number;
+  gradNorm: number;
+  stepsAdded: number;
+}> {
+  const start = performance.now();
+  const nextCheckpointId = allocateNextCheckpointId();
+  let trained: {
+    checkpoint: NeuralCheckpoint;
+    firstLoss: number;
+    lastLoss: number;
+    gradNorm: number;
+    stepsAdded: number;
+  };
+
+  try {
+    const res = await dispatchWorker(
+      {
+        id: `nt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'NEURAL_TRAIN_BATCH',
+        payload: {
+          checkpoint: params.checkpoint,
+          examples: params.examples,
+          epochs: params.epochs,
+          learningRate: params.learningRate,
+          label: params.label,
+          nextCheckpointId,
+        },
+      },
+      22000,
+    );
+    if (res.ok && res.type === 'NEURAL_TRAIN_BATCH') {
+      trained = {
+        checkpoint: res.checkpoint,
+        firstLoss: res.firstLoss,
+        lastLoss: res.lastLoss,
+        gradNorm: res.gradNorm,
+        stepsAdded: res.stepsAdded,
+      };
+    } else {
+      throw new Error('Fallback');
+    }
+  } catch {
+    trained = trainNeuralBatchCore({
+      checkpoint: params.checkpoint,
+      examples: params.examples,
+      epochs: params.epochs,
+      learningRate: params.learningRate,
+      label: params.label,
+      nextCheckpointId,
+    });
+  }
+
+  let checkpoints: NeuralCheckpoint[] = [trained.checkpoint];
+  let activeCheckpoint = trained.checkpoint;
+  if (params.persist !== false && trained.stepsAdded > 0) {
+    const persisted = await persistNewNeuralCheckpoint(trained.checkpoint);
+    activeCheckpoint = persisted.activeCheckpoint;
+    checkpoints = persisted.checkpoints;
+  }
+
+  notifyStatus({lastComputeMs: Math.round((performance.now() - start) * 10) / 10});
+
+  return {
+    checkpoint: activeCheckpoint,
+    checkpoints,
+    firstLoss: trained.firstLoss,
+    lastLoss: trained.lastLoss,
+    gradNorm: trained.gradNorm,
+    stepsAdded: trained.stepsAdded,
+  };
+}
+
+export async function inferNeuralStudentAsync(
+  prompt: string,
+  checkpoint: NeuralCheckpoint,
+): Promise<NeuralPredictResult> {
+  const start = performance.now();
+  try {
+    const res = await dispatchWorker(
+      {
+        id: `ni-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type: 'NEURAL_INFER',
+        payload: {prompt, checkpoint},
+      },
+      6000,
+    );
+    if (res.ok && res.type === 'NEURAL_INFER') {
+      notifyStatus({lastComputeMs: Math.round((performance.now() - start) * 10) / 10});
+      return res.prediction;
+    }
+  } catch {
+    // fallback to synchronous core
+  }
+  const pred = inferNeuralCore(prompt, checkpoint);
+  notifyStatus({lastComputeMs: Math.round((performance.now() - start) * 10) / 10});
+  return pred;
+}
+

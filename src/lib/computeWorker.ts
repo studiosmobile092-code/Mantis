@@ -3,6 +3,9 @@ import type {
   DiffLine,
   KnowledgeEntry,
   KnowledgeFolder,
+  NeuralCheckpoint,
+  NeuralPredictResult,
+  NeuralTrainingExample,
   RepoFile,
   ResourceProfile,
   ResourceWasteItem,
@@ -11,6 +14,7 @@ import type {
 import {computeLineDiff} from './diff';
 import {getEntryStatus} from './knowledgeSync';
 import {tokenizeQuery} from './memory';
+import {inferNeuralCore, trainNeuralBatchCore} from './neuralStudent';
 import {
   EMBEDDING_DIMS,
   computeContentHash,
@@ -57,18 +61,38 @@ export type WorkerRequest =
         proposed: string;
       };
     }
-  | {
-      id: string;
-      type: 'PROFILE_RESOURCES';
-      payload: {
-        entries: KnowledgeEntry[];
-        repoFiles: RepoFile[];
-        messagesBytes: number;
-        vectorCount: number;
-        jsHeapUsedBytes: number | null;
-        jsHeapLimitBytes: number | null;
+    | {
+        id: string;
+        type: 'PROFILE_RESOURCES';
+        payload: {
+          entries: KnowledgeEntry[];
+          repoFiles: RepoFile[];
+          messagesBytes: number;
+          vectorCount: number;
+          jsHeapUsedBytes: number | null;
+          jsHeapLimitBytes: number | null;
+        };
+      }
+    | {
+        id: string;
+        type: 'NEURAL_TRAIN_BATCH';
+        payload: {
+          checkpoint: NeuralCheckpoint;
+          examples: NeuralTrainingExample[];
+          epochs?: number;
+          learningRate?: number;
+          label?: string;
+          nextCheckpointId?: string;
+        };
+      }
+    | {
+        id: string;
+        type: 'NEURAL_INFER';
+        payload: {
+          prompt: string;
+          checkpoint: NeuralCheckpoint;
+        };
       };
-    };
 
 export type WorkerResponse =
   | {
@@ -98,6 +122,22 @@ export type WorkerResponse =
       ok: true;
       type: 'PROFILE_RESOURCES';
       profile: ResourceProfile;
+    }
+  | {
+      id: string;
+      ok: true;
+      type: 'NEURAL_TRAIN_BATCH';
+      checkpoint: NeuralCheckpoint;
+      firstLoss: number;
+      lastLoss: number;
+      gradNorm: number;
+      stepsAdded: number;
+    }
+  | {
+      id: string;
+      ok: true;
+      type: 'NEURAL_INFER';
+      prediction: NeuralPredictResult;
     }
   | {
       id: string;
@@ -643,6 +683,22 @@ if (typeof self !== 'undefined' && typeof (self as unknown as {document?: unknow
           ok: true,
           type: 'PROFILE_RESOURCES',
           profile,
+        });
+      } else if (req.type === 'NEURAL_TRAIN_BATCH') {
+        const trained = trainNeuralBatchCore(req.payload);
+        (self as unknown as {postMessage: (msg: WorkerResponse) => void}).postMessage({
+          id: req.id,
+          ok: true,
+          type: 'NEURAL_TRAIN_BATCH',
+          ...trained,
+        });
+      } else if (req.type === 'NEURAL_INFER') {
+        const prediction = inferNeuralCore(req.payload.prompt, req.payload.checkpoint);
+        (self as unknown as {postMessage: (msg: WorkerResponse) => void}).postMessage({
+          id: req.id,
+          ok: true,
+          type: 'NEURAL_INFER',
+          prediction,
         });
       }
     } catch (err) {
