@@ -1,0 +1,420 @@
+import {
+  FileCode2,
+  Folder,
+  Moon,
+  RefreshCw,
+  Settings,
+  Sun,
+  X,
+} from 'lucide-react';
+import {useEffect, useMemo} from 'react';
+import type {
+  BrainRouteStatus,
+  ComputeEngineStatus,
+  GitHubConnection,
+  KnowledgeEntry,
+  KnowledgeFolder,
+  KnowledgeGrowthStats,
+  LearningEvent,
+  RepoFile,
+  ThemeMode,
+} from '../types/mantis';
+
+interface InspectorDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+  routeStatus: BrainRouteStatus;
+  computeStatus: ComputeEngineStatus;
+  modelName: string;
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+  growth: KnowledgeGrowthStats;
+  skillsCount: number;
+  connection: GitHubConnection | null;
+  repoFiles: RepoFile[];
+  learningEvents: LearningEvent[];
+  pendingOfflineCount: number;
+  isOnline: boolean;
+  isSyncing: boolean;
+  theme: ThemeMode;
+  onCycleTheme: () => void;
+  onSync: () => void;
+  onOpenSettings: () => void;
+  onOpenTeach: () => void;
+  onSelectFolder: (folderId: string) => void;
+  onQueryConcept: (conceptLabel: string) => void;
+  onInspectRepoFile: (filePath: string) => void;
+}
+
+function formatRouteLabel(routeStatus: BrainRouteStatus): string {
+  switch (routeStatus.activeKind) {
+    case 'primary-worker':
+      return 'Worker Proxy';
+    case 'backup-supabase':
+      return 'Edge Backup';
+    case 'ollama-direct':
+      return 'Ollama Local';
+    default:
+      return 'Local Only';
+  }
+}
+
+function formatEventKind(kind: LearningEvent['kind']): string {
+  switch (kind) {
+    case 'auto_mined':
+      return 'Mined';
+    case 'url_ingested':
+      return 'Link';
+    case 'voice_captured':
+      return 'Voice';
+    case 'ocr_distilled':
+      return 'OCR';
+    case 'reinforced':
+      return 'Boost';
+    case 'cloud_assisted':
+      return 'Teacher';
+    case 'teacher_distilled':
+      return 'Distill';
+    case 'dpo_logged':
+      return 'Preference';
+    case 'eval_passed':
+      return 'Eval';
+    case 'self_optimized':
+      return 'Optimize';
+    case 'repo_indexed':
+      return 'Repo';
+    default:
+      return 'Taught';
+  }
+}
+
+export function InspectorDrawer({
+  isOpen,
+  onClose,
+  routeStatus,
+  computeStatus,
+  modelName,
+  entries,
+  folders,
+  growth,
+  skillsCount,
+  connection,
+  repoFiles,
+  learningEvents,
+  pendingOfflineCount,
+  isOnline,
+  isSyncing,
+  theme,
+  onCycleTheme,
+  onSync,
+  onOpenSettings,
+  onOpenTeach,
+  onSelectFolder,
+  onQueryConcept,
+  onInspectRepoFile,
+}: InspectorDrawerProps) {
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isOpen, onClose]);
+
+  const folderCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const entry of entries) {
+      if (entry.folder_id) {
+        map.set(entry.folder_id, (map.get(entry.folder_id) || 0) + 1);
+      }
+    }
+    return map;
+  }, [entries]);
+
+  const trustCounts = useMemo(() => {
+    let trusted = 0;
+    let reviewed = 0;
+    let raw = 0;
+    for (const e of entries) {
+      const s = e.status || 'reviewed';
+      if (s === 'trusted') trusted += 1;
+      else if (s === 'raw') raw += 1;
+      else reviewed += 1;
+    }
+    return {trusted, reviewed, raw};
+  }, [entries]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Workspace Inspector"
+      className="mantis-fade-in fixed inset-0 z-50 flex justify-end bg-slate-950/60 backdrop-blur-xs"
+      onClick={onClose}
+    >
+      <aside
+        className="mantis-drawer-in flex h-full w-full max-w-[390px] flex-col border-l border-line bg-surface shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Drawer Header */}
+        <div className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
+          <div className="min-w-0">
+            <span className="text-xs font-semibold text-ink">Workspace Inspector</span>
+            <span aria-hidden="true" className="mx-1.5 text-ink-subtle">
+              ·
+            </span>
+            <span className="font-mono text-xs text-ink-muted">{modelName}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close inspector drawer"
+            className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-ink-muted hover:bg-elevated hover:text-ink"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Quick Action Strip */}
+        <div className="grid shrink-0 grid-cols-3 gap-2 border-b border-line bg-inset px-4 py-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              onClose();
+              onOpenSettings();
+            }}
+            className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink transition-colors hover:border-line-strong"
+          >
+            <Settings className="h-3.5 w-3.5 text-ink-muted" />
+            <span>Settings</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onSync}
+            disabled={isSyncing}
+            className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink transition-colors hover:border-line-strong disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 text-ink-muted ${isSyncing ? 'animate-spin' : ''}`} />
+            <span>{isSyncing ? 'Syncing' : 'Sync'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onCycleTheme}
+            className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink transition-colors hover:border-line-strong"
+          >
+            {theme === 'light' ? (
+              <Sun className="h-3.5 w-3.5 text-ink-muted" />
+            ) : (
+              <Moon className="h-3.5 w-3.5 text-ink-muted" />
+            )}
+            <span className="capitalize">{theme}</span>
+          </button>
+        </div>
+
+        {/* Single Scrollable Inspector Body */}
+        <div className="min-h-0 flex-1 divide-y divide-line overflow-y-auto px-4">
+          {/* Runtime Telemetry (Factual Only, Tabular) */}
+          <section className="space-y-2.5 py-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-semibold text-ink">Runtime &amp; Storage</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenTeach();
+                }}
+                className="text-xs font-medium text-accent-text hover:underline"
+              >
+                + Teach Rule
+              </button>
+            </div>
+
+            <dl className="space-y-1.5 font-mono text-xs tabular-nums">
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Teacher Route</dt>
+                <dd className="text-ink">
+                  {formatRouteLabel(routeStatus)}
+                  {routeStatus.latencyMs !== null ? ` · ${routeStatus.latencyMs} ms` : ''}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Compute Backend</dt>
+                <dd className="text-ink">{computeStatus.adapterLabel}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Int8 Index</dt>
+                <dd className="text-ink">
+                  {computeStatus.indexedVectorsCount} vecs ·{' '}
+                  {Math.round(computeStatus.vectorBytesUsed / 1024)} KB
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Memory Breakdown</dt>
+                <dd className="text-ink">
+                  {trustCounts.trusted} trusted / {trustCounts.reviewed} reviewed /{' '}
+                  {trustCounts.raw} raw
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-ink-muted">Trained Skills</dt>
+                <dd className="text-ink">
+                  {skillsCount} skills · {growth.uniqueConcepts} concepts
+                </dd>
+              </div>
+            </dl>
+
+            {(!isOnline || pendingOfflineCount > 0) && (
+              <div className="flex items-center justify-between gap-2 rounded-md border border-warn-border bg-warn-soft px-3 py-2 text-xs">
+                <span className="text-warn">
+                  {!isOnline
+                    ? 'Offline — changes queued locally'
+                    : `${pendingOfflineCount} offline writes queued`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenSettings();
+                  }}
+                  className="font-semibold text-ink underline underline-offset-2"
+                >
+                  Inspect
+                </button>
+              </div>
+            )}
+          </section>
+
+          {/* Knowledge Folders */}
+          <section className="space-y-2 py-4">
+            <div className="flex items-center justify-between text-xs">
+              <h2 className="font-semibold text-ink">Knowledge Folders</h2>
+              <span className="font-mono text-ink-subtle tabular-nums">{entries.length}</span>
+            </div>
+            <div className="space-y-0.5">
+              {folders.map((folder) => (
+                <button
+                  key={folder.id}
+                  type="button"
+                  onClick={() => {
+                    onSelectFolder(folder.id);
+                    onClose();
+                  }}
+                  className="flex min-h-[40px] w-full items-center justify-between gap-2 rounded-md px-2 text-left text-xs text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Folder className="h-3.5 w-3.5 shrink-0 text-accent-text" />
+                    <span className="truncate">{folder.name}</span>
+                  </span>
+                  <span className="font-mono text-[11px] tabular-nums text-ink-subtle">
+                    {folderCounts.get(folder.id) || 0}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* Indexed Concepts */}
+          {growth.topConcepts.length > 0 && (
+            <section className="space-y-2 py-4">
+              <div className="flex items-center justify-between text-xs">
+                <h2 className="font-semibold text-ink">Active Concepts</h2>
+                <span className="font-mono text-ink-subtle tabular-nums">
+                  {growth.uniqueConcepts}
+                </span>
+              </div>
+              <div className="divide-y divide-line">
+                {growth.topConcepts.slice(0, 6).map((concept) => (
+                  <button
+                    key={concept.label}
+                    type="button"
+                    onClick={() => {
+                      onQueryConcept(concept.label);
+                      onClose();
+                    }}
+                    className="flex min-h-[40px] w-full items-center justify-between gap-2 px-1 text-left font-mono text-xs text-ink-muted transition-colors hover:text-accent-text"
+                  >
+                    <span className="truncate">#{concept.label}</span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-ink-subtle">
+                      {concept.count} notes
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Repository Quick Access */}
+          {connection && repoFiles.length > 0 && (
+            <section className="space-y-2 py-4">
+              <div className="flex items-center justify-between text-xs">
+                <h2 className="font-semibold text-ink">
+                  {connection.owner}/{connection.repo}
+                </h2>
+                <span className="font-mono text-ink-subtle tabular-nums">{repoFiles.length}</span>
+              </div>
+              <div className="space-y-0.5">
+                {repoFiles.slice(0, 10).map((file) => (
+                  <button
+                    key={file.id}
+                    type="button"
+                    onClick={() => {
+                      onInspectRepoFile(file.path);
+                      onClose();
+                    }}
+                    className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2 text-left font-mono text-[11px] text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+                  >
+                    <FileCode2 className="h-3.5 w-3.5 shrink-0 text-ink-subtle" />
+                    <span className="truncate">{file.path}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Recent Training & Ingestion Activity (Unboxed Typographic Timeline) */}
+          <section className="space-y-2 py-4">
+            <div className="flex items-center justify-between text-xs">
+              <h2 className="font-semibold text-ink">Recent Session Events</h2>
+              <span className="font-mono text-ink-subtle tabular-nums">
+                {learningEvents.length}
+              </span>
+            </div>
+            {learningEvents.length === 0 ? (
+              <p className="text-xs text-ink-subtle">
+                Training runs, extractions, and preference logs appear here during your session.
+              </p>
+            ) : (
+              <div className="divide-y divide-line">
+                {learningEvents.slice(0, 10).map((ev) => (
+                  <div key={ev.id} className="py-2 text-xs">
+                    <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-ink-subtle">
+                      <span className="text-accent-text">{formatEventKind(ev.kind)}</span>
+                      <span className="tabular-nums">
+                        {new Date(ev.createdAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 truncate font-medium text-ink">{ev.title}</div>
+                    {ev.detail && (
+                      <div className="mt-0.5 truncate text-[11px] text-ink-muted">{ev.detail}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      </aside>
+    </div>
+  );
+}

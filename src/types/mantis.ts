@@ -7,6 +7,11 @@ export type AreaId =
   | 'export'
   | 'settings';
 
+export type WorkspaceMode = 'train' | 'memory' | 'evals';
+export type MemorySubView = 'knowledge' | 'capture' | 'repo';
+export type EvalSubView = 'training' | 'export';
+export type WorkspaceDrawer = 'none' | 'inspector' | 'settings';
+
 export type StudioTabId = 'stream' | 'graph' | 'arena' | 'evals';
 
 export type ComputeBackendKind = 'webgpu-vulkan' | 'webgpu' | 'worker-wasm' | 'main-thread';

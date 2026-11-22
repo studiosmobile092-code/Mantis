@@ -10,8 +10,8 @@ import {
   FolderPlus,
   GitPullRequest,
   GraduationCap,
+  MoreHorizontal,
   PlusCircle,
-  Radio,
   Scale,
   Send,
   Sparkles,
@@ -33,6 +33,7 @@ import type {
 } from '../types/mantis';
 import {AssassinBriefCard} from './AssassinBriefCard';
 import {ConceptGraphCanvas} from './ConceptGraphCanvas';
+import {OnboardingGuide} from './OnboardingGuide';
 
 export type StudioComposerMode = 'scratch' | 'cloud' | 'distill' | 'assassin';
 
@@ -40,7 +41,7 @@ const SLASH_COMMANDS: Array<{cmd: string; template: string; desc: string}> = [
   {cmd: '/search', template: '/search ', desc: 'Search Hybrid BM25 + Int8 Knowledge memory'},
   {cmd: '/repo', template: '/repo ', desc: 'Search synced GitHub repository files'},
   {cmd: '/teach', template: '/teach Title :: ', desc: 'Save a Trusted rule with auto-folder classification'},
-  {cmd: '/execute', template: '/execute ', desc: 'Smart-Assassin parallel prep + safety gate'},
+  {cmd: '/execute', template: '/execute ', desc: 'Parallel patch prep + static safety gate'},
   {cmd: '/suggest', template: '/suggest ', desc: 'Propose an approval-gated diff for a file'},
   {cmd: '/self-audit', template: '/self-audit', desc: 'Scan Mantis codebase for safety & health'},
 ];
@@ -94,6 +95,9 @@ interface ChatWorkspaceProps {
   onOpenTeach: () => void;
   onOpenSuggestions: () => void;
   onOpenSettings: () => void;
+  showOnboarding?: boolean;
+  onOpenKnowledge?: () => void;
+  onDismissOnboarding?: () => void;
 }
 
 function deriveChatTitle(text: string): string {
@@ -174,16 +178,16 @@ function RichMessageContent({content}: {content: string}) {
         block.type === 'code' ? (
           <div
             key={idx}
-            className="overflow-hidden rounded-md border border-line-strong bg-inset"
+            className="overflow-hidden rounded-md border border-line bg-inset"
           >
-            <div className="flex items-center justify-between border-b border-line bg-surface px-3 py-1.5">
+            <div className="flex items-center justify-between border-b border-line bg-surface px-3 py-1">
               <span className="font-mono text-[11px] font-medium text-ink-muted">
                 {block.lang || 'code'}
               </span>
               <button
                 type="button"
                 onClick={() => void handleCopyCode(block.text, idx)}
-                className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 py-0.5 text-xs font-medium text-ink-muted hover:bg-elevated hover:text-ink"
+                className="inline-flex min-h-[36px] items-center gap-1 rounded px-2 text-xs font-medium text-ink-muted hover:bg-elevated hover:text-ink"
               >
                 {copiedIndex === idx ? (
                   <Check className="h-3 w-3 text-accent-text" />
@@ -246,6 +250,9 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   onOpenTeach,
   onOpenSuggestions,
   onOpenSettings,
+  showOnboarding = false,
+  onOpenKnowledge,
+  onDismissOnboarding,
 }: ChatWorkspaceProps) {
   const [input, setInput] = useState('');
   const [composerMode, setComposerMode] = useState<StudioComposerMode>(
@@ -258,6 +265,10 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [savedMsgFolders, setSavedMsgFolders] = useState<Record<string, string>>({});
   const [savingMsgId, setSavingMsgId] = useState<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+
+  // Per-turn overflow menu + copy confirmation
+  const [openMenuMsgId, setOpenMenuMsgId] = useState<string | null>(null);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
 
   // Low-confidence inline feedback/fix state
   const [fixingMsgId, setFixingMsgId] = useState<string | null>(null);
@@ -293,8 +304,36 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     }
   }, [composerPrefill, onConsumeComposerPrefill]);
 
+  // Dismiss overflow menu on outside pointer click or Escape
+  useEffect(() => {
+    if (!openMenuMsgId) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('[data-turn-menu]')) return;
+      setOpenMenuMsgId(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenMenuMsgId(null);
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('touchstart', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('touchstart', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [openMenuMsgId]);
+
   const entryMap = useMemo(
     () => new Map<string, KnowledgeEntry>(entries.map((e) => [e.id, e])),
+    [entries],
+  );
+
+  const trustedCount = useMemo(
+    () => entries.filter((e) => e.status === 'trusted').length,
     [entries],
   );
 
@@ -313,7 +352,10 @@ export const ChatWorkspace = memo(function ChatWorkspace({
 
   const matchingSlashCommands = useMemo(() => {
     const trimmedStart = input.trimStart();
-    if (!forceSlashMenu && (!trimmedStart.startsWith('/') || trimmedStart.includes(' ') || trimmedStart.includes('\n'))) {
+    if (
+      !forceSlashMenu &&
+      (!trimmedStart.startsWith('/') || trimmedStart.includes(' ') || trimmedStart.includes('\n'))
+    ) {
       return [];
     }
     const prefix = trimmedStart.toLowerCase();
@@ -332,12 +374,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   }, [messages, visibleCount]);
 
   const quickPrompts = useMemo(() => {
-    const base = [
-      'hi',
-      '1+1',
-      'What do you know so far?',
-      '/search supabase',
-    ];
+    const base = ['hi', '1+1', 'What do you know so far?', '/search supabase'];
     if (connection) {
       base.push('/execute Improve error handling and RAM safety in App.tsx');
     }
@@ -419,51 +456,53 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     }
   }
 
+  async function handleCopyMessage(msg: ChatMessage) {
+    try {
+      await navigator.clipboard.writeText(msg.content);
+      setCopiedMsgId(msg.id);
+      window.setTimeout(() => setCopiedMsgId(null), 1600);
+    } catch {
+      // ignore clipboard errors
+    }
+  }
+
   return (
-    <div className="flex flex-col gap-3">
-      {/* VS Code Tabbed Workbench Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* Slim Sub-Bar (Pinned Top of Workbench) */}
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-line bg-inset px-3 sm:px-5">
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => onChangeTab('stream')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
               activeTab === 'stream'
-                ? 'bg-elevated text-ink border border-line-strong'
+                ? 'bg-elevated text-ink'
                 : 'text-ink-muted hover:text-ink'
             }`}
           >
             <Terminal className="h-3.5 w-3.5 text-accent-text" />
-            <span>Studio Stream</span>
+            <span>Stream</span>
           </button>
 
           <button
             type="button"
             onClick={() => onChangeTab('graph')}
-            className={`inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium transition-colors ${
               activeTab === 'graph'
-                ? 'bg-elevated text-ink border border-line-strong'
+                ? 'bg-elevated text-ink'
                 : 'text-ink-muted hover:text-ink'
             }`}
           >
             <Compass className="h-3.5 w-3.5 text-accent-text" />
-            <span>Concept Graph</span>
+            <span>Graph</span>
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={onOpenIngest}
-            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
-          >
-            <Radio className="h-3.5 w-3.5 text-accent-text" />
-            <span>Capture</span>
-          </button>
+        <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={onOpenTeach}
-            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
           >
             <PlusCircle className="h-3.5 w-3.5 text-accent-text" />
             <span>Teach</span>
@@ -471,11 +510,12 @@ export const ChatWorkspace = memo(function ChatWorkspace({
           <button
             type="button"
             onClick={onOpenSuggestions}
-            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-xs font-medium text-ink-muted hover:border-line-strong hover:text-ink"
+            className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-xs font-medium text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
           >
-            <GitPullRequest className="h-3.5 w-3.5 text-warn" />
-            <span>Diffs</span>
+            <GitPullRequest className="h-3.5 w-3.5 text-ink-muted" />
+            <span className="hidden sm:inline">Diffs</span>
           </button>
+
           {messages.length > 0 && activeTab === 'stream' && (
             confirmClear ? (
               <div className="flex items-center gap-1">
@@ -483,14 +523,14 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                   type="button"
                   disabled={isClearing}
                   onClick={handleConfirmClear}
-                  className="min-h-[40px] rounded bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                  className="min-h-[36px] rounded bg-red-600 px-2.5 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
                 >
                   {isClearing ? 'Clearing…' : 'Confirm'}
                 </button>
                 <button
                   type="button"
                   onClick={() => setConfirmClear(false)}
-                  className="min-h-[40px] rounded border border-line px-2.5 text-xs text-ink-muted hover:text-ink"
+                  className="min-h-[36px] rounded border border-line px-2 text-xs text-ink-muted hover:text-ink"
                 >
                   Cancel
                 </button>
@@ -500,7 +540,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                 type="button"
                 onClick={() => setConfirmClear(true)}
                 aria-label="Clear stream"
-                className="inline-flex min-h-[40px] shrink-0 items-center gap-1 rounded-md border border-line bg-surface px-3 text-xs text-ink-muted hover:border-line-strong hover:text-ink"
+                className="inline-flex min-h-[36px] shrink-0 items-center gap-1 rounded-md px-2.5 text-xs text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Clear</span>
@@ -511,37 +551,40 @@ export const ChatWorkspace = memo(function ChatWorkspace({
       </div>
 
       {activeTab === 'graph' ? (
-        <ConceptGraphCanvas
-          entries={entries}
-          folders={folders}
-          repoFiles={repoFiles}
-          growth={growth}
-          onQueryConcept={(label) => {
-            onChangeTab('stream');
-            setInput(`/search ${label}`);
-          }}
-          onInspectEntry={onInspectEntry}
-          onInspectRepoFile={onInspectRepoFile}
-        />
+        <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
+          <div className="mx-auto max-w-6xl">
+            <ConceptGraphCanvas
+              entries={entries}
+              folders={folders}
+              repoFiles={repoFiles}
+              growth={growth}
+              onQueryConcept={(label) => {
+                onChangeTab('stream');
+                setInput(`/search ${label}`);
+              }}
+              onInspectEntry={onInspectEntry}
+              onInspectRepoFile={onInspectRepoFile}
+            />
+          </div>
+        </div>
       ) : (
         <>
-          {/* Smart-Assassin Execution Brief (Inline Approval Gate) */}
-          {activeAssassinBrief && (
-            <AssassinBriefCard
-              brief={activeAssassinBrief}
-              onApprove={onApproveAssassinBrief}
-              onReject={onRejectAssassinBrief}
-            />
-          )}
-
-          {/* Grok Clean Editorial Canvas Stream (Zero Speech Bubbles) */}
-          <div className="relative rounded-lg border border-line bg-surface/40">
+          {/* Single Scrollable Stream Area */}
+          <div className="relative min-h-0 flex-1 overflow-hidden">
             <div
               ref={streamRef}
               onScroll={handleStreamScroll}
-              className="max-h-[60vh] min-h-[380px] overflow-y-auto px-4 py-4 sm:px-6"
+              className="h-full overflow-y-auto px-3 py-4 sm:px-6"
             >
-              <div className="mx-auto max-w-[78ch]">
+              <div className="mx-auto max-w-[76ch] space-y-4">
+                {activeAssassinBrief && (
+                  <AssassinBriefCard
+                    brief={activeAssassinBrief}
+                    onApprove={onApproveAssassinBrief}
+                    onReject={onRejectAssassinBrief}
+                  />
+                )}
+
                 {isLoading ? (
                   <div className="space-y-4">
                     {[1, 2, 3].map((n) => (
@@ -553,37 +596,50 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                     ))}
                   </div>
                 ) : messages.length === 0 ? (
-                  <div className="flex min-h-[320px] flex-col items-center justify-center space-y-5 text-center">
-                    <div className="space-y-1.5">
+                  <div className="flex flex-col items-center justify-center space-y-5 py-8 text-center">
+                    <div className="space-y-2">
                       <h1 className="text-lg font-semibold tracking-tight text-ink">
-                        Mantis Precision AI Studio
+                        Mantis Training Workbench
                       </h1>
-                      <p className="mx-auto max-w-md text-xs leading-relaxed text-ink-muted">
-                        Scratch AI answers instantly via Hybrid RAG &amp; Safe Math. When Scratch lacks coverage, the Teacher Brain distills permanent skills offline. Use{' '}
-                        <code className="font-mono text-ink">/execute</code> for Smart-Assassin parallel code prep.
+                      <p className="mx-auto max-w-lg text-xs leading-relaxed text-ink-muted">
+                        Your local student starts with zero built-in world knowledge and learns strictly from what you teach, distill from your Teacher model, and verify. Use{' '}
+                        <code className="font-mono text-ink">/execute</code> for parallel patch staging.
                       </p>
                     </div>
+
                     <div className="flex flex-wrap justify-center gap-2">
                       {quickPrompts.map((prompt) => (
                         <button
                           key={prompt}
                           type="button"
                           onClick={() => void handleQuickPrompt(prompt)}
-                          className="min-h-[40px] rounded-md border border-line-strong bg-inset px-3 py-1.5 font-mono text-xs text-ink transition-colors hover:border-accent-border hover:bg-elevated"
+                          className="min-h-[40px] rounded-md border border-line bg-surface px-3 py-1.5 font-mono text-xs text-ink transition-colors hover:border-line-strong hover:bg-elevated"
                         >
                           {prompt}
                         </button>
                       ))}
                     </div>
+
+                    {showOnboarding && onOpenKnowledge && onDismissOnboarding && (
+                      <OnboardingGuide
+                        knowledgeCount={entries.length}
+                        trustedCount={trustedCount}
+                        hasInteractedChat={messages.length > 0}
+                        onTeachFirstRule={onOpenTeach}
+                        onOpenKnowledge={onOpenKnowledge}
+                        onOpenCapture={onOpenIngest}
+                        onDismiss={onDismissOnboarding}
+                      />
+                    )}
                   </div>
                 ) : (
-                  <div>
+                  <div className="divide-y divide-line">
                     {messages.length > visibleCount && (
-                      <div className="mb-4 flex justify-center border-b border-line pb-3">
+                      <div className="flex justify-center pb-4">
                         <button
                           type="button"
                           onClick={() => setVisibleCount((c) => c + 60)}
-                          className="min-h-[40px] rounded-md border border-line bg-inset px-3.5 text-xs font-medium text-ink-muted hover:text-ink"
+                          className="min-h-[40px] rounded-md border border-line bg-surface px-3.5 text-xs font-medium text-ink-muted hover:text-ink"
                         >
                           Load earlier turns ({messages.length - visibleCount} older)
                         </button>
@@ -597,7 +653,6 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                         .filter((e): e is KnowledgeEntry => Boolean(e));
                       const citedRepoPaths = msg.cited_repo_paths || [];
 
-                      // Resolve nearest preceding user prompt across full message stream (works across pagination windows & stacked replies)
                       let prevUserMsg: ChatMessage | null = null;
                       if (!isUser) {
                         const fullIdx = messageIndexById.get(msg.id) ?? -1;
@@ -614,17 +669,28 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                       const isDistilling = distillingMsgId === msg.id;
                       const storedFolder = savedMsgFolders[msg.id];
                       const isStoringThis = savingMsgId === msg.id;
+                      const isMenuOpen = openMenuMsgId === msg.id;
+
+                      const canCloudAssist =
+                        !isUser && Boolean(prevUserMsg) && !msg.content.startsWith('[Cloud Assist');
+                      const primaryAssistantAction = isLowConf
+                        ? 'distill'
+                        : canCloudAssist
+                          ? 'cloud'
+                          : prevUserMsg
+                            ? 'distill'
+                            : null;
 
                       return (
                         <article
                           key={msg.id}
-                          className={`mantis-virtual-item border-b border-line py-4 last:border-b-0 ${
-                            isUser ? 'bg-inset/35 -mx-3 px-3 rounded-md' : ''
+                          className={`mantis-virtual-item py-4 first:pt-1 ${
+                            isUser ? 'rounded-md bg-surface/60 px-3.5' : ''
                           }`}
                         >
-                          {/* Subtle Author + Timestamp Row */}
-                          <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-ink-muted">
+                          {/* Unboxed Metadata + Clean Single Action + Overflow Menu */}
+                          <header className="mb-2 flex items-center justify-between gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-[11px] text-ink-muted">
                               <span
                                 className={
                                   isUser
@@ -644,197 +710,224 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                               {isLowConf && !fixedMsgIds[msg.id] && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="rounded border border-warn-border bg-warn-soft px-1.5 py-0.5 text-[10px] font-semibold text-warn">
-                                    Low Confidence · Teach Needed
+                                  <span className="text-warn">
+                                    Low confidence · teach needed
                                   </span>
                                 </>
                               )}
                               {fixedMsgIds[msg.id] && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="rounded border border-accent-border bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent-text">
-                                    Skill Taught ✓
-                                  </span>
+                                  <span className="text-accent-text">Skill taught</span>
+                                </>
+                              )}
+                              {storedFolder && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-accent-text">Saved to {storedFolder}</span>
                                 </>
                               )}
                             </div>
 
-                            {isUser && !msg.content.startsWith('/teach') && (
-                              <div className="flex items-center gap-1">
-                                {onQuickSaveMessage && (
-                                  <button
-                                    type="button"
-                                    disabled={isStoringThis || Boolean(storedFolder)}
-                                    onClick={() => void handleQuickStore(msg)}
-                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
-                                      storedFolder
-                                        ? 'text-accent-text'
-                                        : 'text-ink-subtle hover:text-ink'
-                                    }`}
-                                  >
-                                    {storedFolder ? (
-                                      <>
-                                        <Check className="h-3 w-3" />
-                                        <span>{storedFolder}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <FolderPlus className="h-3 w-3" />
-                                        <span>{isStoringThis ? 'Filing…' : 'Store'}</span>
-                                      </>
-                                    )}
-                                  </button>
-                                )}
+                            <div className="relative flex shrink-0 items-center gap-1" data-turn-menu>
+                              {!isUser && primaryAssistantAction === 'distill' && prevUserMsg && (
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
-                                  }
-                                  className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
+                                  disabled={isDistilling || isSending}
+                                  onClick={() => void onDistillMessageWithTeacher(msg.id)}
+                                  className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:opacity-50 ${
+                                    isLowConf
+                                      ? 'border-warn-border bg-warn-soft text-warn hover:bg-surface'
+                                      : 'border-line bg-surface text-ink-muted hover:border-line-strong hover:text-ink'
+                                  }`}
                                 >
-                                  <BookmarkPlus className="h-3 w-3" />
-                                  <span>Rule</span>
+                                  <GraduationCap className="h-3.5 w-3.5" />
+                                  <span>{isDistilling ? 'Teaching…' : 'Teach Student'}</span>
                                 </button>
-                              </div>
-                            )}
+                              )}
 
-                            {!isUser && (
-                              <div className="flex flex-wrap items-center gap-1">
-                                {prevUserMsg && !msg.content.startsWith('[Cloud Assist') && (
+                              {!isUser && primaryAssistantAction === 'cloud' && (
+                                <button
+                                  type="button"
+                                  disabled={isEscalating || isSending}
+                                  onClick={() => void onEscalateMessageToCloud(msg.id)}
+                                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50"
+                                >
+                                  <Sparkles className="h-3.5 w-3.5 text-accent-text" />
+                                  <span>{isEscalating ? 'Assisting…' : 'Cloud Assist'}</span>
+                                </button>
+                              )}
+
+                              <button
+                                type="button"
+                                aria-expanded={isMenuOpen}
+                                aria-label="Message actions"
+                                onClick={() =>
+                                  setOpenMenuMsgId((cur) => (cur === msg.id ? null : msg.id))
+                                }
+                                className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+                              >
+                                <MoreHorizontal className="h-4 w-4" />
+                              </button>
+
+                              {isMenuOpen && (
+                                <div
+                                  role="menu"
+                                  className="mantis-slide-up absolute top-11 right-0 z-30 w-52 overflow-hidden rounded-lg border border-line-strong bg-surface p-1 shadow-xl"
+                                >
+                                  {!isUser && prevUserMsg && primaryAssistantAction !== 'distill' && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      disabled={isDistilling || isSending}
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        void onDistillMessageWithTeacher(msg.id);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated disabled:opacity-50"
+                                    >
+                                      <GraduationCap className="h-3.5 w-3.5 text-accent-text" />
+                                      <span>Teach Student</span>
+                                    </button>
+                                  )}
+
+                                  {!isUser && canCloudAssist && primaryAssistantAction !== 'cloud' && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      disabled={isEscalating || isSending}
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        void onEscalateMessageToCloud(msg.id);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated disabled:opacity-50"
+                                    >
+                                      <Sparkles className="h-3.5 w-3.5 text-accent-text" />
+                                      <span>Cloud Assist</span>
+                                    </button>
+                                  )}
+
+                                  {!isUser && prevUserMsg && onTeachScratchFix && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        setFixingMsgId((cur) => (cur === msg.id ? null : msg.id));
+                                        setFixDraft('');
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated"
+                                    >
+                                      <Wrench className="h-3.5 w-3.5 text-ink-muted" />
+                                      <span>{fixingMsgId === msg.id ? 'Cancel Fix' : 'Fix Answer'}</span>
+                                    </button>
+                                  )}
+
+                                  {!isUser && prevUserMsg && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        onSendToArena(prevUserMsg.content);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated"
+                                    >
+                                      <Scale className="h-3.5 w-3.5 text-ink-muted" />
+                                      <span>Compare Replies</span>
+                                    </button>
+                                  )}
+
+                                  {!isUser && citedEntries.length > 0 && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      disabled={Boolean(reinforcedMsgIds[msg.id])}
+                                      onClick={async () => {
+                                        setOpenMenuMsgId(null);
+                                        setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
+                                        await onReinforceEntries(citedEntries.map((e) => e.id));
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated disabled:opacity-60"
+                                    >
+                                      <ThumbsUp className="h-3.5 w-3.5 text-accent-text" />
+                                      <span>
+                                        {reinforcedMsgIds[msg.id]
+                                          ? 'Citations Boosted'
+                                          : 'Boost Cited Memory'}
+                                      </span>
+                                    </button>
+                                  )}
+
+                                  {onQuickSaveMessage && !msg.content.startsWith('/teach') && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      disabled={isStoringThis || Boolean(storedFolder)}
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        void handleQuickStore(msg);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated disabled:opacity-60"
+                                    >
+                                      <FolderPlus className="h-3.5 w-3.5 text-ink-muted" />
+                                      <span>
+                                        {storedFolder
+                                          ? `Stored in ${storedFolder}`
+                                          : isStoringThis
+                                            ? 'Filing…'
+                                            : 'Save to Memory'}
+                                      </span>
+                                    </button>
+                                  )}
+
+                                  {!msg.content.startsWith('/teach') && (
+                                    <button
+                                      type="button"
+                                      role="menuitem"
+                                      onClick={() => {
+                                        setOpenMenuMsgId(null);
+                                        onSaveTextToTeach(deriveChatTitle(msg.content), msg.content);
+                                      }}
+                                      className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated"
+                                    >
+                                      <BookmarkPlus className="h-3.5 w-3.5 text-ink-muted" />
+                                      <span>Edit as Trusted Rule</span>
+                                    </button>
+                                  )}
+
                                   <button
                                     type="button"
-                                    disabled={isEscalating || isSending}
-                                    onClick={() => void onEscalateMessageToCloud(msg.id)}
-                                    className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-surface px-2.5 text-[11px] font-medium text-accent-text hover:border-accent-border disabled:opacity-50"
-                                  >
-                                    <Sparkles className="h-3 w-3" />
-                                    <span>{isEscalating ? 'Assisting…' : 'Cloud Assist'}</span>
-                                  </button>
-                                )}
-
-                                {prevUserMsg && (
-                                  <button
-                                    type="button"
-                                    disabled={isDistilling || isSending}
-                                    onClick={() => void onDistillMessageWithTeacher(msg.id)}
-                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded border px-2.5 text-[11px] font-medium disabled:opacity-50 ${
-                                      isLowConf
-                                        ? 'border-warn-border bg-warn-soft text-warn hover:bg-surface'
-                                        : 'border-line bg-surface text-ink-muted hover:border-line-strong hover:text-ink'
-                                    }`}
-                                  >
-                                    <GraduationCap className="h-3 w-3 text-accent-text" />
-                                    <span>{isDistilling ? 'Teaching…' : 'Teach Scratch'}</span>
-                                  </button>
-                                )}
-
-                                {prevUserMsg && onTeachScratchFix && (
-                                  <button
-                                    type="button"
+                                    role="menuitem"
                                     onClick={() => {
-                                      if (fixingMsgId === msg.id) {
-                                        setFixingMsgId(null);
-                                        setFixDraft('');
-                                      } else {
-                                        setFixingMsgId(msg.id);
-                                        setFixDraft('');
-                                      }
+                                      setOpenMenuMsgId(null);
+                                      void handleCopyMessage(msg);
                                     }}
-                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium ${
-                                      fixingMsgId === msg.id
-                                        ? 'border border-accent-border bg-accent-soft text-accent-text'
-                                        : 'text-ink-subtle hover:text-ink'
-                                    }`}
+                                    className="flex min-h-[40px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs text-ink hover:bg-elevated"
                                   >
-                                    <Wrench className="h-3 w-3" />
-                                    <span>{fixingMsgId === msg.id ? 'Cancel Fix' : 'Fix Answer'}</span>
+                                    <Copy className="h-3.5 w-3.5 text-ink-muted" />
+                                    <span>{copiedMsgId === msg.id ? 'Copied!' : 'Copy Text'}</span>
                                   </button>
-                                )}
-
-                                {prevUserMsg && (
-                                  <button
-                                    type="button"
-                                    onClick={() => onSendToArena(prevUserMsg.content)}
-                                    className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
-                                  >
-                                    <Scale className="h-3 w-3" />
-                                    <span>Arena</span>
-                                  </button>
-                                )}
-
-                                {citedEntries.length > 0 && (
-                                  <button
-                                    type="button"
-                                    disabled={Boolean(reinforcedMsgIds[msg.id])}
-                                    onClick={async () => {
-                                      setReinforcedMsgIds((prev) => ({...prev, [msg.id]: true}));
-                                      await onReinforceEntries(citedEntries.map((e) => e.id));
-                                    }}
-                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
-                                      reinforcedMsgIds[msg.id]
-                                        ? 'text-accent-text'
-                                        : 'text-ink-subtle hover:text-ink'
-                                    }`}
-                                  >
-                                    <ThumbsUp className="h-3 w-3" />
-                                    <span>{reinforcedMsgIds[msg.id] ? 'Boosted' : 'Helpful'}</span>
-                                  </button>
-                                )}
-
-                                {onQuickSaveMessage && (
-                                  <button
-                                    type="button"
-                                    disabled={isStoringThis || Boolean(storedFolder)}
-                                    onClick={() => void handleQuickStore(msg)}
-                                    className={`inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium transition-colors ${
-                                      storedFolder
-                                        ? 'text-accent-text'
-                                        : 'text-ink-subtle hover:text-ink'
-                                    }`}
-                                  >
-                                    {storedFolder ? (
-                                      <>
-                                        <Check className="h-3 w-3" />
-                                        <span>{storedFolder}</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <FolderPlus className="h-3 w-3" />
-                                        <span>{isStoringThis ? 'Filing…' : 'Store'}</span>
-                                      </>
-                                    )}
-                                  </button>
-                                )}
-
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    onSaveTextToTeach(deriveChatTitle(msg.content), msg.content)
-                                  }
-                                  className="inline-flex min-h-[40px] items-center gap-1 rounded px-2.5 text-[11px] font-medium text-ink-subtle hover:text-ink"
-                                >
-                                  <BookmarkPlus className="h-3 w-3" />
-                                  <span>Edit</span>
-                                </button>
-                              </div>
-                            )}
+                                </div>
+                              )}
+                            </div>
                           </header>
 
                           {/* Editorial Prose Body */}
                           <RichMessageContent content={msg.content} />
 
-                          {/* Inline Confidence Feedback / Direct Skill Correction Drawer */}
+                          {/* Inline Skill Correction Drawer */}
                           {!isUser && prevUserMsg && onTeachScratchFix && fixingMsgId === msg.id && (
-                            <div className="mt-3 space-y-2 rounded-lg border border-accent-border bg-inset p-3">
+                            <div className="mt-3 space-y-2 rounded-lg border border-line-strong bg-inset p-3">
                               <div className="text-[11px] font-medium text-ink-muted">
-                                Teach Scratch AI the right answer for:{' '}
+                                Teach local student the preferred answer for:{' '}
                                 <span className="font-mono text-ink">&quot;{prevUserMsg.content}&quot;</span>
                               </div>
                               <textarea
                                 rows={2}
                                 value={fixDraft}
                                 onChange={(e) => setFixDraft(e.target.value)}
-                                placeholder="Enter the preferred rule or answer to save as a Trusted note + permanent Scratch Skill…"
+                                placeholder="Enter the preferred rule or answer to save as a Trusted note and local skill…"
                                 className="w-full rounded-md border border-line-strong bg-surface px-3 py-2 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
                               />
                               <div className="flex flex-wrap items-center justify-end gap-2">
@@ -871,15 +964,15 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md bg-accent px-3.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                                 >
                                   <Check className="h-3.5 w-3.5" />
-                                  <span>{isSavingFix ? 'Training…' : 'Save Skill & Trusted Rule'}</span>
+                                  <span>{isSavingFix ? 'Saving…' : 'Save Skill & Rule'}</span>
                                 </button>
                               </div>
                             </div>
                           )}
 
-                          {/* Compact Inline Citations */}
+                          {/* Unboxed Inline Citations (Zero Capsule Pills) */}
                           {(citedEntries.length > 0 || citedRepoPaths.length > 0) && (
-                            <footer className="mt-2.5 flex flex-wrap items-center gap-2 text-xs">
+                            <footer className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                               <span className="font-mono text-[11px] text-ink-subtle">
                                 Grounded:
                               </span>
@@ -888,7 +981,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   key={cited.id}
                                   type="button"
                                   onClick={() => onInspectEntry(cited.id)}
-                                  className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-inset px-2.5 py-0.5 text-xs font-medium text-accent-text hover:border-accent-border"
+                                  className="inline-flex min-h-[36px] items-center gap-1 text-xs font-medium text-accent-text underline decoration-line-strong underline-offset-4 hover:decoration-accent"
                                 >
                                   <span>{cited.title}</span>
                                   <ArrowUpRight className="h-3 w-3" />
@@ -899,7 +992,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   key={repoPath}
                                   type="button"
                                   onClick={() => onInspectRepoFile(repoPath)}
-                                  className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-inset px-2.5 py-0.5 font-mono text-[11px] text-ink hover:border-accent-border"
+                                  className="inline-flex min-h-[36px] items-center gap-1 font-mono text-[11px] text-ink-muted underline decoration-line underline-offset-4 hover:text-ink"
                                 >
                                   <FileCode2 className="h-3 w-3 text-accent-text" />
                                   <span>{repoPath}</span>
@@ -920,7 +1013,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
               <button
                 type="button"
                 onClick={jumpToLatest}
-                className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-accent-border bg-surface/95 px-3 py-1 text-xs font-semibold text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
+                className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-surface/95 px-3 py-1 text-xs font-medium text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
               >
                 <ArrowDown className="h-3.5 w-3.5" />
                 <span>Latest</span>
@@ -928,168 +1021,169 @@ export const ChatWorkspace = memo(function ChatWorkspace({
             )}
           </div>
 
-          {/* Grok-Style Clean Anchored Omnibar Composer + Slash Autocomplete */}
-          <form
-            onSubmit={handleSubmit}
-            className="mx-auto w-full max-w-[82ch] rounded-xl border border-line-strong bg-surface p-3 shadow-sm"
-          >
-            {matchingSlashCommands.length > 0 && (
-              <div className="mb-2 space-y-1 rounded-lg border border-line bg-inset p-1.5">
-                {matchingSlashCommands.map((item, idx) => (
-                  <button
-                    key={item.cmd}
-                    type="button"
-                    onClick={() => {
-                      setInput(item.template);
-                      setForceSlashMenu(false);
-                      if (item.cmd === '/execute') setComposerMode('assassin');
-                      textareaRef.current?.focus();
-                    }}
-                    className={`flex min-h-[40px] w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors ${
-                      idx === slashIndex
-                        ? 'bg-accent-soft text-accent-text'
-                        : 'text-ink-muted hover:bg-elevated hover:text-ink'
-                    }`}
-                  >
-                    <span className="font-mono font-semibold text-ink">{item.cmd}</span>
-                    <span className="truncate text-[11px] text-ink-muted">{item.desc}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <textarea
-              ref={textareaRef}
-              rows={2}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                if (forceSlashMenu && e.target.value.includes(' ')) {
-                  setForceSlashMenu(false);
-                }
-              }}
-              onKeyDown={(e) => {
-                if (matchingSlashCommands.length > 0) {
-                  if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    setSlashIndex((i) => (i + 1) % matchingSlashCommands.length);
-                    return;
-                  }
-                  if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    setSlashIndex((i) =>
-                      (i - 1 + matchingSlashCommands.length) % matchingSlashCommands.length,
-                    );
-                    return;
-                  }
-                  if (e.key === 'Tab') {
-                    e.preventDefault();
-                    const picked = matchingSlashCommands[slashIndex] || matchingSlashCommands[0];
-                    if (picked) {
-                      setInput(picked.template);
-                      setForceSlashMenu(false);
-                      if (picked.cmd === '/execute') setComposerMode('assassin');
-                    }
-                    return;
-                  }
-                  if (e.key === 'Escape') {
-                    setForceSlashMenu(false);
-                    return;
-                  }
-                } else if (e.key === 'ArrowUp' && !input.trim() && lastUserPrompt) {
-                  e.preventDefault();
-                  setInput(lastUserPrompt);
-                  return;
-                }
-
-                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  setForceSlashMenu(false);
-                  void submitPrompt();
-                }
-              }}
-              placeholder={
-                composerMode === 'assassin'
-                  ? 'Describe a code goal for Smart-Assassin parallel prep (/execute automatically applied)…'
-                  : 'Ask Scratch AI, type / for commands, Remember: to teach, or ↑ for last prompt…'
-              }
-              className="min-h-[48px] w-full resize-none bg-transparent px-1.5 py-1 text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
-            />
-
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2.5">
-              {/* Inline Mode Selector + Slash Trigger */}
-              <div className="flex flex-wrap items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setForceSlashMenu((prev) => !prev)}
-                  aria-label="Toggle slash command helper"
-                  className={`inline-flex min-h-[40px] shrink-0 items-center gap-1 rounded-md border px-2.5 font-mono text-[11px] font-semibold transition-colors ${
-                    forceSlashMenu || matchingSlashCommands.length > 0
-                      ? 'border-accent-border bg-accent-soft text-accent-text'
-                      : 'border-line bg-inset text-ink-muted hover:text-ink'
-                  }`}
-                >
-                  /
-                </button>
-                {(
-                  [
-                    {id: 'scratch', label: 'Scratch Leads'},
-                    {id: 'cloud', label: 'Cloud Assist'},
-                    {id: 'distill', label: 'Teacher Distill'},
-                    {id: 'assassin', label: 'Assassin'},
-                  ] as const
-                ).map((mode) => {
-                  const active = composerMode === mode.id;
-                  return (
+          {/* Pinned Bottom Composer (Always Visible Above On-Screen Keyboards) */}
+          <div className="shrink-0 border-t border-line bg-canvas px-3 py-2.5 sm:px-6">
+            <form
+              onSubmit={handleSubmit}
+              className="mx-auto w-full max-w-[76ch] rounded-lg border border-line-strong bg-surface p-2.5"
+            >
+              {matchingSlashCommands.length > 0 && (
+                <div className="mb-2 space-y-0.5 rounded-md border border-line bg-inset p-1">
+                  {matchingSlashCommands.map((item, idx) => (
                     <button
-                      key={mode.id}
+                      key={item.cmd}
                       type="button"
                       onClick={() => {
-                        setComposerMode(mode.id);
-                        if (mode.id === 'scratch') onTogglePreferBuiltIn(true);
-                        if (mode.id === 'cloud') onTogglePreferBuiltIn(false);
+                        setInput(item.template);
+                        setForceSlashMenu(false);
+                        if (item.cmd === '/execute') setComposerMode('assassin');
+                        textareaRef.current?.focus();
                       }}
-                      className={`inline-flex min-h-[40px] shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2.5 text-[11px] font-medium transition-colors ${
-                        active
-                          ? 'bg-accent-soft text-accent-text border border-accent-border'
+                      className={`flex min-h-[40px] w-full items-center justify-between gap-2 rounded px-2.5 py-1 text-left text-xs transition-colors ${
+                        idx === slashIndex
+                          ? 'bg-accent-soft text-accent-text'
                           : 'text-ink-muted hover:bg-elevated hover:text-ink'
                       }`}
                     >
-                      {mode.id === 'assassin' && <Crosshair className="h-3 w-3" />}
-                      {mode.id === 'distill' && <GraduationCap className="h-3 w-3" />}
-                      {mode.id === 'cloud' && <Sparkles className="h-3 w-3" />}
-                      <span>{mode.label}</span>
+                      <span className="font-mono font-semibold text-ink">{item.cmd}</span>
+                      <span className="truncate text-[11px] text-ink-muted">{item.desc}</span>
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
+              )}
 
-                {!hasCloudRoute && (
+              <textarea
+                ref={textareaRef}
+                rows={2}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  if (forceSlashMenu && e.target.value.includes(' ')) {
+                    setForceSlashMenu(false);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (matchingSlashCommands.length > 0) {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      setSlashIndex((i) => (i + 1) % matchingSlashCommands.length);
+                      return;
+                    }
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      setSlashIndex((i) =>
+                        (i - 1 + matchingSlashCommands.length) % matchingSlashCommands.length,
+                      );
+                      return;
+                    }
+                    if (e.key === 'Tab') {
+                      e.preventDefault();
+                      const picked = matchingSlashCommands[slashIndex] || matchingSlashCommands[0];
+                      if (picked) {
+                        setInput(picked.template);
+                        setForceSlashMenu(false);
+                        if (picked.cmd === '/execute') setComposerMode('assassin');
+                      }
+                      return;
+                    }
+                    if (e.key === 'Escape') {
+                      setForceSlashMenu(false);
+                      return;
+                    }
+                  } else if (e.key === 'ArrowUp' && !input.trim() && lastUserPrompt) {
+                    e.preventDefault();
+                    setInput(lastUserPrompt);
+                    return;
+                  }
+
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    setForceSlashMenu(false);
+                    void submitPrompt();
+                  }
+                }}
+                placeholder={
+                  composerMode === 'assassin'
+                    ? 'Describe a code goal for parallel patch prep (/execute automatically applied)…'
+                    : 'Message Mantis, type / for commands, or Remember: to teach…'
+                }
+                className="min-h-[44px] w-full resize-none bg-transparent px-1.5 py-1 text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
+              />
+
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2">
+                <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
-                    onClick={onOpenSettings}
-                    className="ml-1 min-h-[40px] font-mono text-[11px] text-warn underline underline-offset-2 hover:opacity-90"
+                    onClick={() => setForceSlashMenu((prev) => !prev)}
+                    aria-label="Toggle slash command helper"
+                    className={`inline-flex min-h-[38px] shrink-0 items-center rounded border px-2.5 font-mono text-[11px] font-semibold transition-colors ${
+                      forceSlashMenu || matchingSlashCommands.length > 0
+                        ? 'border-accent-border bg-accent-soft text-accent-text'
+                        : 'border-line bg-inset text-ink-muted hover:text-ink'
+                    }`}
                   >
-                    Connect Cloud ({brainModel.split('/').pop()})
+                    /
                   </button>
-                )}
-              </div>
+                  {(
+                    [
+                      {id: 'scratch', label: 'Local Student'},
+                      {id: 'cloud', label: 'Cloud Assist'},
+                      {id: 'distill', label: 'Teacher Distill'},
+                      {id: 'assassin', label: 'Parallel Patch'},
+                    ] as const
+                  ).map((mode) => {
+                    const active = composerMode === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => {
+                          setComposerMode(mode.id);
+                          if (mode.id === 'scratch') onTogglePreferBuiltIn(true);
+                          if (mode.id === 'cloud') onTogglePreferBuiltIn(false);
+                        }}
+                        className={`inline-flex min-h-[38px] shrink-0 items-center gap-1 whitespace-nowrap rounded px-2.5 text-[11px] font-medium transition-colors ${
+                          active
+                            ? 'border border-accent-border bg-accent-soft text-accent-text'
+                            : 'text-ink-muted hover:bg-elevated hover:text-ink'
+                        }`}
+                      >
+                        {mode.id === 'assassin' && <Crosshair className="h-3 w-3" />}
+                        {mode.id === 'distill' && <GraduationCap className="h-3 w-3" />}
+                        {mode.id === 'cloud' && <Sparkles className="h-3 w-3" />}
+                        <span>{mode.label}</span>
+                      </button>
+                    );
+                  })}
 
-              <button
-                type="submit"
-                disabled={isSending || !input.trim()}
-                className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg bg-accent px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Send className="h-3.5 w-3.5" />
-                <span>
-                  {isSending
-                    ? 'Executing…'
-                    : composerMode === 'assassin'
-                      ? 'Prep Brief'
-                      : 'Execute'}
-                </span>
-              </button>
-            </div>
-          </form>
+                  {!hasCloudRoute && (
+                    <button
+                      type="button"
+                      onClick={onOpenSettings}
+                      className="ml-1 min-h-[38px] font-mono text-[11px] text-warn underline underline-offset-2 hover:opacity-90"
+                    >
+                      Connect Cloud ({brainModel.split('/').pop()})
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isSending || !input.trim()}
+                  className="inline-flex min-h-[40px] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  <span>
+                    {isSending
+                      ? 'Running…'
+                      : composerMode === 'assassin'
+                        ? 'Stage Brief'
+                        : 'Send'}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
         </>
       )}
     </div>

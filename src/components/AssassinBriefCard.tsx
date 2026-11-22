@@ -23,17 +23,17 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
 
   return (
     <section
-      aria-label="Smart-Assassin Execution Brief"
-      className="mantis-slide-up rounded-lg border border-accent-border bg-surface p-4"
+      aria-label="Parallel Patch Brief"
+      className="mantis-slide-up shrink-0 rounded-lg border border-line-strong bg-surface p-4"
     >
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-3">
         <div className="space-y-1">
-          <div className="flex items-center gap-2 font-mono text-[11px] text-accent-text uppercase">
-            <span>Smart-Assassin Execution Brief</span>
+          <div className="flex items-center gap-2 font-mono text-[11px] text-ink-muted">
+            <span className="font-semibold text-accent-text uppercase">Parallel Patch Brief</span>
             <span aria-hidden="true">·</span>
-            <span className="inline-flex items-center gap-1 tabular-nums text-ink-muted">
+            <span className="inline-flex items-center gap-1 tabular-nums">
               <Clock className="h-3 w-3" />
-              {brief.prepLatencyMs} ms parallel prep
+              {brief.prepLatencyMs} ms
             </span>
           </div>
           <h3 className="text-sm font-semibold text-ink">{brief.goal}</h3>
@@ -44,10 +44,10 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
             type="button"
             disabled={isApproving}
             onClick={() => onReject(brief)}
-            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:text-ink disabled:opacity-50"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-inset px-3 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50"
           >
             <X className="h-3.5 w-3.5 text-danger" />
-            <span>Reject &amp; Log DPO</span>
+            <span>Reject &amp; Log Preference</span>
           </button>
 
           <button
@@ -69,19 +69,20 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
       </div>
 
       {/* Parallel Prep Breakdown */}
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
         <div className="space-y-1.5">
           <div className="font-mono text-[11px] font-medium text-ink-muted">
-            Matched Context ({brief.matchedMemories.length} memories · {brief.matchedFiles.length} files)
+            Matched Context ({brief.matchedMemories.length} memories · {brief.matchedFiles.length}{' '}
+            files)
           </div>
-          <div className="space-y-1">
+          <div className="divide-y divide-line rounded-md border border-line bg-inset">
             {brief.matchedMemories.slice(0, 3).map((m) => (
               <div
                 key={m.entry.id}
-                className="flex items-center justify-between gap-2 rounded border border-line bg-inset px-2.5 py-1.5 text-xs"
+                className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
               >
                 <span className="truncate font-medium text-ink">{m.entry.title}</span>
-                <span className="shrink-0 font-mono text-[11px] text-accent-text">
+                <span className="shrink-0 font-mono text-[11px] text-ink-muted">
                   {m.folderName}
                 </span>
               </div>
@@ -89,15 +90,15 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
             {brief.matchedFiles.slice(0, 3).map((f) => (
               <div
                 key={f.file.id}
-                className="flex items-center gap-2 rounded border border-line bg-inset px-2.5 py-1.5 font-mono text-[11px] text-ink-muted"
+                className="flex items-center gap-2 px-3 py-2 font-mono text-[11px] text-ink-muted"
               >
                 <FileCode2 className="h-3.5 w-3.5 shrink-0 text-accent-text" />
                 <span className="truncate">{f.file.path}</span>
               </div>
             ))}
             {brief.matchedMemories.length === 0 && brief.matchedFiles.length === 0 && (
-              <div className="rounded border border-line bg-inset px-2.5 py-2 text-xs text-ink-subtle">
-                Zero prior context matched — executed using fresh rules &amp; safety checks.
+              <div className="px-3 py-2.5 text-xs text-ink-subtle">
+                No prior context matched — staged using fresh rules and static checks.
               </div>
             )}
           </div>
@@ -105,13 +106,13 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
 
         <div className="space-y-1.5">
           <div className="font-mono text-[11px] font-medium text-ink-muted">
-            Automated Verification Gate
+            Static Verification Gate
           </div>
-          <div className="space-y-1">
+          <div className="divide-y divide-line rounded-md border border-line bg-inset">
             {brief.verifierChecks.map((check, i) => (
               <div
                 key={i}
-                className="flex items-start justify-between gap-2 rounded border border-line bg-inset px-2.5 py-1.5 text-xs"
+                className="flex items-start justify-between gap-2 px-3 py-2 text-xs"
               >
                 <div className="flex items-start gap-2">
                   {check.passed ? (
@@ -139,7 +140,7 @@ export function AssassinBriefCard({brief, onApprove, onReject}: AssassinBriefCar
 
       {/* Staged Diff Previews */}
       {brief.proposedDiffs.length > 0 && (
-        <div className="mt-3 space-y-2.5">
+        <div className="mt-3 max-h-[38vh] space-y-2.5 overflow-y-auto">
           {brief.proposedDiffs.map((diff) => (
             <div key={diff.filePath} className="space-y-1.5">
               <div className="text-xs text-ink-muted">

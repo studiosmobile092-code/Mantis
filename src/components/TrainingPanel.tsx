@@ -377,10 +377,10 @@ export function TrainingPanel({
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
         <div>
           <h1 className="text-base font-semibold tracking-tight text-ink">
-            Training, Curriculum, DPO Arena &amp; Eval Studio
+            Training, Curriculum &amp; Evaluation Lab
           </h1>
           <p className="mt-0.5 text-xs text-ink-muted">
-            Post-train Mantis on your workflow: drill knowledge gaps, rank A/B responses, refine Scratch skills, and benchmark regressions.
+            Post-train Mantis on your workflow: fill skill gaps, log preference pairs, refine local student rules, and verify regressions.
           </p>
         </div>
         <div className="font-mono text-xs tabular-nums text-ink-muted">
@@ -393,7 +393,7 @@ export function TrainingPanel({
       <div className="flex flex-wrap gap-1 border-b border-line pb-2">
         {(
           [
-            {id: 'arena', label: 'DPO Arena', icon: Scale},
+            {id: 'arena', label: 'Preference Eval', icon: Scale},
             {id: 'curriculum', label: `Curriculum (${curriculumCoverage.gaps.length})`, icon: GraduationCap},
             {id: 'dataset', label: `Dataset & Skills (${trainingSamples.length + scratchSkills.length})`, icon: FlaskConical},
             {id: 'evals', label: `Eval Bench (${evalCases.length})`, icon: Gauge},
@@ -428,7 +428,7 @@ export function TrainingPanel({
               type="text"
               value={arenaPrompt}
               onChange={(e) => setArenaPrompt(e.target.value)}
-              placeholder="Enter any prompt to pit Scratch Hybrid AI vs. Cloud Teacher A/B…"
+              placeholder="Enter a prompt to compare Local Student vs. Cloud Teacher…"
               className="min-h-[44px] min-w-[240px] flex-1 rounded-md border border-line-strong bg-inset px-3.5 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
             <button
@@ -437,7 +437,7 @@ export function TrainingPanel({
               className="inline-flex min-h-[44px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-4 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
             >
               <Sparkles className="h-3.5 w-3.5" />
-              <span>{isGeneratingDuel ? 'Generating Duel…' : 'Run A vs B Duel'}</span>
+              <span>{isGeneratingDuel ? 'Comparing…' : 'Compare Replies'}</span>
             </button>
           </form>
 
@@ -482,7 +482,7 @@ export function TrainingPanel({
             </div>
           ) : (
             <div className="rounded-lg border border-line bg-surface p-6 text-center text-xs leading-relaxed text-ink-muted">
-              Run a side-by-side comparison to generate clean Chosen vs. Rejected DPO training pairs for fine-tuning your custom model in Phase 6.
+              Compare local student and teacher replies to generate Chosen vs. Rejected DPO preference pairs for fine-tuning and export.
             </div>
           )}
         </div>
@@ -669,7 +669,7 @@ export function TrainingPanel({
             </h2>
             {trainingSamples.length === 0 ? (
               <div className="rounded-lg border border-line bg-surface p-5 text-xs text-ink-muted">
-                No training pairs recorded yet. Approve suggestions, distill lessons from Teacher, or pick winners in the DPO Arena.
+                No training pairs recorded yet. Approve patches, distill lessons from Teacher, or log winners in Preference Eval.
               </div>
             ) : (
               <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">

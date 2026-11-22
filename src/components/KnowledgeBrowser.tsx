@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   BookOpen,
   Check,
   CheckSquare,
@@ -87,6 +88,9 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(
     highlightedEntryId || entries[0]?.id || null,
   );
+  const [mobilePane, setMobilePane] = useState<'list' | 'reader'>(
+    highlightedEntryId ? 'reader' : 'list',
+  );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Bulk select & action state
@@ -108,6 +112,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
       setSelectedTag('all');
       setSearchQuery('');
       setSelectedEntryId(highlightedEntryId);
+      setMobilePane('reader');
     }
   }, [highlightedEntryId]);
 
@@ -361,9 +366,9 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
     <div className="mantis-fade-in space-y-6">
       <div className="flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold tracking-tight text-ink">Knowledge Browser</h1>
-          <p className="text-sm text-ink-muted">
-            Organized semantic folders and persistent memory stored in Supabase.
+          <h1 className="text-lg font-semibold tracking-tight text-ink">Knowledge Memory</h1>
+          <p className="text-xs text-ink-muted">
+            Organized memory folders with trust weighting and inline editing.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -531,8 +536,12 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
       )}
 
       <div className="grid gap-4 lg:grid-cols-[220px_300px_1fr]">
-        {/* Column 1: Folders Tree (Compact chip strip on tablet/mobile, vertical tree on desktop) */}
-        <aside className="space-y-2 rounded-lg border border-line bg-surface p-3">
+        {/* Column 1: Folders Tree (Hidden on < lg when inspecting a note) */}
+        <aside
+          className={`space-y-2 rounded-lg border border-line bg-surface p-3 ${
+            mobilePane === 'reader' ? 'hidden lg:block' : 'block'
+          }`}
+        >
           <h2 className="px-1 text-xs font-semibold tracking-wide text-ink-muted uppercase lg:px-2 lg:pb-1">
             Folders
           </h2>
@@ -651,7 +660,9 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
         {/* Column 2: Searchable Compact Note List */}
         <section
           aria-label="Knowledge entries list"
-          className="flex flex-col gap-3 rounded-lg border border-line bg-surface p-3"
+          className={`flex-col gap-3 rounded-lg border border-line bg-surface p-3 ${
+            mobilePane === 'reader' ? 'hidden lg:flex' : 'flex'
+          }`}
         >
           <div className="relative">
             <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-ink-subtle" />
@@ -737,7 +748,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
               </button>
             </div>
           ) : (
-            <div className="max-h-[42vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-inset lg:max-h-[60vh]">
+            <div className="divide-y divide-line rounded-md border border-line bg-inset lg:max-h-[60vh] lg:overflow-y-auto">
               {filteredEntries.map((entry) => {
                 const entryStatus = getEntryStatus(entry);
                 const isSelected = activeEntry?.id === entry.id;
@@ -773,6 +784,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                         setSelectedEntryId(entry.id);
                         setEditingId(null);
                         setConfirmDeleteId(null);
+                        setMobilePane('reader');
                         if (highlightedEntryId && highlightedEntryId !== entry.id) {
                           onClearHighlight();
                         }
@@ -833,8 +845,25 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
         {/* Column 3: Focused Note Reader & Inline Editor */}
         <section
           aria-label="Note reader and editor"
-          className="rounded-lg border border-line bg-surface p-5"
+          className={`rounded-lg border border-line bg-surface p-4 sm:p-5 ${
+            mobilePane === 'list' ? 'hidden lg:block' : 'block'
+          }`}
         >
+          <div className="mb-3 flex items-center justify-between border-b border-line pb-2.5 lg:hidden">
+            <button
+              type="button"
+              onClick={() => setMobilePane('list')}
+              className="inline-flex min-h-[44px] items-center gap-1.5 rounded-md border border-line bg-inset px-3 text-xs font-medium text-ink hover:border-line-strong"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>Back to Notes ({filteredEntries.length})</span>
+            </button>
+            {activeEntry && (
+              <span className="truncate pl-2 font-mono text-[11px] text-ink-muted">
+                {getEntryStatus(activeEntry)}
+              </span>
+            )}
+          </div>
           {isLoading ? (
             <div className="space-y-4">
               <div className="h-6 w-2/3 animate-pulse rounded bg-elevated" />
@@ -1045,7 +1074,7 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
                     </div>
                   </div>
 
-                  <div className="max-h-[55vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-inset p-4 font-sans text-sm leading-relaxed text-ink">
+                  <div className="whitespace-pre-wrap rounded-md border border-line bg-inset p-4 font-sans text-sm leading-relaxed text-ink lg:max-h-[58vh] lg:overflow-y-auto">
                     {entry.content}
                   </div>
                 </div>

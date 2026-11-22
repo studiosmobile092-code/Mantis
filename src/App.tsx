@@ -1,28 +1,19 @@
 import type {Session} from '@supabase/supabase-js';
 import {
-  Activity,
   AlertCircle,
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
-  FolderTree,
   Loader2,
-  PanelLeftOpen,
-  PanelRightOpen,
   RefreshCw,
   WifiOff,
-  X,
 } from 'lucide-react';
 import {Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {ActivityRail} from './components/ActivityRail';
 import {AuthGate} from './components/AuthGate';
 import {ChatWorkspace, type StudioComposerMode} from './components/ChatWorkspace';
 import {CommandPalette} from './components/CommandPalette';
-import {LiveMonitorPanel} from './components/LiveMonitorPanel';
-import {OnboardingGuide} from './components/OnboardingGuide';
+import {InspectorDrawer} from './components/InspectorDrawer';
 import {SchemaSetupBanner} from './components/SchemaSetupBanner';
-import {StatusFooter} from './components/StatusFooter';
-import {StudioExplorer} from './components/StudioExplorer';
 import {TeachPanel} from './components/TeachPanel';
 import {TopBar} from './components/TopBar';
 import {
@@ -126,12 +117,14 @@ import type {
   ContradictionAlert,
   EvalCase,
   EvalRunSummary,
+  EvalSubView,
   GitHubConnection,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeStatus,
   LearningEvent,
   LearningEventKind,
+  MemorySubView,
   ModelCardConfig,
   RepoFile,
   SaveFeedbackInfo,
@@ -144,6 +137,7 @@ import type {
   ThemeMode,
   TrainingSample,
   UserPreferences,
+  WorkspaceMode,
 } from './types/mantis';
 
 const KnowledgeBrowser = lazy(() =>
@@ -181,11 +175,14 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  const [activeArea, setActiveArea] = useState<AreaId>('studio');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('train');
+  const [memorySubView, setMemorySubView] = useState<MemorySubView>('knowledge');
+  const [evalSubView, setEvalSubView] = useState<EvalSubView>('training');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [studioSubView, setStudioSubView] = useState<'console' | 'teach'>('console');
   const [studioTab, setStudioTab] = useState<'stream' | 'graph'>('stream');
   const [githubSubTab, setGithubSubTab] = useState<'files' | 'suggestions' | 'self-improve'>('files');
-  const [mobileDrawer, setMobileDrawer] = useState<'none' | 'explorer' | 'monitor'>('none');
 
   const [computeStatus, setComputeStatus] = useState<ComputeEngineStatus>(() => getComputeStatus());
   const [scratchSkills, setScratchSkills] = useState<ScratchSkillRule[]>(() => loadScratchSkills());
@@ -264,20 +261,6 @@ export default function App() {
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true,
   );
-  const [leftPaneOpen, setLeftPaneOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('mantis_left_pane_v1') !== 'false';
-    } catch {
-      return true;
-    }
-  });
-  const [rightPaneOpen, setRightPaneOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('mantis_right_pane_v1') !== 'false';
-    } catch {
-      return true;
-    }
-  });
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(() => {
     try {
@@ -298,6 +281,33 @@ export default function App() {
     });
   }, []);
 
+  const navigateToArea = useCallback((area: AreaId) => {
+    setInspectorOpen(false);
+    if (area === 'settings') {
+      setSettingsOpen(true);
+      return;
+    }
+    setSettingsOpen(false);
+    if (area === 'studio') {
+      setWorkspaceMode('train');
+    } else if (area === 'knowledge') {
+      setWorkspaceMode('memory');
+      setMemorySubView('knowledge');
+    } else if (area === 'ingest') {
+      setWorkspaceMode('memory');
+      setMemorySubView('capture');
+    } else if (area === 'github') {
+      setWorkspaceMode('memory');
+      setMemorySubView('repo');
+    } else if (area === 'training') {
+      setWorkspaceMode('evals');
+      setEvalSubView('training');
+    } else if (area === 'export') {
+      setWorkspaceMode('evals');
+      setEvalSubView('export');
+    }
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -309,32 +319,17 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandPaletteOpen((prev) => !prev);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') {
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        (e.key.toLowerCase() === 'i' || e.key.toLowerCase() === 'b')
+      ) {
         e.preventDefault();
-        setLeftPaneOpen((prev) => {
-          const next = !prev;
-          try {
-            window.localStorage.setItem('mantis_left_pane_v1', String(next));
-          } catch {
-            // ignore
-          }
-          return next;
-        });
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'm') {
-        e.preventDefault();
-        setRightPaneOpen((prev) => {
-          const next = !prev;
-          try {
-            window.localStorage.setItem('mantis_right_pane_v1', String(next));
-          } catch {
-            // ignore
-          }
-          return next;
-        });
+        setInspectorOpen((prev) => !prev);
       } else if (e.altKey && !isTyping && e.key.toLowerCase() === 'n') {
         e.preventDefault();
+        setSettingsOpen(false);
+        setWorkspaceMode('train');
         setStudioSubView('teach');
-        setActiveArea('studio');
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -1393,30 +1388,6 @@ export default function App() {
     }
   }
 
-  function handleToggleLeftPane() {
-    setLeftPaneOpen((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem('mantis_left_pane_v1', String(next));
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }
-
-  function handleToggleRightPane() {
-    setRightPaneOpen((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem('mantis_right_pane_v1', String(next));
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  }
-
   async function handleSaveBrainConfig(
     url: string,
     backupUrl: string,
@@ -2314,9 +2285,9 @@ export default function App() {
         citedEntryIds = hybridMatches.map((m) => m.entry.id);
         citedRepoPaths = repoMatches.map((r) => r.file.path);
         replyText = [
-          `Smart-Assassin parallel prep finished in ${prepLatencyMs} ms for: "${goal}".`,
+          `Parallel patch prep finished in ${prepLatencyMs} ms for: "${goal}".`,
           primaryFile
-            ? `Staged isolated diff preview on \`${primaryFile.path}\` above the stream. Review the verification checks and click **Approve & Stage Diff** when ready.`
+            ? `Staged isolated diff preview on \`${primaryFile.path}\` above the stream. Review the static checks and click **Approve & Stage Diff** when ready.`
             : 'Context & safety gate assembled above. Connect a GitHub repo or specify a file name to include a code diff.',
         ].join('\n\n');
       } else if (prompt.toLowerCase().startsWith('/suggest ')) {
@@ -2578,7 +2549,7 @@ export default function App() {
 
     if (!brainUrl.trim() && !backupBrainUrl.trim()) {
       setErrorBanner('Connect your Cloudflare Worker, Edge Backup, or Ollama route in Settings to run Teacher Distillation.');
-      setActiveArea('settings');
+      navigateToArea('settings');
       return;
     }
 
@@ -2630,7 +2601,7 @@ export default function App() {
         format: 'sft',
         prompt: brief.goal,
         chosenResponse: chosenSummary,
-        modelChosen: 'Smart-Assassin Prep',
+        modelChosen: 'Parallel Patch Prep',
         citedEntryIds: brief.matchedMemories.map((m) => m.entry.id),
         status: 'approved',
       }),
@@ -2654,13 +2625,13 @@ export default function App() {
         chosenResponse: 'Require tighter alignment with repo rules before editing.',
         rejectedResponse: rejectedSummary,
         modelChosen: 'Operator Guardrail',
-        modelRejected: 'Smart-Assassin Draft',
-        rationale: 'Rejected Smart-Assassin brief during approval gate',
+        modelRejected: 'Parallel Patch Draft',
+        rationale: 'Rejected parallel patch brief during approval gate',
         citedEntryIds: brief.matchedMemories.map((m) => m.entry.id),
         status: 'approved',
       }),
     );
-    pushLearningEvent('dpo_logged', 'Logged DPO Negative Signal', brief.goal.slice(0, 60), 'assassin');
+    pushLearningEvent('dpo_logged', 'Logged DPO Negative Signal', brief.goal.slice(0, 60), 'patch');
     setActiveAssassinBrief(null);
   }
 
@@ -2799,7 +2770,7 @@ export default function App() {
 
     if (!brainUrl.trim() && !backupBrainUrl.trim()) {
       setErrorBanner('Configure your Cloudflare Worker or Chromebook Supabase Backup URL in Settings to use Cloud Assist.');
-      setActiveArea('settings');
+      navigateToArea('settings');
       return;
     }
 
@@ -2931,52 +2902,26 @@ export default function App() {
     return <AuthGate onAuthenticated={() => {}} />;
   }
 
-  const studioGridClass =
-    leftPaneOpen && rightPaneOpen
-      ? 'xl:grid-cols-[248px_minmax(0,1fr)_304px]'
-      : leftPaneOpen
-        ? 'xl:grid-cols-[248px_minmax(0,1fr)]'
-        : rightPaneOpen
-          ? 'xl:grid-cols-[minmax(0,1fr)_304px]'
-          : 'xl:grid-cols-1';
-
   return (
     <div className="flex h-[100dvh] flex-col overflow-hidden bg-canvas text-ink">
       <TopBar
-        activeArea={activeArea}
-        onSelectArea={(area) => {
-          setActiveArea(area);
-          setMobileDrawer('none');
+        activeMode={workspaceMode}
+        onSelectMode={(mode) => {
+          setSettingsOpen(false);
+          setWorkspaceMode(mode);
         }}
-        routeStatus={routeStatus}
-        computeStatus={computeStatus}
         modelName={modelCard.modelName}
-        knowledgeCount={entries.length}
-        conceptCount={knowledgeGrowth.uniqueConcepts}
-        pendingOfflineCount={offlineQueueCount}
         isOnline={isOnline}
-        theme={theme}
-        isSyncing={isLoadingData}
-        onCycleTheme={() => void handleSelectAppearance(getNextThemeMode(theme), accentColor)}
+        pendingOfflineCount={offlineQueueCount}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen((prev) => !prev)}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-        onSync={() => {
-          void flushOfflineQueue();
-          void loadWorkspaceData(session);
-        }}
       />
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <ActivityRail
-          activeArea={activeArea}
-          onSelectArea={(area) => {
-            setActiveArea(area);
-            setMobileDrawer('none');
-          }}
-          pendingSuggestionsCount={pendingSuggestionsCount}
-        />
-
-        <main className="flex-1 overflow-y-auto px-4 pt-4 pb-20 sm:px-6 md:pb-8">
-          <div className="mx-auto max-w-[1560px] space-y-4">
+      {/* Alert Strip (Only mounted when active) */}
+      {(schemaMissing || contradictionAlerts.length > 0 || (errorBanner && !schemaMissing)) && (
+        <div className="shrink-0 space-y-2 border-b border-line bg-inset px-3 py-2.5 sm:px-6">
+          <div className="mx-auto max-w-[1440px] space-y-2">
             {schemaMissing && (
               <SchemaSetupBanner
                 isChecking={isLoadingData}
@@ -2987,7 +2932,7 @@ export default function App() {
             {contradictionAlerts.length > 0 && (
               <div
                 role="status"
-                className="space-y-2.5 rounded-lg border border-warn-border bg-warn-soft px-4 py-3 text-xs text-ink"
+                className="space-y-2 rounded-lg border border-warn-border bg-warn-soft px-3.5 py-2.5 text-xs text-ink"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -3055,7 +3000,7 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       setHighlightedEntryId(contradictionAlerts[0].existingEntryId);
-                      setActiveArea('knowledge');
+                      navigateToArea('knowledge');
                       setContradictionAlerts((prev) => prev.slice(1));
                     }}
                     className="min-h-[40px] rounded border border-warn-border bg-surface/80 px-3 text-xs font-semibold text-warn hover:bg-surface"
@@ -3076,7 +3021,7 @@ export default function App() {
             {errorBanner && !schemaMissing && (
               <div
                 role="alert"
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-danger-border bg-danger-soft px-4 py-3 text-xs text-danger"
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-danger-border bg-danger-soft px-3.5 py-2.5 text-xs text-danger"
               >
                 <span>{errorBanner}</span>
                 <button
@@ -3088,525 +3033,460 @@ export default function App() {
                 </button>
               </div>
             )}
-
-            {/* STUDIO: Collapsible Pro IDE Workbench + Grok Clean Canvas */}
-            {activeArea === 'studio' && (
-              <div className="space-y-3">
-                {/* Tablet / Mobile Drawer Toggles */}
-                <div className="flex flex-wrap items-center justify-between gap-2 xl:hidden">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setMobileDrawer((d) => (d === 'explorer' ? 'none' : 'explorer'))
-                    }
-                    className={`inline-flex min-h-[44px] items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                      mobileDrawer === 'explorer'
-                        ? 'border-accent-border bg-accent-soft text-accent-text'
-                        : 'border-line bg-surface text-ink-muted hover:text-ink'
-                    }`}
-                  >
-                    <FolderTree className="h-4 w-4" />
-                    <span className="tabular-nums">Explorer ({entries.length})</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setMobileDrawer((d) => (d === 'monitor' ? 'none' : 'monitor'))
-                    }
-                    className={`inline-flex min-h-[44px] items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                      mobileDrawer === 'monitor'
-                        ? 'border-accent-border bg-accent-soft text-accent-text'
-                        : 'border-line bg-surface text-ink-muted hover:text-ink'
-                    }`}
-                  >
-                    <Activity className="h-4 w-4 text-accent-text" />
-                    <span className="tabular-nums">
-                      Context Monitor ({knowledgeGrowth.uniqueConcepts} concepts)
-                    </span>
-                  </button>
-                </div>
-
-                {mobileDrawer !== 'none' && (
-                  <div className="space-y-2 xl:hidden">
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        onClick={() => setMobileDrawer('none')}
-                        className="inline-flex min-h-[40px] items-center gap-1 rounded border border-line bg-surface px-3 text-xs text-ink-muted hover:text-ink"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                        <span>Close Drawer</span>
-                      </button>
-                    </div>
-                    {mobileDrawer === 'explorer' ? (
-                      <StudioExplorer
-                        folders={folders}
-                        entries={entries}
-                        growth={knowledgeGrowth}
-                        connection={connection}
-                        repoFiles={repoFiles}
-                        onSelectFolder={(folderId) => {
-                          setSelectedKnowledgeFolderId(folderId);
-                          setActiveArea('knowledge');
-                          setMobileDrawer('none');
-                        }}
-                        onQueryConcept={(label) => {
-                          setStudioSubView('console');
-                          setStudioTab('stream');
-                          setComposerPrefill(`/search ${label}`);
-                          setMobileDrawer('none');
-                        }}
-                        onInspectRepoFile={(repoPath) => {
-                          setSelectedRepoPath(repoPath);
-                          setGithubSubTab('files');
-                          setActiveArea('github');
-                          setMobileDrawer('none');
-                        }}
-                        onOpenTeach={() => {
-                          setStudioSubView('teach');
-                          setMobileDrawer('none');
-                        }}
-                        onOpenCapture={() => {
-                          setActiveArea('ingest');
-                          setMobileDrawer('none');
-                        }}
-                        onOpenGitHub={() => {
-                          setActiveArea('github');
-                          setMobileDrawer('none');
-                        }}
-                      />
-                    ) : (
-                      <LiveMonitorPanel
-                        routeStatus={routeStatus}
-                        entries={entries}
-                        growth={knowledgeGrowth}
-                        metrics={metrics}
-                        learningEvents={learningEvents}
-                        preferBuiltInFirst={preferBuiltInFirst}
-                        onOpenSettings={() => setActiveArea('settings')}
-                        onQueryConcept={(label) => {
-                          setStudioSubView('console');
-                          setStudioTab('stream');
-                          setComposerPrefill(`/search ${label}`);
-                          setMobileDrawer('none');
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-
-                {(!leftPaneOpen || !rightPaneOpen) && (
-                  <div className="hidden items-center justify-between gap-2 xl:flex">
-                    {!leftPaneOpen ? (
-                      <button
-                        type="button"
-                        onClick={handleToggleLeftPane}
-                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
-                      >
-                        <PanelLeftOpen className="h-3.5 w-3.5 text-accent-text" />
-                        <span>Explorer (Ctrl+B)</span>
-                      </button>
-                    ) : (
-                      <span />
-                    )}
-
-                    {!rightPaneOpen && (
-                      <button
-                        type="button"
-                        onClick={handleToggleRightPane}
-                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1 text-xs font-medium text-ink-muted transition-colors hover:border-accent-border hover:text-ink"
-                      >
-                        <PanelRightOpen className="h-3.5 w-3.5 text-accent-text" />
-                        <span>Context Monitor</span>
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <div className={`grid gap-4 ${studioGridClass}`}>
-                  {leftPaneOpen && (
-                    <div className="hidden xl:block">
-                      <StudioExplorer
-                        folders={folders}
-                        entries={entries}
-                        growth={knowledgeGrowth}
-                        connection={connection}
-                        repoFiles={repoFiles}
-                        onSelectFolder={(folderId) => {
-                          setSelectedKnowledgeFolderId(folderId);
-                          setActiveArea('knowledge');
-                        }}
-                        onQueryConcept={(label) => {
-                          setStudioSubView('console');
-                          setStudioTab('stream');
-                          setComposerPrefill(`/search ${label}`);
-                        }}
-                        onInspectRepoFile={(repoPath) => {
-                          setSelectedRepoPath(repoPath);
-                          setGithubSubTab('files');
-                          setActiveArea('github');
-                        }}
-                        onOpenTeach={() => setStudioSubView('teach')}
-                        onOpenCapture={() => setActiveArea('ingest')}
-                        onOpenGitHub={() => setActiveArea('github')}
-                        onCollapse={handleToggleLeftPane}
-                      />
-                    </div>
-                  )}
-
-                  <div className="min-w-0 space-y-4">
-                    {!onboardingDismissed && studioSubView === 'console' && (
-                      <OnboardingGuide
-                        knowledgeCount={entries.length}
-                        trustedCount={entries.filter((e) => e.status === 'trusted').length}
-                        hasInteractedChat={messages.length > 0}
-                        onTeachFirstRule={() => setStudioSubView('teach')}
-                        onOpenKnowledge={() => setActiveArea('knowledge')}
-                        onOpenCapture={() => setActiveArea('ingest')}
-                        onDismiss={() => {
-                          setOnboardingDismissed(true);
-                          try {
-                            window.localStorage.setItem('mantis_onboarding_dismissed_v1', 'true');
-                          } catch {
-                            // ignore
-                          }
-                        }}
-                      />
-                    )}
-
-                    {studioSubView === 'teach' ? (
-                      <div className="space-y-4">
-                        <button
-                          type="button"
-                          onClick={() => setStudioSubView('console')}
-                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
-                        >
-                          <ArrowLeft className="h-3.5 w-3.5" />
-                          <span>Back to Studio Workbench</span>
-                        </button>
-                        <TeachPanel
-                          key={teachPrefill.key}
-                          folders={folders}
-                          entries={entries}
-                          brainUrl={brainUrl}
-                          backupBrainUrl={backupBrainUrl}
-                          brainModel={brainModel}
-                          accessToken={session.access_token}
-                          initialTitle={teachPrefill.title}
-                          initialContent={teachPrefill.content}
-                          initialTags={teachPrefill.tags}
-                          saveFeedback={saveFeedback}
-                          onRetrySave={
-                            retrySaveFnRef.current ? () => void retrySaveFnRef.current?.() : undefined
-                          }
-                          onSaveEntry={handleSaveEntry}
-                          onCreateFolder={handleCreateFolder}
-                          onOpenKnowledge={() => setActiveArea('knowledge')}
-                        />
-                      </div>
-                    ) : (
-                      <ChatWorkspace
-                        messages={messages}
-                        entries={entries}
-                        folders={folders}
-                        repoFiles={repoFiles}
-                        growth={knowledgeGrowth}
-                        connection={connection}
-                        routeStatus={routeStatus}
-                        preferBuiltInFirst={preferBuiltInFirst}
-                        onTogglePreferBuiltIn={(next) => void handleTogglePreferBuiltIn(next)}
-                        brainModel={brainModel}
-                        isLoading={isLoadingData}
-                        isSending={isSendingChat}
-                        escalatingMsgId={escalatingMsgId}
-                        distillingMsgId={distillingMsgId}
-                        activeTab={studioTab}
-                        onChangeTab={setStudioTab}
-                        activeAssassinBrief={activeAssassinBrief}
-                        onApproveAssassinBrief={handleApproveAssassinBrief}
-                        onRejectAssassinBrief={handleRejectAssassinBrief}
-                        composerPrefill={composerPrefill}
-                        onConsumeComposerPrefill={() => setComposerPrefill('')}
-                        onSendMessage={handleSendChatMessage}
-                        onEscalateMessageToCloud={handleEscalateMessageToCloud}
-                        onDistillMessageWithTeacher={handleDistillMessageWithTeacher}
-                        onTeachScratchFix={handleTeachScratchFix}
-                        onSendToArena={(promptText) => {
-                          setArenaInitialPrompt(promptText);
-                          setActiveArea('training');
-                        }}
-                        onClearChat={handleClearChat}
-                        onInspectEntry={(entryId) => {
-                          setHighlightedEntryId(entryId);
-                          setActiveArea('knowledge');
-                        }}
-                        onInspectRepoFile={(repoPath) => {
-                          setSelectedRepoPath(repoPath);
-                          setGithubSubTab('files');
-                          setActiveArea('github');
-                        }}
-                        onSaveTextToTeach={(suggestedTitle, content) => {
-                          setTeachPrefill({
-                            key: Date.now(),
-                            title: suggestedTitle,
-                            content,
-                            tags: '',
-                          });
-                          setStudioSubView('teach');
-                        }}
-                        onQuickSaveMessage={handleQuickSaveChatMessage}
-                        onReinforceEntries={handleReinforceEntries}
-                        onOpenIngest={() => setActiveArea('ingest')}
-                        onOpenTeach={() => setStudioSubView('teach')}
-                        onOpenSuggestions={() => {
-                          setGithubSubTab('suggestions');
-                          setActiveArea('github');
-                        }}
-                        onOpenSettings={() => setActiveArea('settings')}
-                      />
-                    )}
-                  </div>
-
-                  {rightPaneOpen && (
-                    <div className="hidden xl:block">
-                      <LiveMonitorPanel
-                        routeStatus={routeStatus}
-                        entries={entries}
-                        growth={knowledgeGrowth}
-                        metrics={metrics}
-                        learningEvents={learningEvents}
-                        preferBuiltInFirst={preferBuiltInFirst}
-                        onOpenSettings={() => setActiveArea('settings')}
-                        onQueryConcept={(label) => {
-                          setStudioSubView('console');
-                          setStudioTab('stream');
-                          setComposerPrefill(`/search ${label}`);
-                        }}
-                        onCollapse={handleToggleRightPane}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <Suspense fallback={<PanelLoadingSkeleton />}>
-              {activeArea === 'knowledge' && (
-                <KnowledgeBrowser
-                  folders={folders}
-                  entries={entries}
-                  isLoading={isLoadingData}
-                  highlightedEntryId={highlightedEntryId}
-                  initialFolderId={selectedKnowledgeFolderId}
-                  saveFeedback={saveFeedback}
-                  onClearHighlight={() => setHighlightedEntryId(null)}
-                  onCreateFolder={handleCreateFolder}
-                  onDeleteFolder={handleDeleteFolder}
-                  onUpdateEntry={handleUpdateEntry}
-                  onUpdateEntryStatus={handleUpdateEntryStatus}
-                  onDeleteEntry={handleDeleteEntry}
-                  onOpenTeach={() => {
-                    setStudioSubView('teach');
-                    setActiveArea('studio');
-                  }}
-                />
-              )}
-
-              {activeArea === 'ingest' && (
-                <CapturePanel
-                  brainUrl={brainUrl}
-                  backupBrainUrl={backupBrainUrl}
-                  brainModel={brainModel}
-                  accessToken={session.access_token}
-                  folders={folders}
-                  entries={entries}
-                  onCreateFolder={handleCreateFolder}
-                  onSaveEntry={handleSaveEntry}
-                  onSaveCapturedEntries={handleSaveCapturedEntries}
-                  onOpenKnowledge={() => setActiveArea('knowledge')}
-                />
-              )}
-
-              {activeArea === 'github' && (
-                <GitHubPanel
-                  connection={connection}
-                  repoFiles={repoFiles}
-                  suggestions={suggestions}
-                  auditRuns={auditRuns}
-                  latestAuditReport={latestAuditReport}
-                  activeSubTab={githubSubTab}
-                  onChangeSubTab={setGithubSubTab}
-                  phase2SchemaMissing={phase2SchemaMissing}
-                  phase3SchemaMissing={phase3SchemaMissing}
-                  phase4SchemaMissing={phase4SchemaMissing}
-                  isSyncingRepo={isSyncingRepo}
-                  syncProgressText={syncProgressText}
-                  isAuditingSelf={isAuditingSelf}
-                  auditProgressText={auditProgressText}
-                  selectedFilePath={selectedRepoPath}
-                  onSelectFilePath={setSelectedRepoPath}
-                  onVerifyTables={() => void loadWorkspaceData(session)}
-                  onConnectRepo={handleConnectGitHubRepo}
-                  onResyncRepo={handleResyncGitHubRepo}
-                  onDisconnectRepo={handleDisconnectGitHubRepo}
-                  onSaveFileToTeach={(file) => {
-                    const snippet =
-                      file.content.length > 1500
-                        ? `${file.content.slice(0, 1500)}\n// ...`
-                        : file.content;
-                    setTeachPrefill({
-                      key: Date.now(),
-                      title: `Repo note: ${file.path}`,
-                      content: `From ${connection?.owner || ''}/${connection?.repo || ''} (${file.path}):\n\n${snippet}`,
-                      tags: 'github, source',
-                    });
-                    setStudioSubView('teach');
-                    setActiveArea('studio');
-                  }}
-                  onSaveLessonToTeach={(title, content, tags) => {
-                    setTeachPrefill({
-                      key: Date.now(),
-                      title,
-                      content,
-                      tags,
-                    });
-                    setStudioSubView('teach');
-                    setActiveArea('studio');
-                  }}
-                  onGenerateFromFile={handleGenerateFromFile}
-                  onGenerateNewFile={handleGenerateNewFile}
-                  onUpdateProposedContent={handleUpdateProposedContent}
-                  onReviewSuggestion={handleReviewSuggestion}
-                  onDeleteSuggestion={handleDeleteSuggestion}
-                  onRunSelfAudit={async (repoInput) => {
-                    await handleRunSelfAudit(repoInput);
-                  }}
-                  onStageAuditFinding={handleStageAuditFinding}
-                />
-              )}
-
-              {activeArea === 'training' && (
-                <TrainingPanel
-                  entries={entries}
-                  folders={folders}
-                  repoFiles={repoFiles}
-                  repoLabel={connection ? `${connection.owner}/${connection.repo}` : null}
-                  messagesCountBytes={messagesCountBytes}
-                  computeStatus={computeStatus}
-                  brainUrl={brainUrl}
-                  backupBrainUrl={backupBrainUrl}
-                  brainModel={brainModel}
-                  accessToken={session.access_token}
-                  trainingSamples={trainingSamples}
-                  onChangeTrainingSamples={setTrainingSamples}
-                  scratchSkills={scratchSkills}
-                  onChangeScratchSkills={setScratchSkills}
-                  onUpdateScratchSkill={(id, patch) =>
-                    setScratchSkills(updateScratchSkill(id, patch))
-                  }
-                  onDeleteScratchSkill={(id) => setScratchSkills(deleteScratchSkill(id))}
-                  evalCases={evalCases}
-                  onChangeEvalCases={setEvalCases}
-                  evalRuns={evalRuns}
-                  onAddEvalRun={(run) => {
-                    setEvalRuns((prev) => [run, ...prev.slice(0, 29)]);
-                    pushLearningEvent(
-                      'eval_passed',
-                      `Eval Suite: ${run.passRate}% (${run.passedCases}/${run.totalCases})`,
-                      `${run.engineMode} · ${run.avgLatencyMs} ms avg`,
-                      'eval',
-                    );
-                  }}
-                  onApplyMemoryOptimize={handleApplyMemoryOptimize}
-                  onStageCodeOptimize={handleStageCodeOptimize}
-                  onCloudAsk={
-                    (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token
-                      ? async (prompt) => {
-                          const res = await askAiBrainChat({
-                            brainUrl,
-                            backupBrainUrl,
-                            accessToken: session.access_token,
-                            model: brainModel,
-                            prompt,
-                            entries,
-                            folders,
-                            repoFiles,
-                            history: [],
-                          });
-                          return {replyText: res.replyText, citedEntryIds: res.citedEntryIds};
-                        }
-                      : undefined
-                  }
-                  arenaInitialPrompt={arenaInitialPrompt}
-                  onConsumeArenaPrompt={() => setArenaInitialPrompt('')}
-                />
-              )}
-
-              {activeArea === 'export' && (
-                <ExportStudioPanel
-                  modelCard={modelCard}
-                  onUpdateModelCard={setModelCard}
-                  entries={entries}
-                  folders={folders}
-                  skills={scratchSkills}
-                  trainingSamples={trainingSamples}
-                  latestEval={evalRuns[0] || null}
-                />
-              )}
-
-              {activeArea === 'settings' && (
-                <SettingsPanel
-                  userEmail={session.user.email || 'Signed-in user'}
-                  metrics={metrics}
-                  routeStatus={routeStatus}
-                  theme={theme}
-                  accentColor={accentColor}
-                  onSelectAppearance={handleSelectAppearance}
-                  schemaMissing={schemaMissing}
-                  phase2SchemaMissing={phase2SchemaMissing}
-                  phase3SchemaMissing={phase3SchemaMissing}
-                  phase4SchemaMissing={phase4SchemaMissing}
-                  phase5SchemaMissing={phase5SchemaMissing}
-                  phase6SchemaMissing={phase6SchemaMissing}
-                  offlineQueueCount={offlineQueueCount}
-                  offlineQueueItems={offlineQueueItems}
-                  onFlushOfflineQueue={() => void flushOfflineQueue()}
-                  onForceOverwriteOfflineWrite={(queueId) => {
-                    const updated = markOfflineWriteForceOverwrite(queueId);
-                    setOfflineQueueItems(updated);
-                    void flushOfflineQueue();
-                  }}
-                  onDiscardOfflineWrite={(queueId) => {
-                    const updated = removeOfflineWriteById(queueId);
-                    setOfflineQueueItems(updated);
-                  }}
-                  brainUrl={brainUrl}
-                  backupBrainUrl={backupBrainUrl}
-                  brainModel={brainModel}
-                  autoLearnFromChat={autoLearnFromChat}
-                  preferBuiltInFirst={preferBuiltInFirst}
-                  accessToken={session.access_token}
-                  connection={connection}
-                  onSaveBrainConfig={handleSaveBrainConfig}
-                  onSignOut={handleSignOut}
-                />
-              )}
-            </Suspense>
           </div>
-        </main>
-      </div>
+        </div>
+      )}
 
-      <StatusFooter
+      {/* Primary Zero-Scroll 100dvh Workspace */}
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {settingsOpen ? (
+          <>
+            <div className="flex h-11 shrink-0 items-center justify-between border-b border-line bg-inset px-3 sm:px-6">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md px-2 text-xs font-medium text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Back to {workspaceMode === 'train' ? 'Train & Chat' : workspaceMode === 'memory' ? 'Memory & Data' : 'Eval & Export'}</span>
+              </button>
+              <span className="font-mono text-[11px] text-ink-subtle">
+                Settings &amp; Diagnostics
+              </span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+              <div className="mx-auto max-w-5xl">
+                <Suspense fallback={<PanelLoadingSkeleton />}>
+                  <SettingsPanel
+                    userEmail={session.user.email || 'Signed-in user'}
+                    metrics={metrics}
+                    routeStatus={routeStatus}
+                    theme={theme}
+                    accentColor={accentColor}
+                    onSelectAppearance={handleSelectAppearance}
+                    schemaMissing={schemaMissing}
+                    phase2SchemaMissing={phase2SchemaMissing}
+                    phase3SchemaMissing={phase3SchemaMissing}
+                    phase4SchemaMissing={phase4SchemaMissing}
+                    phase5SchemaMissing={phase5SchemaMissing}
+                    phase6SchemaMissing={phase6SchemaMissing}
+                    offlineQueueCount={offlineQueueCount}
+                    offlineQueueItems={offlineQueueItems}
+                    onFlushOfflineQueue={() => void flushOfflineQueue()}
+                    onForceOverwriteOfflineWrite={(queueId) => {
+                      const updated = markOfflineWriteForceOverwrite(queueId);
+                      setOfflineQueueItems(updated);
+                      void flushOfflineQueue();
+                    }}
+                    onDiscardOfflineWrite={(queueId) => {
+                      const updated = removeOfflineWriteById(queueId);
+                      setOfflineQueueItems(updated);
+                    }}
+                    brainUrl={brainUrl}
+                    backupBrainUrl={backupBrainUrl}
+                    brainModel={brainModel}
+                    autoLearnFromChat={autoLearnFromChat}
+                    preferBuiltInFirst={preferBuiltInFirst}
+                    accessToken={session.access_token}
+                    connection={connection}
+                    onSaveBrainConfig={handleSaveBrainConfig}
+                    onSignOut={handleSignOut}
+                  />
+                </Suspense>
+              </div>
+            </div>
+          </>
+        ) : workspaceMode === 'train' ? (
+          studioSubView === 'teach' ? (
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+              <div className="mx-auto max-w-4xl space-y-4">
+                <button
+                  type="button"
+                  onClick={() => setStudioSubView('console')}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-elevated hover:text-ink"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  <span>Back to Stream</span>
+                </button>
+                <TeachPanel
+                  key={teachPrefill.key}
+                  folders={folders}
+                  entries={entries}
+                  brainUrl={brainUrl}
+                  backupBrainUrl={backupBrainUrl}
+                  brainModel={brainModel}
+                  accessToken={session.access_token}
+                  initialTitle={teachPrefill.title}
+                  initialContent={teachPrefill.content}
+                  initialTags={teachPrefill.tags}
+                  saveFeedback={saveFeedback}
+                  onRetrySave={
+                    retrySaveFnRef.current ? () => void retrySaveFnRef.current?.() : undefined
+                  }
+                  onSaveEntry={handleSaveEntry}
+                  onCreateFolder={handleCreateFolder}
+                  onOpenKnowledge={() => navigateToArea('knowledge')}
+                />
+              </div>
+            </div>
+          ) : (
+            <ChatWorkspace
+              messages={messages}
+              entries={entries}
+              folders={folders}
+              repoFiles={repoFiles}
+              growth={knowledgeGrowth}
+              connection={connection}
+              routeStatus={routeStatus}
+              preferBuiltInFirst={preferBuiltInFirst}
+              onTogglePreferBuiltIn={(next) => void handleTogglePreferBuiltIn(next)}
+              brainModel={brainModel}
+              isLoading={isLoadingData}
+              isSending={isSendingChat}
+              escalatingMsgId={escalatingMsgId}
+              distillingMsgId={distillingMsgId}
+              activeTab={studioTab}
+              onChangeTab={setStudioTab}
+              activeAssassinBrief={activeAssassinBrief}
+              onApproveAssassinBrief={handleApproveAssassinBrief}
+              onRejectAssassinBrief={handleRejectAssassinBrief}
+              composerPrefill={composerPrefill}
+              onConsumeComposerPrefill={() => setComposerPrefill('')}
+              onSendMessage={handleSendChatMessage}
+              onEscalateMessageToCloud={handleEscalateMessageToCloud}
+              onDistillMessageWithTeacher={handleDistillMessageWithTeacher}
+              onTeachScratchFix={handleTeachScratchFix}
+              onSendToArena={(promptText) => {
+                setArenaInitialPrompt(promptText);
+                navigateToArea('training');
+              }}
+              onClearChat={handleClearChat}
+              onInspectEntry={(entryId) => {
+                setHighlightedEntryId(entryId);
+                navigateToArea('knowledge');
+              }}
+              onInspectRepoFile={(repoPath) => {
+                setSelectedRepoPath(repoPath);
+                setGithubSubTab('files');
+                navigateToArea('github');
+              }}
+              onSaveTextToTeach={(suggestedTitle, content) => {
+                setTeachPrefill({
+                  key: Date.now(),
+                  title: suggestedTitle,
+                  content,
+                  tags: '',
+                });
+                setStudioSubView('teach');
+              }}
+              onQuickSaveMessage={handleQuickSaveChatMessage}
+              onReinforceEntries={handleReinforceEntries}
+              onOpenIngest={() => navigateToArea('ingest')}
+              onOpenTeach={() => setStudioSubView('teach')}
+              onOpenSuggestions={() => {
+                setGithubSubTab('suggestions');
+                navigateToArea('github');
+              }}
+              onOpenSettings={() => navigateToArea('settings')}
+              showOnboarding={!onboardingDismissed}
+              onOpenKnowledge={() => navigateToArea('knowledge')}
+              onDismissOnboarding={() => {
+                setOnboardingDismissed(true);
+                try {
+                  window.localStorage.setItem('mantis_onboarding_dismissed_v1', 'true');
+                } catch {
+                  // ignore
+                }
+              }}
+            />
+          )
+        ) : workspaceMode === 'memory' ? (
+          <>
+            <nav
+              aria-label="Memory and data views"
+              className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto border-b border-line bg-inset px-3 sm:px-6"
+            >
+              {(
+                [
+                  {id: 'knowledge', label: `Memories · ${entries.length}`},
+                  {id: 'capture', label: 'Capture'},
+                  {
+                    id: 'repo',
+                    label:
+                      pendingSuggestionsCount > 0
+                        ? `Code & Diffs · ${pendingSuggestionsCount}`
+                        : 'Code & Diffs',
+                  },
+                ] as const
+              ).map((tab) => {
+                const active = memorySubView === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setMemorySubView(tab.id)}
+                    className={`inline-flex min-h-[36px] shrink-0 items-center whitespace-nowrap rounded-md px-3 text-xs font-medium tabular-nums transition-colors ${
+                      active
+                        ? 'bg-elevated text-ink'
+                        : 'text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+              <div className="mx-auto max-w-[1440px]">
+                <Suspense fallback={<PanelLoadingSkeleton />}>
+                  {memorySubView === 'knowledge' && (
+                    <KnowledgeBrowser
+                      folders={folders}
+                      entries={entries}
+                      isLoading={isLoadingData}
+                      highlightedEntryId={highlightedEntryId}
+                      initialFolderId={selectedKnowledgeFolderId}
+                      saveFeedback={saveFeedback}
+                      onClearHighlight={() => setHighlightedEntryId(null)}
+                      onCreateFolder={handleCreateFolder}
+                      onDeleteFolder={handleDeleteFolder}
+                      onUpdateEntry={handleUpdateEntry}
+                      onUpdateEntryStatus={handleUpdateEntryStatus}
+                      onDeleteEntry={handleDeleteEntry}
+                      onOpenTeach={() => {
+                        setStudioSubView('teach');
+                        navigateToArea('studio');
+                      }}
+                    />
+                  )}
+
+                  {memorySubView === 'capture' && (
+                    <CapturePanel
+                      brainUrl={brainUrl}
+                      backupBrainUrl={backupBrainUrl}
+                      brainModel={brainModel}
+                      accessToken={session.access_token}
+                      folders={folders}
+                      entries={entries}
+                      onCreateFolder={handleCreateFolder}
+                      onSaveEntry={handleSaveEntry}
+                      onSaveCapturedEntries={handleSaveCapturedEntries}
+                      onOpenKnowledge={() => navigateToArea('knowledge')}
+                    />
+                  )}
+
+                  {memorySubView === 'repo' && (
+                    <GitHubPanel
+                      connection={connection}
+                      repoFiles={repoFiles}
+                      suggestions={suggestions}
+                      auditRuns={auditRuns}
+                      latestAuditReport={latestAuditReport}
+                      activeSubTab={githubSubTab}
+                      onChangeSubTab={setGithubSubTab}
+                      phase2SchemaMissing={phase2SchemaMissing}
+                      phase3SchemaMissing={phase3SchemaMissing}
+                      phase4SchemaMissing={phase4SchemaMissing}
+                      isSyncingRepo={isSyncingRepo}
+                      syncProgressText={syncProgressText}
+                      isAuditingSelf={isAuditingSelf}
+                      auditProgressText={auditProgressText}
+                      selectedFilePath={selectedRepoPath}
+                      onSelectFilePath={setSelectedRepoPath}
+                      onVerifyTables={() => void loadWorkspaceData(session)}
+                      onConnectRepo={handleConnectGitHubRepo}
+                      onResyncRepo={handleResyncGitHubRepo}
+                      onDisconnectRepo={handleDisconnectGitHubRepo}
+                      onSaveFileToTeach={(file) => {
+                        const snippet =
+                          file.content.length > 1500
+                            ? `${file.content.slice(0, 1500)}\n// ...`
+                            : file.content;
+                        setTeachPrefill({
+                          key: Date.now(),
+                          title: `Repo note: ${file.path}`,
+                          content: `From ${connection?.owner || ''}/${connection?.repo || ''} (${file.path}):\n\n${snippet}`,
+                          tags: 'github, source',
+                        });
+                        setStudioSubView('teach');
+                        navigateToArea('studio');
+                      }}
+                      onSaveLessonToTeach={(title, content, tags) => {
+                        setTeachPrefill({
+                          key: Date.now(),
+                          title,
+                          content,
+                          tags,
+                        });
+                        setStudioSubView('teach');
+                        navigateToArea('studio');
+                      }}
+                      onGenerateFromFile={handleGenerateFromFile}
+                      onGenerateNewFile={handleGenerateNewFile}
+                      onUpdateProposedContent={handleUpdateProposedContent}
+                      onReviewSuggestion={handleReviewSuggestion}
+                      onDeleteSuggestion={handleDeleteSuggestion}
+                      onRunSelfAudit={async (repoInput) => {
+                        await handleRunSelfAudit(repoInput);
+                      }}
+                      onStageAuditFinding={handleStageAuditFinding}
+                    />
+                  )}
+                </Suspense>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <nav
+              aria-label="Evaluation and export views"
+              className="flex h-11 shrink-0 items-center gap-2 overflow-x-auto border-b border-line bg-inset px-3 sm:px-6"
+            >
+              {(
+                [
+                  {id: 'training', label: 'Training & Evals'},
+                  {id: 'export', label: 'Model Export'},
+                ] as const
+              ).map((tab) => {
+                const active = evalSubView === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setEvalSubView(tab.id)}
+                    className={`inline-flex min-h-[36px] shrink-0 items-center whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors ${
+                      active
+                        ? 'bg-elevated text-ink'
+                        : 'text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6">
+              <div className="mx-auto max-w-[1440px]">
+                <Suspense fallback={<PanelLoadingSkeleton />}>
+                  {evalSubView === 'training' && (
+                    <TrainingPanel
+                      entries={entries}
+                      folders={folders}
+                      repoFiles={repoFiles}
+                      repoLabel={connection ? `${connection.owner}/${connection.repo}` : null}
+                      messagesCountBytes={messagesCountBytes}
+                      computeStatus={computeStatus}
+                      brainUrl={brainUrl}
+                      backupBrainUrl={backupBrainUrl}
+                      brainModel={brainModel}
+                      accessToken={session.access_token}
+                      trainingSamples={trainingSamples}
+                      onChangeTrainingSamples={setTrainingSamples}
+                      scratchSkills={scratchSkills}
+                      onChangeScratchSkills={setScratchSkills}
+                      onUpdateScratchSkill={(id, patch) =>
+                        setScratchSkills(updateScratchSkill(id, patch))
+                      }
+                      onDeleteScratchSkill={(id) => setScratchSkills(deleteScratchSkill(id))}
+                      evalCases={evalCases}
+                      onChangeEvalCases={setEvalCases}
+                      evalRuns={evalRuns}
+                      onAddEvalRun={(run) => {
+                        setEvalRuns((prev) => [run, ...prev.slice(0, 29)]);
+                        pushLearningEvent(
+                          'eval_passed',
+                          `Eval Suite: ${run.passRate}% (${run.passedCases}/${run.totalCases})`,
+                          `${run.engineMode} · ${run.avgLatencyMs} ms avg`,
+                          'eval',
+                        );
+                      }}
+                      onApplyMemoryOptimize={handleApplyMemoryOptimize}
+                      onStageCodeOptimize={handleStageCodeOptimize}
+                      onCloudAsk={
+                        (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token
+                          ? async (prompt) => {
+                              const res = await askAiBrainChat({
+                                brainUrl,
+                                backupBrainUrl,
+                                accessToken: session.access_token,
+                                model: brainModel,
+                                prompt,
+                                entries,
+                                folders,
+                                repoFiles,
+                                history: [],
+                              });
+                              return {replyText: res.replyText, citedEntryIds: res.citedEntryIds};
+                            }
+                          : undefined
+                      }
+                      arenaInitialPrompt={arenaInitialPrompt}
+                      onConsumeArenaPrompt={() => setArenaInitialPrompt('')}
+                    />
+                  )}
+
+                  {evalSubView === 'export' && (
+                    <ExportStudioPanel
+                      modelCard={modelCard}
+                      onUpdateModelCard={setModelCard}
+                      entries={entries}
+                      folders={folders}
+                      skills={scratchSkills}
+                      trainingSamples={trainingSamples}
+                      latestEval={evalRuns[0] || null}
+                    />
+                  )}
+                </Suspense>
+              </div>
+            </div>
+          </>
+        )}
+      </main>
+
+      <InspectorDrawer
+        isOpen={inspectorOpen}
+        onClose={() => setInspectorOpen(false)}
         routeStatus={routeStatus}
         computeStatus={computeStatus}
-        connection={connection}
-        pendingOfflineCount={offlineQueueCount}
-        knowledgeCount={entries.length}
-        skillsCount={scratchSkills.length}
         modelName={modelCard.modelName}
-        onOpenSettings={() => setActiveArea('settings')}
-        onOpenTraining={() => setActiveArea('training')}
+        entries={entries}
+        folders={folders}
+        growth={knowledgeGrowth}
+        skillsCount={scratchSkills.length}
+        connection={connection}
+        repoFiles={repoFiles}
+        learningEvents={learningEvents}
+        pendingOfflineCount={offlineQueueCount}
+        isOnline={isOnline}
+        isSyncing={isLoadingData}
+        theme={theme}
+        onCycleTheme={() => void handleSelectAppearance(getNextThemeMode(theme), accentColor)}
+        onSync={() => {
+          void flushOfflineQueue();
+          void loadWorkspaceData(session);
+        }}
+        onOpenSettings={() => navigateToArea('settings')}
+        onOpenTeach={() => {
+          setStudioSubView('teach');
+          navigateToArea('studio');
+        }}
+        onSelectFolder={(folderId) => {
+          setSelectedKnowledgeFolderId(folderId);
+          navigateToArea('knowledge');
+        }}
+        onQueryConcept={(label) => {
+          setStudioSubView('console');
+          setStudioTab('stream');
+          navigateToArea('studio');
+          setComposerPrefill(`/search ${label}`);
+        }}
+        onInspectRepoFile={(repoPath) => {
+          setSelectedRepoPath(repoPath);
+          setGithubSubTab('files');
+          navigateToArea('github');
+        }}
       />
 
       <CommandPalette
@@ -3615,40 +3495,36 @@ export default function App() {
         entries={entries}
         folders={folders}
         repoFiles={repoFiles}
-        onNavigateArea={(area) => {
-          setActiveArea(area);
-          setMobileDrawer('none');
-        }}
+        onNavigateArea={navigateToArea}
         onOpenGraph={() => {
-          setActiveArea('studio');
+          navigateToArea('studio');
           setStudioSubView('console');
           setStudioTab('graph');
         }}
         onPrefillExecute={() => {
-          setActiveArea('studio');
+          navigateToArea('studio');
           setStudioSubView('console');
           setStudioTab('stream');
           setComposerPrefill('/execute ');
         }}
         onOpenTeach={() => {
           setStudioSubView('teach');
-          setActiveArea('studio');
+          navigateToArea('studio');
         }}
         onSync={() => {
           void flushOfflineQueue();
           void loadWorkspaceData(session);
         }}
         onSelectTheme={(nextTheme) => void handleSelectAppearance(nextTheme, accentColor)}
-        onToggleLeftPane={handleToggleLeftPane}
-        onToggleRightPane={handleToggleRightPane}
+        onToggleInspector={() => setInspectorOpen((prev) => !prev)}
         onInspectKnowledge={(entry) => {
           setHighlightedEntryId(entry.id);
-          setActiveArea('knowledge');
+          navigateToArea('knowledge');
         }}
         onInspectRepoFile={(filePath) => {
           setSelectedRepoPath(filePath);
           setGithubSubTab('files');
-          setActiveArea('github');
+          navigateToArea('github');
         }}
       />
 
@@ -3657,7 +3533,7 @@ export default function App() {
         <div
           role="status"
           aria-live="polite"
-          className={`mantis-slide-up fixed right-4 bottom-20 z-40 flex items-center gap-2.5 rounded-md border px-3.5 py-2 text-xs font-medium shadow-lg md:bottom-9 ${
+          className={`mantis-slide-up fixed right-4 bottom-28 z-40 flex items-center gap-2.5 rounded-md border px-3.5 py-2 text-xs font-medium shadow-lg sm:bottom-6 ${
             saveFeedback.state === 'failed'
               ? 'border-danger-border bg-surface/95 text-danger'
               : saveFeedback.state === 'queued'

@@ -234,3 +234,20 @@ Hosting: **GitHub Pages** • Persistence: **Supabase (Publishable Key + Auth + 
   2. `VITE_BASE_PATH=./ npm run build`, `compile_applet`, and `npm run lint` pass with zero errors.
   3. Manual daily-driver verification: resize browser to `~800×1280` (Galaxy Tab A9+ portrait) and `~1366×768` (Chromebook), verify Knowledge folders strip + `100dvh` composer, edit a note offline to inspect **Settings → Offline Sync Queue**, and open **Export → Verify Export Bundle** before downloading **Standalone Chatroom App (.html)**.
 
+---
+
+## 6-Phase Anthropic Workbench & Real Neural Training Roadmap
+
+### Phase 1 out of 6 — Pro Workstation Redesign, Tablet Zero-Scroll Shell & Clutter Purge
+- **Status**: Completed & Build/Lint Verified
+- **Summary**:
+  - **Anthropic Workbench + Linear Monochrome Palette (`src/index.css`)**: Calibrated obsidian dark (`#090B0E`), dim (`#0D1016`), and paper light (`#FAFAFA`) theme tokens with crisp `1px` hairlines, `.mantis-drawer-in` slide animation, and zero visual clutter.
+  - **3-Mode Zero-Scroll `100dvh` Shell & Slide-Over Inspector (`src/types/mantis.ts`, `src/components/TopBar.tsx`, `src/components/InspectorDrawer.tsx`, `src/App.tsx`)**: Replaced the 7-icon `ActivityRail`, permanent dual sidebars, and bottom `StatusFooter` with a strict 3-zone `48px` `TopBar` (`Train & Chat` | `Memory & Data` | `Eval & Export`), slim `44px` mode sub-navigation, `Ctrl+I`/`Ctrl+B` slide-over `InspectorDrawer` (`Runtime & Storage`, `Folders`, `Active Concepts`, `Repo Quick Access`, `Recent Session Events`, `Settings`, `Sync`, `Theme`), and updated `CommandPalette` (`Ctrl+K`).
+  - **Streamlined Chat & Per-Turn Clutter Purge (`src/components/ChatWorkspace.tsx`, `src/components/AssassinBriefCard.tsx`, `src/components/OnboardingGuide.tsx`)**: Anchored a single scrollable stream (`flex-1 min-h-0`) above a pinned keyboard-safe composer, replaced the 7-button message header with `Operator`/`Mantis · HH:MM`, plain-text low-confidence notices, one contextual primary action, and a `···` overflow menu, unboxed inline citation links, and moved the starter checklist into the empty stream state.
+  - **Portrait Tablet Master-Detail Memory & Clean Terminology (`src/components/KnowledgeBrowser.tsx`, `src/components/TrainingPanel.tsx`)**: Added `< lg` list-to-reader pane switching (`← Back to Notes`) so tablet users read/edit notes immediately without scrolling past lists, and replaced prototype/game labels (`Smart-Assassin` → `Parallel Patch`, `DPO Arena` → `Preference Eval`).
+- **Queued Phases**: Phase 2 (Blank-Slate Real Neural Weights in Web Worker) · Phase 3 (Tiny Q4 WebGPU Local LLM Engine) · Phase 4 (Strict Blind Eval Gate, Critique & Synthetic Drills) · Phase 5 (Hybrid Student-Teacher Curriculum & Self-Audit) · Phase 6 (Portable Model Packaging & Export Parity).
+- **Verification**:
+  1. `npm run lint` (`tsc --noEmit`), `compile_applet`, and `VITE_BASE_PATH=./ npm run build` pass cleanly with zero errors.
+  2. Resize viewport to tablet portrait (`~800×1280`): verify the `88px` sticky top bar, zero-scroll `Train & Chat` stream with pinned composer, `Inspector` slide-over drawer (`Ctrl+I`), message `···` overflow menu, and `Memory & Data → Memories` `← Back to Notes` detail navigation.
+
+

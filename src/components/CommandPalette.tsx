@@ -7,7 +7,6 @@ import {
   FlaskConical,
   GitBranch,
   Palette,
-  PanelLeft,
   PanelRight,
   PlusCircle,
   Radio,
@@ -38,8 +37,7 @@ interface CommandPaletteProps {
   onOpenTeach: () => void;
   onSync: () => void;
   onSelectTheme: (theme: ThemeMode) => void;
-  onToggleLeftPane: () => void;
-  onToggleRightPane: () => void;
+  onToggleInspector: () => void;
   onInspectKnowledge: (entry: KnowledgeEntry) => void;
   onInspectRepoFile: (filePath: string) => void;
 }
@@ -65,8 +63,7 @@ export function CommandPalette({
   onOpenTeach,
   onSync,
   onSelectTheme,
-  onToggleLeftPane,
-  onToggleRightPane,
+  onToggleInspector,
   onInspectKnowledge,
   onInspectRepoFile,
 }: CommandPaletteProps) {
@@ -94,23 +91,23 @@ export function CommandPalette({
       {
         id: 'nav-studio',
         group: 'Navigate',
-        label: 'Go to Studio Workbench',
-        subtitle: 'Editorial AI stream & Smart-Assassin composer',
+        label: 'Train & Chat Workbench',
+        subtitle: 'Student stream, teacher distillation, and parallel patch composer',
         icon: Terminal,
         run: () => onNavigateArea('studio'),
       },
       {
         id: 'nav-graph',
         group: 'Navigate',
-        label: 'Open Live Concept Graph',
-        subtitle: 'Interactive force-directed memory & repo topology',
+        label: 'Concept Graph',
+        subtitle: 'Interactive memory folders and repository graph',
         icon: Compass,
         run: onOpenGraph,
       },
       {
         id: 'nav-knowledge',
         group: 'Navigate',
-        label: 'Go to Memory Explorer',
+        label: 'Memory & Data · Memories',
         subtitle: `${entries.length} stored entries`,
         icon: BookOpen,
         run: () => onNavigateArea('knowledge'),
@@ -118,104 +115,96 @@ export function CommandPalette({
       {
         id: 'nav-ingest',
         group: 'Navigate',
-        label: 'Go to Capture Studio',
-        subtitle: 'Links, AI multi-voice mic, OCR',
+        label: 'Memory & Data · Capture',
+        subtitle: 'URL extraction, multi-speaker mic, OCR',
         icon: Radio,
         run: () => onNavigateArea('ingest'),
       },
       {
         id: 'nav-github',
         group: 'Navigate',
-        label: 'Go to Code & Diffs',
-        subtitle: `${repoFiles.length} synced repo files`,
+        label: 'Memory & Data · Code & Diffs',
+        subtitle: `${repoFiles.length} synced repository files`,
         icon: GitBranch,
         run: () => onNavigateArea('github'),
       },
       {
         id: 'nav-training',
         group: 'Navigate',
-        label: 'Go to Training, DPO Arena & Evals',
-        subtitle: 'A/B preference ranking, eval suite, RAM self-optimizer',
+        label: 'Eval & Export · Training & Evals',
+        subtitle: 'Preference pairs, curriculum drills, eval suite, RAM profiler',
         icon: FlaskConical,
         run: () => onNavigateArea('training'),
       },
       {
         id: 'nav-export',
         group: 'Navigate',
-        label: 'Go to Model Export Studio',
-        subtitle: 'Name AI, verify bundle, download Chatroom App & Colab QLoRA',
+        label: 'Eval & Export · Model Export',
+        subtitle: 'Model naming, bundle verifier, HTML runtime & Colab QLoRA',
         icon: Download,
         run: () => onNavigateArea('export'),
       },
       {
         id: 'nav-settings',
         group: 'Navigate',
-        label: 'Go to Settings & Compute Diagnostics',
-        subtitle: 'Routes, themes, Phase 6 SQL',
+        label: 'Settings & Diagnostics',
+        subtitle: 'Routes, themes, SQL migrations, offline sync queue',
         icon: Settings,
         run: () => onNavigateArea('settings'),
       },
       {
         id: 'act-execute',
-        group: 'Quick Actions',
-        label: 'Smart-Assassin Parallel Prep (/execute)',
-        subtitle: 'Pre-fill parallel memory + repo diff brief',
+        group: 'Actions',
+        label: 'Parallel Patch Prep (/execute)',
+        subtitle: 'Prefill parallel memory + repo diff brief',
         icon: Crosshair,
         run: onPrefillExecute,
       },
       {
         id: 'act-teach',
-        group: 'Quick Actions',
+        group: 'Actions',
         label: 'Teach New Knowledge Rule',
-        subtitle: 'Add fact, pattern, or Auto-Folder note (Alt+N)',
+        subtitle: 'Add rule, pattern, or Auto-Folder entry (Alt+N)',
         icon: PlusCircle,
         run: onOpenTeach,
       },
       {
         id: 'act-sync',
-        group: 'Quick Actions',
-        label: 'Sync Cloud Memory Now',
-        subtitle: 'Pull latest Supabase folders & flush offline queue',
+        group: 'Actions',
+        label: 'Sync Cloud Memory',
+        subtitle: 'Pull latest Supabase entries and flush offline queue',
         icon: RefreshCw,
         run: onSync,
       },
       {
-        id: 'act-left-pane',
-        group: 'Workspace Layout',
-        label: 'Toggle Left Explorer Pane',
-        subtitle: 'Show or hide Knowledge & Repo explorer (Ctrl+B)',
-        icon: PanelLeft,
-        run: onToggleLeftPane,
-      },
-      {
-        id: 'act-right-pane',
-        group: 'Workspace Layout',
-        label: 'Toggle Right Monitor Pane',
-        subtitle: 'Show or hide Live Monitor & trust breakdown (Ctrl+Shift+M)',
+        id: 'act-inspector',
+        group: 'Workspace',
+        label: 'Toggle Workspace Inspector Drawer',
+        subtitle: 'Runtime stats, folders, concepts, session feed (Ctrl+I)',
         icon: PanelRight,
-        run: onToggleRightPane,
+        run: onToggleInspector,
       },
       {
         id: 'theme-dark',
         group: 'Theme',
-        label: 'Switch Theme to Dark',
-        subtitle: 'Default deep slate IDE contrast',
+        label: 'Switch Theme to Obsidian Dark',
+        subtitle: 'Anthropic Workbench monochrome contrast',
         icon: Palette,
         run: () => onSelectTheme('dark'),
       },
       {
         id: 'theme-dim',
         group: 'Theme',
-        label: 'Switch Theme to Dim',
-        subtitle: 'Low-glare night charcoal',
+        label: 'Switch Theme to Dim Slate',
+        subtitle: 'Soft low-glare neutral charcoal',
         icon: Palette,
         run: () => onSelectTheme('dim'),
       },
       {
         id: 'theme-light',
         group: 'Theme',
-        label: 'Switch Theme to Light',
-        subtitle: 'Crisp daylight surface',
+        label: 'Switch Theme to Paper Light',
+        subtitle: 'High-legibility daylight canvas',
         icon: Palette,
         run: () => onSelectTheme('light'),
       },
@@ -223,7 +212,7 @@ export function CommandPalette({
 
     const knowledgeItems: PaletteCommandItem[] = entries.slice(0, 60).map((entry) => ({
       id: `know-${entry.id}`,
-      group: 'Knowledge',
+      group: 'Memories',
       label: entry.title,
       subtitle: `${folderMap.get(entry.folder_id || '') || 'General'} · ${entry.status || 'reviewed'}`,
       icon: BookOpen,
@@ -234,7 +223,7 @@ export function CommandPalette({
       id: `repo-${file.id}`,
       group: 'Repo Files',
       label: file.path,
-      subtitle: 'Explain & review in Chat',
+      subtitle: 'Inspect file in Code & Diffs',
       icon: FileCode2,
       run: () => onInspectRepoFile(file.path),
     }));
@@ -261,8 +250,7 @@ export function CommandPalette({
     onPrefillExecute,
     onOpenTeach,
     onSync,
-    onToggleLeftPane,
-    onToggleRightPane,
+    onToggleInspector,
     onSelectTheme,
     onInspectKnowledge,
     onInspectRepoFile,
@@ -316,7 +304,7 @@ export function CommandPalette({
               setQuery(e.target.value);
               setActiveIndex(0);
             }}
-            placeholder="Search commands, knowledge notes, repo files, or themes…"
+            placeholder="Search commands, memories, repo files, or themes…"
             className="min-h-[40px] flex-1 bg-transparent text-sm text-ink placeholder:text-ink-subtle focus:outline-none"
           />
           <button
@@ -332,7 +320,7 @@ export function CommandPalette({
         <div className="max-h-[60vh] overflow-y-auto p-2">
           {items.length === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-ink-muted">
-              No matching commands, knowledge notes, or repo files.
+              No matching commands, memories, or repository files.
             </div>
           ) : (
             <div className="space-y-0.5">
@@ -349,7 +337,9 @@ export function CommandPalette({
                       onClose();
                     }}
                     className={`flex min-h-[44px] w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left transition-colors ${
-                      isSelected ? 'bg-accent-soft text-ink' : 'text-ink-muted hover:bg-elevated/60 hover:text-ink'
+                      isSelected
+                        ? 'bg-accent-soft text-ink'
+                        : 'text-ink-muted hover:bg-elevated/60 hover:text-ink'
                     }`}
                   >
                     <div className="flex min-w-0 items-center gap-2.5">
@@ -381,7 +371,7 @@ export function CommandPalette({
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-inset px-4 py-2 font-mono text-[11px] text-ink-subtle">
           <span>↑↓ navigate · Enter select · Esc close</span>
-          <span>Ctrl+K · Ctrl+B · Ctrl+Shift+M · Alt+N</span>
+          <span>Ctrl+K · Ctrl+I · Alt+N</span>
         </div>
       </div>
     </div>
