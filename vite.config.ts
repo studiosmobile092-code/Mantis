@@ -34,6 +34,9 @@ export default defineConfig(({command}) => {
       rolldownOptions: {
         output: {
           manualChunks(id) {
+            if (id.includes('node_modules/@huggingface/transformers') || id.includes('node_modules/onnxruntime-web')) {
+              return 'vendor-transformers';
+            }
             if (id.includes('node_modules/@supabase')) return 'vendor-supabase';
             if (id.includes('node_modules/lucide-react')) return 'vendor-icons';
             if (id.includes('node_modules/tesseract.js')) return 'vendor-ocr';

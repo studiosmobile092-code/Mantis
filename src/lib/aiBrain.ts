@@ -19,13 +19,74 @@ import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from './supabase';
 export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
 export const DEFAULT_BACKUP_EDGE_URL = `${SUPABASE_URL.replace(/\/+$/, '')}/functions/v1/mantis-brain`;
 
-export const BRAIN_MODEL_OPTIONS: Array<{id: string; label: string}> = [
-  {id: 'Qwen/Qwen2.5-Coder-32B-Instruct', label: 'Qwen 2.5 Coder 32B (Best for Code)'},
-  {id: 'Qwen/Qwen3-Coder-30B-A3B-Instruct', label: 'Qwen 3 Coder 30B (Fast Coding Model)'},
-  {id: 'meta-llama/Llama-3.3-70B-Instruct', label: 'Llama 3.3 70B Instruct (All-Rounder)'},
-  {id: 'Qwen/Qwen2.5-72B-Instruct', label: 'Qwen 2.5 72B Instruct (Deep Reasoning)'},
-  {id: 'deepseek-ai/DeepSeek-V3.2', label: 'DeepSeek V3.2 (Reasoning + Code)'},
+export const BRAIN_MODEL_OPTIONS: Array<{
+  id: string;
+  label: string;
+  tier: 'smart-frontier' | 'balanced' | 'ollama-local';
+}> = [
+  {
+    id: 'deepseek-ai/DeepSeek-R1',
+    label: 'DeepSeek R1 · Frontier Reasoning Teacher',
+    tier: 'smart-frontier',
+  },
+  {
+    id: 'deepseek-ai/DeepSeek-V3.2',
+    label: 'DeepSeek V3.2 · High-Capacity Code & Reasoning',
+    tier: 'smart-frontier',
+  },
+  {
+    id: 'Qwen/Qwen2.5-Coder-32B-Instruct',
+    label: 'Qwen 2.5 Coder 32B · Coding Flagship',
+    tier: 'smart-frontier',
+  },
+  {
+    id: 'Qwen/Qwen2.5-72B-Instruct',
+    label: 'Qwen 2.5 72B Instruct · Deep Architecture',
+    tier: 'smart-frontier',
+  },
+  {
+    id: 'meta-llama/Llama-3.3-70B-Instruct',
+    label: 'Llama 3.3 70B Instruct · High-Capacity Generalist',
+    tier: 'smart-frontier',
+  },
+  {
+    id: 'Qwen/Qwen3-Coder-30B-A3B-Instruct',
+    label: 'Qwen 3 Coder 30B-A3B · Fast Coding MoE',
+    tier: 'balanced',
+  },
+  {
+    id: 'meta-llama/Llama-3.1-8B-Instruct',
+    label: 'Llama 3.1 8B Instruct · Fast Lightweight Teacher',
+    tier: 'balanced',
+  },
+  {
+    id: 'ollama/qwen2.5-coder:14b',
+    label: 'Ollama Local · qwen2.5-coder:14b (High-Cap Workstation)',
+    tier: 'ollama-local',
+  },
+  {
+    id: 'ollama/deepseek-r1:14b',
+    label: 'Ollama Local · deepseek-r1:14b (High-Cap Reasoning)',
+    tier: 'ollama-local',
+  },
+  {
+    id: 'ollama/qwen2.5-coder:7b',
+    label: 'Ollama Local · qwen2.5-coder:7b (8-12 GB Laptop)',
+    tier: 'ollama-local',
+  },
 ];
+
+export function extractOllamaTagFromModel(preferredModel?: string): string | null {
+  const clean = String(preferredModel || '').trim();
+  if (!clean) return null;
+  if (clean.toLowerCase().startsWith('ollama/')) {
+    return clean.slice(7).trim() || null;
+  }
+  if (clean.includes(':') && !clean.includes('/')) {
+    return clean;
+  }
+  return null;
+}
 
 const STORAGE_BRAIN_URL_KEY = 'mantis_brain_worker_url';
 const STORAGE_BACKUP_URL_KEY = 'mantis_brain_backup_url';
@@ -383,7 +444,11 @@ export async function testBrainConnection(
       if (installed.length === 0) {
         throw new Error('Connected to Ollama, but no models are installed yet (run e.g. `ollama pull qwen2.5-coder:7b`).');
       }
-      const chosenOllamaModel = installed[0];
+      const requestedOllama = extractOllamaTagFromModel(preferredModel);
+      const chosenOllamaModel =
+        requestedOllama && installed.includes(requestedOllama)
+          ? requestedOllama
+          : requestedOllama || installed[0];
       let pingRes: Response;
       try {
         pingRes = await fetchWithTimeout(
@@ -774,18 +839,26 @@ async function callDirectOllamaChat(
   ollamaUrl: string,
   messages: Array<{role: string; content: string}>,
   maxTokens = 1400,
+  preferredModel?: string,
 ): Promise<{text: string; model: string}> {
   assertNotStudentIsolated('ollama/chat');
-  let chosenModel = 'qwen2.5-coder:7b';
+  const explicitTag = extractOllamaTagFromModel(preferredModel);
+  let chosenModel = explicitTag || 'qwen2.5-coder:7b';
   try {
     const tagsRes = await fetchWithTimeout(`${ollamaUrl}/api/tags`, {}, 3000);
     if (tagsRes.ok) {
       const tagsData = (await tagsRes.json()) as {models?: Array<{name?: string}>};
-      const first = (tagsData.models || []).find((m) => Boolean(m.name))?.name;
-      if (first) chosenModel = first;
+      const installed = (tagsData.models || [])
+        .map((m) => m.name)
+        .filter((n): n is string => Boolean(n));
+      if (explicitTag && installed.includes(explicitTag)) {
+        chosenModel = explicitTag;
+      } else if (!explicitTag && installed.length > 0) {
+        chosenModel = installed[0];
+      }
     }
   } catch {
-    // use fallback model name
+    // use explicitTag or fallback model name
   }
 
   const res = await fetchWithTimeout(
@@ -810,7 +883,7 @@ async function callDirectOllamaChat(
   if (!res.ok || !text) {
     const errMsg =
       typeof payload.error === 'string' ? payload.error : payload.error?.message || `HTTP ${res.status}`;
-    throw new Error(`Ollama inference error: ${errMsg}`);
+    throw new Error(`Ollama inference error (${chosenModel}): ${errMsg}`);
   }
   return {text, model: `ollama/${chosenModel}`};
 }
@@ -866,14 +939,19 @@ export async function askAiBrainChat(params: {
       .filter(Boolean)
       .join('\n\n');
 
-    const direct = await callDirectOllamaChat(cleanUrl, [
-      {role: 'system', content: systemPrompt},
-      ...params.history.slice(-6).map((m) => ({
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.content,
-      })),
-      {role: 'user', content: params.prompt},
-    ]);
+    const direct = await callDirectOllamaChat(
+      cleanUrl,
+      [
+        {role: 'system', content: systemPrompt},
+        ...params.history.slice(-6).map((m) => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+        })),
+        {role: 'user', content: params.prompt},
+      ],
+      1400,
+      params.model,
+    );
     const {cleanReply, learnedItems} = parseLearnDirectives(direct.text);
     return {
       replyText: cleanReply,
@@ -946,14 +1024,19 @@ export async function distillWithAiBrain(params: {
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
 
   if (getLocalBrainMode() === 'ollama') {
-    const direct = await callDirectOllamaChat(cleanUrl, [
-      {
-        role: 'system',
-        content:
-          'Convert the raw text into JSON: {"summary":"...","entries":[{"title":"...","folder":"Patterns","tags":["..."],"content":"..."}]}.',
-      },
-      {role: 'user', content: `Source: ${params.sourceTitle}\n\n${params.text.slice(0, 12000)}`},
-    ]);
+    const direct = await callDirectOllamaChat(
+      cleanUrl,
+      [
+        {
+          role: 'system',
+          content:
+            'Convert the raw text into JSON: {"summary":"...","entries":[{"title":"...","folder":"Patterns","tags":["..."],"content":"..."}]}.',
+        },
+        {role: 'user', content: `Source: ${params.sourceTitle}\n\n${params.text.slice(0, 12000)}`},
+      ],
+      1400,
+      params.model,
+    );
     const parsed = parseJsonObjectFromAiReply<{
       summary?: string;
       entries?: DistilledKnowledgeItem[];
@@ -1031,6 +1114,7 @@ export async function suggestCodeWithAiBrain(params: {
         },
       ],
       2200,
+      params.model,
     );
     const parsed = parseJsonObjectFromAiReply<{
       title?: string;

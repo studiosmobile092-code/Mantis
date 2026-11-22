@@ -12,9 +12,11 @@ import {
   Layers,
   Play,
   PlusCircle,
+  RefreshCw,
   RotateCcw,
   Scale,
   Sparkles,
+  Square,
   Trash2,
   Wrench,
   XCircle,
@@ -24,6 +26,13 @@ import {
   generateCurriculumDrillWithTeacher,
   runArenaDuelWithBrain,
 } from '../lib/aiBrain';
+import {
+  LOCAL_LLM_CATALOG,
+  buildAdapterConditionedMessages,
+  evaluateModelMemorySafety,
+  generateWithLocalLlmStream,
+  getLocalLlmSpec,
+} from '../lib/localLlmEngine';
 import {computeKnowledgeGrowth} from '../lib/mantisBrain';
 import {buildTrainingExamplesFromWorkspace} from '../lib/neuralStudent';
 import {
@@ -40,14 +49,21 @@ import {
   executeEvalSuite,
   updateTrainingSample,
 } from '../lib/trainingStore';
-import {profileWorkspaceResourcesAsync, runHybridRetrievalAsync} from '../lib/workerClient';
+import {
+  inferNeuralStudentAsync,
+  profileWorkspaceResourcesAsync,
+  runHybridRetrievalAsync,
+} from '../lib/workerClient';
 import type {
   ComputeEngineStatus,
   CurriculumDrillPacket,
   EvalCase,
   EvalRunSummary,
+  HardwareTelemetry,
   KnowledgeEntry,
   KnowledgeFolder,
+  LocalLlmAdapterSpec,
+  LocalLlmEngineState,
   NeuralCheckpoint,
   RepoFile,
   ResourceProfile,
@@ -97,9 +113,26 @@ interface TrainingPanelProps {
   onCloudAsk?: (prompt: string) => Promise<{replyText: string; citedEntryIds: string[]}>;
   arenaInitialPrompt?: string;
   onConsumeArenaPrompt?: () => void;
+  localLlmState: LocalLlmEngineState;
+  hardwareTelemetry: HardwareTelemetry | null;
+  onRefreshHardware: () => Promise<void>;
+  onSelectLocalLlm: (modelId: string) => void;
+  onLoadLocalLlm: (modelId?: string, allowHighRamOverride?: boolean) => Promise<void>;
+  onUnloadLocalLlm: () => Promise<void>;
+  onCancelLocalLlmLoad: () => void;
+  onClearLocalLlmCache: () => Promise<boolean>;
+  onStopLocalLlmGeneration: () => void;
+  openLocalModelsSignal?: number;
 }
 
-type TrainingTab = 'neural' | 'arena' | 'curriculum' | 'dataset' | 'evals' | 'profiler';
+type TrainingTab =
+  | 'neural'
+  | 'models'
+  | 'arena'
+  | 'curriculum'
+  | 'dataset'
+  | 'evals'
+  | 'profiler';
 
 function formatKb(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return 'N/A';
@@ -140,12 +173,38 @@ export function TrainingPanel({
   onCloudAsk,
   arenaInitialPrompt,
   onConsumeArenaPrompt,
+  localLlmState,
+  hardwareTelemetry,
+  onRefreshHardware,
+  onSelectLocalLlm,
+  onLoadLocalLlm,
+  onUnloadLocalLlm,
+  onCancelLocalLlmLoad,
+  onClearLocalLlmCache,
+  onStopLocalLlmGeneration,
+  openLocalModelsSignal,
 }: TrainingPanelProps) {
   const [activeTab, setActiveTab] = useState<TrainingTab>('neural');
   const [batchEpochs, setBatchEpochs] = useState<number>(20);
   const [neuralFeedback, setNeuralFeedback] = useState<string | null>(null);
   const [cloneNameInput, setCloneNameInput] = useState<string>('');
   const [confirmResetZero, setConfirmResetZero] = useState<boolean>(false);
+
+  // Local Q4 Models & Adapter Bridge State
+  const [allowHighRamOverride, setAllowHighRamOverride] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState<string | null>(null);
+  const [benchPrompt, setBenchPrompt] = useState(
+    'Summarize what this student checkpoint has been taught so far.',
+  );
+  const [benchOutput, setBenchOutput] = useState('');
+  const [benchTelemetry, setBenchTelemetry] = useState<{
+    tps: number | null;
+    tokens: number;
+    durationMs: number;
+    device: string;
+  } | null>(null);
+  const [benchError, setBenchError] = useState<string | null>(null);
+  const [adapterPreview, setAdapterPreview] = useState<LocalLlmAdapterSpec | null>(null);
 
   // DPO Arena State
   const [arenaPrompt, setArenaPrompt] = useState('');
@@ -206,6 +265,52 @@ export function TrainingPanel({
       onConsumeArenaPrompt?.();
     }
   }, [arenaInitialPrompt, onConsumeArenaPrompt]);
+
+  useEffect(() => {
+    if (openLocalModelsSignal && openLocalModelsSignal > 0) {
+      setActiveTab('models');
+    }
+  }, [openLocalModelsSignal]);
+
+  useEffect(() => {
+    if (activeTab !== 'models') return;
+    let cancelled = false;
+    void Promise.all([
+      runHybridRetrievalAsync({
+        query: benchPrompt || 'architecture rules',
+        entries,
+        folders,
+        limit: 4,
+      }),
+      inferNeuralStudentAsync(benchPrompt || 'hi', activeCheckpoint),
+    ])
+      .then(([hybridMatches, neuralPrediction]) => {
+        if (cancelled) return;
+        const built = buildAdapterConditionedMessages({
+          prompt: benchPrompt || 'hi',
+          checkpoint: activeCheckpoint,
+          hybridMatches,
+          folders,
+          skills: scratchSkills,
+          neuralPrediction,
+          modelId: localLlmState.loadedModelId || localLlmState.selectedModelId,
+        });
+        setAdapterPreview(built.adapterSpec);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    benchPrompt,
+    activeCheckpoint,
+    entries,
+    folders,
+    scratchSkills,
+    localLlmState.loadedModelId,
+    localLlmState.selectedModelId,
+  ]);
 
   async function refreshProfile() {
     setIsProfiling(true);
@@ -435,6 +540,13 @@ export function TrainingPanel({
         {(
           [
             {id: 'neural', label: `Neural Core (${activeCheckpoint.metrics.stepCount})`, icon: Layers},
+            {
+              id: 'models',
+              label: localLlmState.loadedModelId
+                ? `Local Q4 (${getLocalLlmSpec(localLlmState.loadedModelId).shortLabel})`
+                : 'Local Q4 Models',
+              icon: Cpu,
+            },
             {id: 'arena', label: 'Preference Eval', icon: Scale},
             {id: 'curriculum', label: `Curriculum (${curriculumCoverage.gaps.length})`, icon: GraduationCap},
             {id: 'dataset', label: `Dataset & Skills (${trainingSamples.length + scratchSkills.length})`, icon: FlaskConical},
@@ -704,6 +816,445 @@ export function TrainingPanel({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 0.5: DUAL-TIER LOCAL Q4 MODELS & 8 GB MEMORY GUARD */}
+      {activeTab === 'models' && (
+        <div className="space-y-5">
+          {/* Hardware Telemetry & Guard Summary */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Device Memory</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {hardwareTelemetry?.deviceMemoryGb
+                  ? `~${hardwareTelemetry.deviceMemoryGb} GB RAM`
+                  : 'Browser Unreported'}
+              </div>
+              <div className="font-mono text-[10px] tabular-nums text-ink-subtle">
+                {hardwareTelemetry?.hardwareConcurrency || 4} logical CPU threads
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">JS Heap Headroom</div>
+              <div className="mt-1 font-mono text-base font-semibold tabular-nums text-ink">
+                {hardwareTelemetry?.jsHeapUsedMb !== null && hardwareTelemetry?.jsHeapUsedMb !== undefined
+                  ? `${hardwareTelemetry.jsHeapUsedMb} MB`
+                  : 'Chrome Desktop Only'}
+              </div>
+              <div className="font-mono text-[10px] tabular-nums text-ink-subtle">
+                {hardwareTelemetry?.jsHeapLimitMb
+                  ? `Limit ${hardwareTelemetry.jsHeapLimitMb} MB`
+                  : '8 GB guard active'}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Execution Backend</div>
+              <div className="mt-1 font-mono text-base font-semibold text-accent-text">
+                {hardwareTelemetry?.webGpuSupported
+                  ? hardwareTelemetry.webGpuF16Supported
+                    ? 'WebGPU (q4f16)'
+                    : 'WebGPU (q4)'
+                  : 'CPU WASM (q4)'}
+              </div>
+              <div className="truncate font-mono text-[10px] text-ink-subtle">
+                {hardwareTelemetry?.adapterLabel || computeStatus.adapterLabel}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-line bg-surface p-3.5">
+              <div className="text-[11px] text-ink-muted">Active Q4 Weights</div>
+              <div className="mt-1 font-mono text-base font-semibold text-ink">
+                {localLlmState.loadedModelId
+                  ? getLocalLlmSpec(localLlmState.loadedModelId).shortLabel
+                  : '0 MB Loaded'}
+              </div>
+              <div className="truncate font-mono text-[10px] text-ink-subtle">
+                {localLlmState.lastTokensPerSec
+                  ? `Last speed: ${localLlmState.lastTokensPerSec.toFixed(1)} tok/s`
+                  : localLlmState.loadStatusText}
+              </div>
+            </div>
+          </div>
+
+          {/* Runtime Controls & Download Progress */}
+          <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <h2 className="text-xs font-semibold text-ink">
+                  On-Device Runtime &amp; Browser Cache Controls
+                </h2>
+                <p className="font-mono text-[11px] text-ink-muted">
+                  {localLlmState.loadStatusText}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void onRefreshHardware()}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink hover:border-line-strong"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 text-ink-muted" />
+                  <span>Probe Hardware</span>
+                </button>
+                {(localLlmState.status === 'downloading' ||
+                  localLlmState.status === 'loading' ||
+                  localLlmState.status === 'probing') && (
+                  <button
+                    type="button"
+                    onClick={onCancelLocalLlmLoad}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-danger-border bg-danger-soft px-3 text-xs font-semibold text-danger hover:bg-surface"
+                  >
+                    <Square className="h-3 w-3" />
+                    <span>Cancel Load</span>
+                  </button>
+                )}
+                {localLlmState.loadedModelId && (
+                  <button
+                    type="button"
+                    onClick={() => void onUnloadLocalLlm()}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink hover:border-line-strong"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-ink-muted" />
+                    <span>Unload RAM</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const ok = await onClearLocalLlmCache();
+                    setCacheNotice(
+                      ok
+                        ? 'Cleared downloaded ONNX model weights from browser Cache Storage.'
+                        : 'No cached weights found or browser Cache Storage unavailable.',
+                    );
+                  }}
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-line bg-inset px-3 text-xs font-medium text-ink-muted hover:text-ink"
+                >
+                  <span>Clear Cache</span>
+                </button>
+              </div>
+            </div>
+
+            {(localLlmState.status === 'downloading' ||
+              localLlmState.status === 'loading' ||
+              localLlmState.status === 'probing') && (
+              <div className="space-y-1.5">
+                <div className="h-1.5 w-full overflow-hidden rounded bg-inset">
+                  <div
+                    className="h-full bg-accent transition-all duration-200"
+                    style={{width: `${Math.max(4, localLlmState.loadProgressPercent)}%`}}
+                  />
+                </div>
+                <div className="flex justify-between font-mono text-[10px] tabular-nums text-ink-subtle">
+                  <span>{localLlmState.loadStatusText}</span>
+                  <span>{localLlmState.loadProgressPercent}%</span>
+                </div>
+              </div>
+            )}
+
+            {localLlmState.error && (
+              <div
+                role="alert"
+                className="rounded border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger"
+              >
+                {localLlmState.error}
+              </div>
+            )}
+
+            {cacheNotice && (
+              <div className="rounded border border-accent-border bg-accent-soft px-3 py-2 text-xs text-accent-text">
+                {cacheNotice}
+              </div>
+            )}
+          </div>
+
+          {/* Tier 1 & Tier 2 Model Catalog */}
+          {(
+            [
+              {
+                tier: 'lightweight-8gb' as const,
+                title: 'Tier 1 — Lightweight 8 GB Tablet & Chromebook Safe (Q4 WebGPU / WASM)',
+                subtitle:
+                  'Fits comfortably inside 8 GB Android tablet & Chromebook browser limits (~280 MB–820 MB). Auto-unloads cleanly before high-RAM screen OCR.',
+              },
+              {
+                tier: 'complex-high-ram' as const,
+                title: 'Tier 2 — Complex & High-Capacity Local Models (1B–3B Q4)',
+                subtitle:
+                  'Smarter code & multi-step reasoning models for 12–16 GB+ machines. Guarded on <=8 GB devices to prevent Chrome out-of-memory reloads.',
+              },
+            ] as const
+          ).map((group) => {
+            const items = LOCAL_LLM_CATALOG.filter((m) => m.tier === group.tier);
+            return (
+              <div key={group.tier} className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-xs font-semibold tracking-wide text-ink uppercase">
+                      {group.title}
+                    </h2>
+                    <p className="text-[11px] text-ink-muted">{group.subtitle}</p>
+                  </div>
+
+                  {group.tier === 'complex-high-ram' && (
+                    <label className="inline-flex min-h-[38px] cursor-pointer items-center gap-2 rounded border border-line bg-surface px-3 text-[11px] text-ink-muted">
+                      <input
+                        type="checkbox"
+                        checked={allowHighRamOverride}
+                        onChange={(e) => setAllowHighRamOverride(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-emerald-500"
+                      />
+                      <span>Override 8 GB Memory Guard</span>
+                    </label>
+                  )}
+                </div>
+
+                <div className="divide-y divide-line overflow-hidden rounded-lg border border-line bg-surface">
+                  {items.map((spec) => {
+                    const safety = evaluateModelMemorySafety(
+                      spec,
+                      hardwareTelemetry,
+                      allowHighRamOverride,
+                    );
+                    const isSelected = localLlmState.selectedModelId === spec.id;
+                    const isLoaded = localLlmState.loadedModelId === spec.id;
+                    const isBusy =
+                      localLlmState.status === 'probing' ||
+                      localLlmState.status === 'downloading' ||
+                      localLlmState.status === 'loading';
+
+                    return (
+                      <div
+                        key={spec.id}
+                        className={`flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs ${
+                          isSelected ? 'bg-inset/70' : ''
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                            <span className="text-xs font-semibold text-ink">{spec.label}</span>
+                            <span className="text-ink-subtle">·</span>
+                            <span className="tabular-nums text-ink-muted">
+                              ~{spec.estimatedRamMb} MB RAM
+                            </span>
+                            <span className="text-ink-subtle">·</span>
+                            <span className="tabular-nums text-ink-subtle">
+                              {spec.contextWindow.toLocaleString()} ctx
+                            </span>
+                            <span className="text-ink-subtle">·</span>
+                            <span className="text-ink-subtle">
+                              Min {spec.minRecommendedRamGb} GB device
+                            </span>
+                          </div>
+                          <div className="text-xs text-ink-muted">{spec.capabilities}</div>
+                          <div
+                            className={`font-mono text-[11px] ${
+                              safety.severity === 'danger'
+                                ? 'text-danger'
+                                : safety.severity === 'caution'
+                                  ? 'text-warn'
+                                  : 'text-accent-text'
+                            }`}
+                          >
+                            {safety.reason}
+                          </div>
+                        </div>
+
+                        <div className="flex shrink-0 flex-wrap items-center gap-2">
+                          {!isSelected && (
+                            <button
+                              type="button"
+                              onClick={() => onSelectLocalLlm(spec.id)}
+                              className="min-h-[40px] rounded border border-line bg-inset px-3 text-xs font-medium text-ink-muted hover:text-ink"
+                            >
+                              Select Default
+                            </button>
+                          )}
+                          {isLoaded ? (
+                            <button
+                              type="button"
+                              onClick={() => void onUnloadLocalLlm()}
+                              className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-accent-border bg-accent-soft px-3.5 text-xs font-semibold text-accent-text hover:bg-accent hover:text-white"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              <span>Loaded · Unload</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={isBusy || !safety.allowed}
+                              onClick={() =>
+                                void onLoadLocalLlm(spec.id, allowHighRamOverride)
+                              }
+                              className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-3.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-45"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              <span>
+                                {!safety.allowed
+                                  ? 'Guarded'
+                                  : isSelected
+                                    ? 'Load Weights'
+                                    : 'Load & Activate'}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Student Neural Adapter Bridge + Live Streaming Benchmark */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex items-center justify-between border-b border-line pb-2">
+                <h2 className="text-xs font-semibold text-ink">
+                  Student Neural Adapter Conditioning
+                </h2>
+                <span className="font-mono text-[11px] tabular-nums text-accent-text">
+                  {adapterPreview?.checkpointId || activeCheckpoint.id}
+                </span>
+              </div>
+              <p className="text-xs text-ink-muted">
+                Every Local Q4 prompt is grounded by your trained Student checkpoint, Hybrid BM25 + Int8 vectors, and Colab LoRA export target.
+              </p>
+              {adapterPreview && (
+                <div className="space-y-1.5 font-mono text-[11px] text-ink-muted">
+                  <div>
+                    Colab QLoRA Base:{' '}
+                    <span className="text-ink">{adapterPreview.colabBaseModel}</span>
+                  </div>
+                  <div className="tabular-nums">
+                    Trained Steps: <span className="text-ink">{adapterPreview.stepCount}</span> · BPE
+                    Vocab: <span className="text-ink">{adapterPreview.vocabSize}</span> · Memories
+                    Injected: <span className="text-ink">{adapterPreview.trustedRulesUsed}</span> ·
+                    Targets: <span className="text-ink">{adapterPreview.neuralTargetsInjected}</span>
+                  </div>
+                  <div>
+                    Bias Subwords:{' '}
+                    <span className="text-accent-text">
+                      {adapterPreview.biasTerms.length > 0
+                        ? adapterPreview.biasTerms.join(', ')
+                        : 'None yet (step-train ckpt first)'}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-line bg-surface p-4">
+              <div className="flex items-center justify-between border-b border-line pb-2">
+                <h2 className="text-xs font-semibold text-ink">
+                  On-Device Streaming Benchmark (0 Cloud Calls)
+                </h2>
+                {benchTelemetry && (
+                  <span className="font-mono text-[11px] tabular-nums text-accent-text">
+                    {benchTelemetry.tps !== null
+                      ? `${benchTelemetry.tps.toFixed(1)} tok/s`
+                      : ''}{' '}
+                    · {benchTelemetry.tokens} tok · {benchTelemetry.device.toUpperCase()}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <input
+                  type="text"
+                  value={benchPrompt}
+                  onChange={(e) => setBenchPrompt(e.target.value)}
+                  placeholder="Enter a test prompt for the loaded Local Q4 model…"
+                  className="min-h-[40px] min-w-[200px] flex-1 rounded border border-line-strong bg-inset px-3 text-xs text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+                />
+                {localLlmState.isGenerating ? (
+                  <button
+                    type="button"
+                    onClick={onStopLocalLlmGeneration}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-danger-border bg-danger-soft px-3.5 text-xs font-semibold text-danger"
+                  >
+                    <Square className="h-3 w-3" />
+                    <span>Stop</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!localLlmState.loadedModelId || !benchPrompt.trim()}
+                    onClick={async () => {
+                      setBenchError(null);
+                      setBenchOutput('');
+                      setBenchTelemetry(null);
+                      try {
+                        const [hybridMatches, neuralPrediction] = await Promise.all([
+                          runHybridRetrievalAsync({
+                            query: benchPrompt,
+                            entries,
+                            folders,
+                            limit: 4,
+                          }),
+                          inferNeuralStudentAsync(benchPrompt, activeCheckpoint),
+                        ]);
+                        const adapted = buildAdapterConditionedMessages({
+                          prompt: benchPrompt,
+                          checkpoint: activeCheckpoint,
+                          hybridMatches,
+                          folders,
+                          skills: scratchSkills,
+                          neuralPrediction,
+                          modelId: localLlmState.loadedModelId || localLlmState.selectedModelId,
+                        });
+                        setAdapterPreview(adapted.adapterSpec);
+                        const res = await generateWithLocalLlmStream({
+                          messages: adapted.messages,
+                          onToken: (text, tps, count) => {
+                            setBenchOutput(text);
+                            setBenchTelemetry({
+                              tps,
+                              tokens: count,
+                              durationMs: 0,
+                              device: localLlmState.activeDevice || 'wasm',
+                            });
+                          },
+                        });
+                        setBenchOutput(res.text);
+                        setBenchTelemetry({
+                          tps: res.tokensPerSec,
+                          tokens: res.generatedTokens,
+                          durationMs: res.durationMs,
+                          device: res.device,
+                        });
+                      } catch (err) {
+                        setBenchError(
+                          err instanceof Error ? err.message : 'Local streaming benchmark failed.',
+                        );
+                      }
+                    }}
+                    className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-3.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-45"
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    <span>Stream Benchmark</span>
+                  </button>
+                )}
+              </div>
+
+              {benchError && (
+                <div className="rounded border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger">
+                  {benchError}
+                </div>
+              )}
+
+              <div className="min-h-[88px] max-h-48 overflow-y-auto whitespace-pre-wrap rounded border border-line bg-inset p-3 font-mono text-[11px] leading-relaxed text-ink">
+                {benchOutput ||
+                  (localLlmState.loadedModelId
+                    ? 'Click Stream Benchmark to measure real WebGPU/WASM tokens/sec with Student Adapter conditioning.'
+                    : 'Load a Local Q4 model above to benchmark offline streaming speed.')}
+              </div>
             </div>
           </div>
         </div>

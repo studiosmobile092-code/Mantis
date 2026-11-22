@@ -558,13 +558,85 @@ export interface NeuralPredictResult {
   isolationVerified: boolean;
 }
 
+export type LocalLlmTier = 'neural-core' | 'lightweight-8gb' | 'complex-high-ram';
+
+export type LocalLlmRuntimeStatus =
+  | 'idle'
+  | 'probing'
+  | 'downloading'
+  | 'loading'
+  | 'ready'
+  | 'unloading'
+  | 'error';
+
+export interface LocalLlmModelSpec {
+  id: string;
+  label: string;
+  shortLabel: string;
+  hfRepoId: string;
+  tier: LocalLlmTier;
+  dtype: 'q4' | 'q4f16' | 'q8' | 'fp16';
+  estimatedRamMb: number;
+  minRecommendedRamGb: number;
+  contextWindow: number;
+  capabilities: string;
+  safety8Gb: 'safe' | 'caution' | 'high-ram';
+  colabBaseModel: string;
+}
+
+export interface HardwareTelemetry {
+  deviceMemoryGb: number | null;
+  hardwareConcurrency: number;
+  jsHeapUsedMb: number | null;
+  jsHeapLimitMb: number | null;
+  webGpuSupported: boolean;
+  webGpuF16Supported: boolean;
+  maxBufferSizeMb: number | null;
+  adapterLabel: string;
+  is8GbSafeHeadroom: boolean;
+  recommendedTier: LocalLlmTier;
+}
+
+export interface LocalLlmEngineState {
+  status: LocalLlmRuntimeStatus;
+  selectedModelId: string;
+  loadedModelId: string | null;
+  activeDevice: 'webgpu' | 'wasm' | null;
+  activeDtype: string | null;
+  loadProgressPercent: number;
+  loadStatusText: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  lastTokensPerSec: number | null;
+  lastGeneratedTokens: number;
+  error: string | null;
+  memoryPressureWarning: string | null;
+  isGenerating: boolean;
+}
+
+export interface LocalLlmAdapterSpec {
+  checkpointId: string;
+  profileName: string;
+  modelId: string;
+  colabBaseModel: string;
+  stepCount: number;
+  vocabSize: number;
+  trustedRulesUsed: number;
+  neuralTargetsInjected: number;
+  systemPrompt: string;
+  biasTerms: string[];
+}
+
 export interface ChatTurnTelemetry {
   checkpointId: string;
   confidence: number;
   lossEstimate: number | null;
   topTokens: NeuralTokenActivation[];
-  isolationMode: 'student-strict' | 'cloud-assist' | 'teacher-distill' | 'tool';
+  isolationMode: 'student-strict' | 'local-llm' | 'cloud-assist' | 'teacher-distill' | 'tool';
   cloudCalls: number;
   isUntrained: boolean;
+  tokensPerSec?: number | null;
+  localModelId?: string | null;
 }
+
 

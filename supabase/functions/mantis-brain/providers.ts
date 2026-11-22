@@ -2,9 +2,11 @@ import {fetchWithAbortTimeout, getEnv} from './helpers.ts';
 
 export const HF_FALLBACK_MODELS = [
   'Qwen/Qwen2.5-Coder-32B-Instruct',
-  'Qwen/Qwen3-Coder-30B-A3B-Instruct',
-  'meta-llama/Llama-3.3-70B-Instruct',
+  'deepseek-ai/DeepSeek-R1',
+  'deepseek-ai/DeepSeek-V3.2',
   'Qwen/Qwen2.5-72B-Instruct',
+  'meta-llama/Llama-3.3-70B-Instruct',
+  'Qwen/Qwen3-Coder-30B-A3B-Instruct',
   'meta-llama/Llama-3.1-8B-Instruct',
 ];
 
@@ -12,6 +14,7 @@ const GROQ_FALLBACK_MODELS = ['llama-3.3-70b-versatile', 'qwen-qwq-32b', 'llama-
 
 const OPENROUTER_FALLBACK_MODELS = [
   'openrouter/free',
+  'deepseek/deepseek-r1:free',
   'qwen/qwen3-coder:free',
   'meta-llama/llama-3.3-70b-instruct:free',
   'google/gemma-3-27b-it:free',
@@ -41,7 +44,13 @@ async function tryOllama(
   const baseUrl = getEnv('OLLAMA_URL').replace(/\/+$/, '');
   if (!baseUrl) return null;
 
-  const model = getEnv('OLLAMA_MODEL') || preferredModel || 'qwen2.5-coder:7b';
+  const rawPref = String(preferredModel || '').trim();
+  const explicitOllama = rawPref.toLowerCase().startsWith('ollama/')
+    ? rawPref.slice(7).trim()
+    : rawPref.includes(':') && !rawPref.includes('/')
+      ? rawPref
+      : '';
+  const model = explicitOllama || getEnv('OLLAMA_MODEL') || rawPref || 'qwen2.5-coder:7b';
   const headers: Record<string, string> = {'Content-Type': 'application/json'};
   const ollamaKey = getEnv('OLLAMA_API_KEY');
   if (ollamaKey) headers.Authorization = `Bearer ${ollamaKey}`;

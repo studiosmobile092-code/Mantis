@@ -6,6 +6,7 @@ interface TopBarProps {
   onSelectMode: (mode: WorkspaceMode) => void;
   modelName: string;
   checkpointId?: string;
+  localModelShortLabel?: string | null;
   isOnline: boolean;
   pendingOfflineCount: number;
   inspectorOpen: boolean;
@@ -24,6 +25,7 @@ export function TopBar({
   onSelectMode,
   modelName,
   checkpointId,
+  localModelShortLabel,
   isOnline,
   pendingOfflineCount,
   inspectorOpen,
@@ -48,9 +50,10 @@ export function TopBar({
           <span aria-hidden="true" className="text-ink-subtle">
             /
           </span>
-          <span className="truncate font-mono text-xs text-ink-muted">
+          <span className="truncate font-mono text-xs tabular-nums text-ink-muted">
             {modelName}
             {checkpointId ? ` · ${checkpointId}` : ''}
+            {localModelShortLabel ? ` · ${localModelShortLabel}` : ''}
           </span>
         </div>
 

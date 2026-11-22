@@ -73,6 +73,7 @@ interface CapturePanelProps {
     sourceType: string,
     meta?: {status?: KnowledgeStatus; sourceUrl?: string | null; extractedAt?: string | null},
   ) => Promise<number>;
+  onBeforeHeavyTask?: (taskLabel: string) => Promise<void>;
   onOpenKnowledge: () => void;
 }
 
@@ -242,6 +243,7 @@ export function CapturePanel({
   onCreateFolder,
   onSaveEntry,
   onSaveCapturedEntries,
+  onBeforeHeavyTask,
   onOpenKnowledge,
 }: CapturePanelProps) {
   const hasDisplayApi = supportsDisplayCapture();
@@ -796,6 +798,7 @@ export function CapturePanel({
     setReviewError(null);
 
     try {
+      await onBeforeHeavyTask?.('High-Res OCR Refinement');
       let mergedLines: string[] = [];
       let confTotal = 0;
       let firstPreview: string | null = reviewDraft.previewDataUrl || null;
@@ -884,6 +887,7 @@ export function CapturePanel({
     }
 
     try {
+      await onBeforeHeavyTask?.('Live Screen OCR');
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {frameRate: {ideal: 5, max: 10}},
         audio: false,
@@ -1087,6 +1091,7 @@ export function CapturePanel({
     setStatusMessage(`Running fast low-res OCR across ${list.length} image(s)...`);
 
     try {
+      await onBeforeHeavyTask?.('Screenshot OCR');
       let mergedLines: string[] = [];
       let confTotal = 0;
       let firstPreview: string | null = null;

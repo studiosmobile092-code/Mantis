@@ -27,9 +27,11 @@ const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_wCDq_uAfoddEBuNLYeLcmQ_
 
 const HF_FALLBACK_MODELS = [
   'Qwen/Qwen2.5-Coder-32B-Instruct',
-  'Qwen/Qwen3-Coder-30B-A3B-Instruct',
-  'meta-llama/Llama-3.3-70B-Instruct',
+  'deepseek-ai/DeepSeek-R1',
+  'deepseek-ai/DeepSeek-V3.2',
   'Qwen/Qwen2.5-72B-Instruct',
+  'meta-llama/Llama-3.3-70B-Instruct',
+  'Qwen/Qwen3-Coder-30B-A3B-Instruct',
   'meta-llama/Llama-3.1-8B-Instruct',
 ];
 
@@ -41,6 +43,7 @@ const GROQ_FALLBACK_MODELS = [
 
 const OPENROUTER_FALLBACK_MODELS = [
   'openrouter/free',
+  'deepseek/deepseek-r1:free',
   'qwen/qwen3-coder:free',
   'meta-llama/llama-3.3-70b-instruct:free',
   'google/gemma-3-27b-it:free',
@@ -262,7 +265,13 @@ async function tryOllama(env, messages, preferredModel, maxTokens, temperature) 
   const baseUrl = (env.OLLAMA_URL || '').trim().replace(/\/+$/, '');
   if (!baseUrl) return null;
 
-  const model = (env.OLLAMA_MODEL || preferredModel || 'qwen2.5-coder:7b').trim();
+  const rawPref = String(preferredModel || '').trim();
+  const explicitOllama = rawPref.toLowerCase().startsWith('ollama/')
+    ? rawPref.slice(7).trim()
+    : rawPref.includes(':') && !rawPref.includes('/')
+      ? rawPref
+      : '';
+  const model = (explicitOllama || env.OLLAMA_MODEL || rawPref || 'qwen2.5-coder:7b').trim();
   const headers = {'Content-Type': 'application/json'};
   if ((env.OLLAMA_API_KEY || '').trim()) {
     headers.Authorization = `Bearer ${env.OLLAMA_API_KEY.trim()}`;

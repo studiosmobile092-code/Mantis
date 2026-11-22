@@ -1,13 +1,17 @@
-import type {ComputeBackendKind} from '../types/mantis';
+import type {ComputeBackendKind, HardwareTelemetry, LocalLlmTier} from '../types/mantis';
 
 export interface WebGpuProbeResult {
   supported: boolean;
   backend: ComputeBackendKind;
   adapterLabel: string;
   isFallbackAdapter: boolean;
+  supportsF16: boolean;
+  maxBufferSizeMb: number | null;
 }
 
 interface GpuNavigatorLike {
+  deviceMemory?: number;
+  hardwareConcurrency?: number;
   gpu?: {
     requestAdapter: (opts?: {powerPreference?: 'low-power' | 'high-performance'}) => Promise<GPUAdapterLike | null>;
   };
@@ -19,6 +23,13 @@ interface GPUAdapterLike {
     architecture?: string;
     device?: string;
     description?: string;
+  };
+  features?: {
+    has?: (feature: string) => boolean;
+  };
+  limits?: {
+    maxBufferSize?: number;
+    maxStorageBufferBindingSize?: number;
   };
   isFallbackAdapter?: boolean;
   requestAdapterInfo?: () => Promise<{
@@ -100,18 +111,23 @@ export async function probeWebGpuHardware(): Promise<WebGpuProbeResult> {
       backend: typeof Worker !== 'undefined' ? 'worker-wasm' : 'main-thread',
       adapterLabel: typeof Worker !== 'undefined' ? 'Web Worker Compute' : 'CPU Main Thread',
       isFallbackAdapter: false,
+      supportsF16: false,
+      maxBufferSizeMb: null,
     };
     return cachedProbe;
   }
 
   try {
-    const adapter = await nav.gpu.requestAdapter({powerPreference: 'low-power'});
+    const adapter = await nav.gpu.requestAdapter({powerPreference: 'high-performance'})
+      .catch(() => null) || (await nav.gpu.requestAdapter({powerPreference: 'low-power'}));
     if (!adapter) {
       cachedProbe = {
         supported: false,
         backend: typeof Worker !== 'undefined' ? 'worker-wasm' : 'main-thread',
         adapterLabel: 'Worker Compute (No GPU Adapter)',
         isFallbackAdapter: false,
+        supportsF16: false,
+        maxBufferSizeMb: null,
       };
       return cachedProbe;
     }
@@ -137,12 +153,20 @@ export async function probeWebGpuHardware(): Promise<WebGpuProbeResult> {
     const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
     const isVulkanHost = /Android|CrOS|Linux/i.test(ua) && !adapter.isFallbackAdapter;
     const rawLabel = parts.length > 0 ? parts.join(' · ') : isVulkanHost ? 'Vulkan Dawn GPU' : 'WebGPU Adapter';
+    const supportsF16 = Boolean(adapter.features?.has?.('shader-f16'));
+    const maxBufBytes = adapter.limits?.maxBufferSize;
+    const maxBufferSizeMb =
+      typeof maxBufBytes === 'number' && Number.isFinite(maxBufBytes)
+        ? Math.round(maxBufBytes / (1024 * 1024))
+        : null;
 
     cachedProbe = {
       supported: true,
       backend: isVulkanHost ? 'webgpu-vulkan' : 'webgpu',
       adapterLabel: isVulkanHost ? `${rawLabel} (Vulkan WebGPU)` : `${rawLabel} (WebGPU)`,
       isFallbackAdapter: Boolean(adapter.isFallbackAdapter),
+      supportsF16,
+      maxBufferSizeMb,
     };
     return cachedProbe;
   } catch {
@@ -151,9 +175,65 @@ export async function probeWebGpuHardware(): Promise<WebGpuProbeResult> {
       backend: typeof Worker !== 'undefined' ? 'worker-wasm' : 'main-thread',
       adapterLabel: 'Worker Compute',
       isFallbackAdapter: false,
+      supportsF16: false,
+      maxBufferSizeMb: null,
     };
     return cachedProbe;
   }
+}
+
+export async function probeHardwareCapabilities(): Promise<HardwareTelemetry> {
+  const gpu = await probeWebGpuHardware();
+  const nav = typeof navigator !== 'undefined' ? (navigator as unknown as GpuNavigatorLike) : undefined;
+  const deviceMemoryGb =
+    typeof nav?.deviceMemory === 'number' && Number.isFinite(nav.deviceMemory)
+      ? nav.deviceMemory
+      : null;
+  const hardwareConcurrency =
+    typeof nav?.hardwareConcurrency === 'number' && Number.isFinite(nav.hardwareConcurrency)
+      ? nav.hardwareConcurrency
+      : 4;
+
+  const perfMem =
+    typeof performance !== 'undefined'
+      ? (performance as unknown as {
+          memory?: {usedJSHeapSize?: number; jsHeapSizeLimit?: number};
+        }).memory
+      : undefined;
+
+  const jsHeapUsedMb =
+    typeof perfMem?.usedJSHeapSize === 'number'
+      ? Math.round(perfMem.usedJSHeapSize / (1024 * 1024))
+      : null;
+  const jsHeapLimitMb =
+    typeof perfMem?.jsHeapSizeLimit === 'number'
+      ? Math.round(perfMem.jsHeapSizeLimit / (1024 * 1024))
+      : null;
+
+  const effectiveRamGb = deviceMemoryGb ?? 8;
+  const is8GbSafeHeadroom =
+    effectiveRamGb >= 6 &&
+    (jsHeapUsedMb === null || jsHeapLimitMb === null || jsHeapUsedMb < jsHeapLimitMb * 0.72);
+
+  let recommendedTier: LocalLlmTier = 'neural-core';
+  if (effectiveRamGb >= 12 && gpu.supported) {
+    recommendedTier = 'complex-high-ram';
+  } else if (effectiveRamGb >= 6) {
+    recommendedTier = 'lightweight-8gb';
+  }
+
+  return {
+    deviceMemoryGb,
+    hardwareConcurrency,
+    jsHeapUsedMb,
+    jsHeapLimitMb,
+    webGpuSupported: gpu.supported,
+    webGpuF16Supported: gpu.supportsF16,
+    maxBufferSizeMb: gpu.maxBufferSizeMb,
+    adapterLabel: gpu.adapterLabel,
+    is8GbSafeHeadroom,
+    recommendedTier,
+  };
 }
 
 async function getOrCreateGpuDevice(): Promise<GPUDeviceLike | null> {

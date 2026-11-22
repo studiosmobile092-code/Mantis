@@ -11,14 +11,17 @@ import {
   X,
 } from 'lucide-react';
 import {useEffect, useMemo, useState} from 'react';
+import {getLocalLlmSpec} from '../lib/localLlmEngine';
 import type {
   BrainRouteStatus,
   ComputeEngineStatus,
   GitHubConnection,
+  HardwareTelemetry,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeGrowthStats,
   LearningEvent,
+  LocalLlmEngineState,
   NeuralCheckpoint,
   RepoFile,
   ThemeMode,
@@ -30,6 +33,12 @@ interface InspectorDrawerProps {
   onClose: () => void;
   routeStatus: BrainRouteStatus;
   computeStatus: ComputeEngineStatus;
+  localLlmState: LocalLlmEngineState;
+  hardwareTelemetry: HardwareTelemetry | null;
+  onLoadLocalLlm: (modelId?: string, allowOverride?: boolean) => Promise<void>;
+  onUnloadLocalLlm: () => Promise<void>;
+  onCancelLocalLlmLoad: () => void;
+  onOpenLocalModels: () => void;
   modelName: string;
   activeCheckpoint: NeuralCheckpoint;
   checkpoints: NeuralCheckpoint[];
@@ -106,6 +115,12 @@ export function InspectorDrawer({
   onClose,
   routeStatus,
   computeStatus,
+  localLlmState,
+  hardwareTelemetry,
+  onLoadLocalLlm,
+  onUnloadLocalLlm,
+  onCancelLocalLlmLoad,
+  onOpenLocalModels,
   modelName,
   activeCheckpoint,
   checkpoints,
@@ -457,6 +472,148 @@ export function InspectorDrawer({
                 })}
               </div>
             )}
+          </section>
+
+          {/* Local Q4 / High-Capacity Runtime & 8 GB Hardware Telemetry */}
+          <section className="space-y-2.5 py-4">
+            {(() => {
+              const selectedSpec = getLocalLlmSpec(localLlmState.selectedModelId);
+              const isBusy =
+                localLlmState.status === 'downloading' ||
+                localLlmState.status === 'loading' ||
+                localLlmState.status === 'probing';
+              const isLoaded =
+                localLlmState.status === 'ready' && localLlmState.loadedModelId !== null;
+              return (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-xs font-semibold text-ink">Local Q4 LLM &amp; Hardware</h2>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenLocalModels();
+                      }}
+                      className="text-xs font-medium text-accent-text hover:underline"
+                    >
+                      Manage Models
+                    </button>
+                  </div>
+
+                  <dl className="space-y-1 font-mono text-xs tabular-nums">
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="text-ink-muted">Selected Q4</dt>
+                      <dd className="truncate text-ink">
+                        {selectedSpec.shortLabel} (~{selectedSpec.estimatedRamMb} MB)
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="text-ink-muted">Device RAM · GPU</dt>
+                      <dd className="text-ink">
+                        {hardwareTelemetry?.deviceMemoryGb
+                          ? `~${hardwareTelemetry.deviceMemoryGb} GB`
+                          : 'RAM N/A'}{' '}
+                        ·{' '}
+                        {hardwareTelemetry?.webGpuSupported
+                          ? hardwareTelemetry.webGpuF16Supported
+                            ? 'WebGPU f16'
+                            : 'WebGPU'
+                          : 'WASM'}
+                      </dd>
+                    </div>
+                    {hardwareTelemetry?.jsHeapUsedMb !== null &&
+                      hardwareTelemetry?.jsHeapUsedMb !== undefined && (
+                        <div className="flex items-center justify-between gap-2">
+                          <dt className="text-ink-muted">JS Heap</dt>
+                          <dd className="text-ink">
+                            {hardwareTelemetry.jsHeapUsedMb}
+                            {hardwareTelemetry.jsHeapLimitMb
+                              ? ` / ${hardwareTelemetry.jsHeapLimitMb} MB`
+                              : ' MB'}
+                          </dd>
+                        </div>
+                      )}
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="text-ink-muted">Runtime Status</dt>
+                      <dd className={isLoaded ? 'text-accent-text' : 'text-ink-muted'}>
+                        {isLoaded
+                          ? `Ready (${localLlmState.activeDevice?.toUpperCase()} · ${localLlmState.activeDtype})`
+                          : localLlmState.loadStatusText}
+                      </dd>
+                    </div>
+                    {localLlmState.lastTokensPerSec !== null && (
+                      <div className="flex items-center justify-between gap-2">
+                        <dt className="text-ink-muted">Speed</dt>
+                        <dd className="text-accent-text">
+                          {localLlmState.lastTokensPerSec.toFixed(1)} tok/s ({localLlmState.lastGeneratedTokens}t)
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+
+                  {isBusy && (
+                    <div className="space-y-1.5 rounded border border-line bg-inset p-2.5">
+                      <div className="flex items-center justify-between font-mono text-[11px] tabular-nums text-ink-muted">
+                        <span className="truncate">{localLlmState.loadStatusText}</span>
+                        <span>{localLlmState.loadProgressPercent}%</span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-elevated">
+                        <div
+                          className="h-full bg-accent transition-all"
+                          style={{width: `${localLlmState.loadProgressPercent}%`}}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {localLlmState.error && (
+                    <div className="rounded border border-danger-border bg-danger-soft px-2.5 py-2 font-mono text-[11px] text-danger">
+                      {localLlmState.error}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {isBusy ? (
+                      <button
+                        type="button"
+                        onClick={onCancelLocalLlmLoad}
+                        className="col-span-2 min-h-[40px] rounded-md border border-line-strong bg-inset px-3 text-xs font-medium text-ink hover:text-danger"
+                      >
+                        Cancel Download / Load
+                      </button>
+                    ) : isLoaded ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onOpenLocalModels();
+                          }}
+                          className="min-h-[40px] rounded-md border border-line bg-inset px-2.5 text-xs font-medium text-ink hover:border-line-strong"
+                        >
+                          Switch Tier
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onUnloadLocalLlm()}
+                          className="min-h-[40px] rounded-md border border-line bg-inset px-2.5 text-xs font-medium text-ink-muted hover:border-danger-border hover:text-danger"
+                        >
+                          Unload RAM
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void onLoadLocalLlm(localLlmState.selectedModelId, false)}
+                        className="col-span-2 min-h-[40px] rounded-md bg-accent px-3 text-xs font-semibold text-white hover:bg-accent-hover"
+                      >
+                        Load {selectedSpec.shortLabel}
+                      </button>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </section>
 
           {/* Knowledge Folders */}

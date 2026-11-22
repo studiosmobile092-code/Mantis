@@ -60,6 +60,21 @@ import {
   unmarkHashSaved,
 } from './lib/knowledgeSync';
 import {
+  autoUnloadBeforeHeavyTask,
+  buildAdapterConditionedMessages,
+  cancelLocalLlmLoad,
+  clearLocalLlmBrowserCache,
+  generateWithLocalLlmStream,
+  getLocalLlmSpec,
+  getLocalLlmState,
+  loadLocalLlmModel,
+  refreshHardwareTelemetry,
+  selectLocalLlmModel,
+  stopLocalLlmGeneration,
+  subscribeLocalLlmState,
+  unloadLocalLlmModel,
+} from './lib/localLlmEngine';
+import {
   computeKnowledgeGrowth,
   mineKnowledgeFromText,
 } from './lib/mantisBrain';
@@ -131,11 +146,13 @@ import type {
   EvalRunSummary,
   EvalSubView,
   GitHubConnection,
+  HardwareTelemetry,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeStatus,
   LearningEvent,
   LearningEventKind,
+  LocalLlmEngineState,
   MemorySubView,
   ModelCardConfig,
   NeuralCheckpoint,
@@ -213,6 +230,16 @@ export default function App() {
   useEffect(() => {
     activeCheckpointRef.current = activeCheckpoint;
   }, [activeCheckpoint]);
+
+  const [localLlmState, setLocalLlmState] = useState<LocalLlmEngineState>(() => getLocalLlmState());
+  const [hardwareTelemetry, setHardwareTelemetry] = useState<HardwareTelemetry | null>(null);
+  const [streamingLocalReply, setStreamingLocalReply] = useState<{
+    text: string;
+    tokensPerSec: number | null;
+    generatedTokens: number;
+    modelLabel: string;
+  } | null>(null);
+  const [openLocalModelsSignal, setOpenLocalModelsSignal] = useState(0);
 
   const [scratchSkills, setScratchSkills] = useState<ScratchSkillRule[]>(() => loadScratchSkills());
   const [trainingSamples, setTrainingSamples] = useState<TrainingSample[]>(() => loadTrainingSamples());
@@ -305,9 +332,19 @@ export default function App() {
 
   useEffect(() => {
     void initComputeEngine();
-    return subscribeComputeStatus((status) => {
+    const unsubCompute = subscribeComputeStatus((status) => {
       setComputeStatus(status);
     });
+    const unsubLlm = subscribeLocalLlmState((llm) => {
+      setLocalLlmState(llm);
+    });
+    void refreshHardwareTelemetry()
+      .then((hw) => setHardwareTelemetry(hw))
+      .catch(() => undefined);
+    return () => {
+      unsubCompute();
+      unsubLlm();
+    };
   }, []);
 
   useEffect(() => {
@@ -353,6 +390,11 @@ export default function App() {
       setEvalSubView('export');
     }
   }, []);
+
+  const openLocalModelsTab = useCallback(() => {
+    navigateToArea('training');
+    setOpenLocalModelsSignal((n) => n + 1);
+  }, [navigateToArea]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -414,6 +456,30 @@ export default function App() {
     },
     [],
   );
+
+  const handleLoadLocalLlm = useCallback(
+    async (modelId?: string, allowHighRamOverride = false) => {
+      const result = await loadLocalLlmModel(modelId, {allowHighRamOverride});
+      const hw = await refreshHardwareTelemetry().catch(() => null);
+      if (hw) setHardwareTelemetry(hw);
+      if (result.status === 'ready' && result.loadedModelId) {
+        const spec = getLocalLlmSpec(result.loadedModelId);
+        pushLearningEvent(
+          'manual_teach',
+          `Loaded ${spec.shortLabel} (${result.activeDevice?.toUpperCase() || 'WASM'})`,
+          `${result.activeDtype || spec.dtype} · ~${spec.estimatedRamMb} MB RAM`,
+          'local-llm',
+        );
+      }
+    },
+    [pushLearningEvent],
+  );
+
+  const handleUnloadLocalLlm = useCallback(async () => {
+    await unloadLocalLlmModel();
+    const hw = await refreshHardwareTelemetry().catch(() => null);
+    if (hw) setHardwareTelemetry(hw);
+  }, []);
 
   const handleTrainNeuralBatch = useCallback(
     async (
@@ -2608,6 +2674,122 @@ export default function App() {
             err instanceof Error ? err.message : 'Unable to fetch repository'
           }`;
         }
+      } else if (modeOverride === 'local-llm') {
+        const liveFolders = foldersRef.current;
+        const currentCkpt = activeCheckpointRef.current;
+        setStudentIsolationLock(true);
+        try {
+          let activeLlm = getLocalLlmState();
+          if (activeLlm.status !== 'ready' || !activeLlm.loadedModelId) {
+            activeLlm = await loadLocalLlmModel(activeLlm.selectedModelId, {
+              allowHighRamOverride: false,
+            });
+          }
+
+          const spec = getLocalLlmSpec(activeLlm.loadedModelId || activeLlm.selectedModelId);
+          if (activeLlm.status !== 'ready' || !activeLlm.loadedModelId) {
+            pendingTelemetry = {
+              checkpointId: currentCkpt.id,
+              confidence: 0,
+              lossEstimate: currentCkpt.metrics.lastLoss,
+              topTokens: [],
+              isolationMode: 'local-llm',
+              cloudCalls: 0,
+              isUntrained: currentCkpt.metrics.stepCount === 0,
+              tokensPerSec: null,
+              localModelId: spec.id,
+            };
+            replyText = [
+              `Local Q4 model (${spec.label}) could not initialize automatically:`,
+              activeLlm.error || activeLlm.loadStatusText,
+              '',
+              'Open Eval & Export → Training & Evals → Local Q4 Models to probe hardware, pick an 8 GB-safe model (such as SmolLM2-360M Q4), or manually override the memory guard.',
+            ].join('\n');
+          } else {
+            const [hybridMatches, neuralPred] = await Promise.all([
+              runHybridRetrievalAsync({
+                query: prompt,
+                entries,
+                folders: liveFolders,
+                limit: 4,
+              }),
+              inferNeuralStudentAsync(prompt, currentCkpt),
+            ]);
+            const adapted = buildAdapterConditionedMessages({
+              prompt,
+              checkpoint: currentCkpt,
+              hybridMatches,
+              folders: liveFolders,
+              skills: scratchSkills,
+              neuralPrediction: neuralPred,
+              modelId: activeLlm.loadedModelId,
+            });
+
+            let partialText = '';
+            setStreamingLocalReply({
+              text: '',
+              tokensPerSec: null,
+              generatedTokens: 0,
+              modelLabel: spec.shortLabel,
+            });
+
+            try {
+              const gen = await generateWithLocalLlmStream({
+                messages: adapted.messages,
+                onToken: (accumulatedText, tokensPerSec, generatedTokens) => {
+                  partialText = accumulatedText;
+                  setStreamingLocalReply({
+                    text: accumulatedText,
+                    tokensPerSec,
+                    generatedTokens,
+                    modelLabel: spec.shortLabel,
+                  });
+                },
+              });
+              replyText =
+                gen.text ||
+                partialText.trim() ||
+                'Generation stopped before producing tokens.';
+              citedEntryIds = hybridMatches.map((m) => m.entry.id);
+              pendingTelemetry = {
+                checkpointId: currentCkpt.id,
+                confidence: neuralPred.confidence,
+                lossEstimate: neuralPred.lossEstimate,
+                topTokens: neuralPred.topTokens,
+                isolationMode: 'local-llm',
+                cloudCalls: 0,
+                isUntrained: currentCkpt.metrics.stepCount === 0,
+                tokensPerSec: gen.tokensPerSec,
+                localModelId: gen.modelId,
+              };
+            } catch (localErr) {
+              replyText = partialText.trim()
+                ? `${partialText.trim()}\n\n[Local stream interrupted: ${
+                    localErr instanceof Error ? localErr.message : 'Stopped'
+                  }]`
+                : `Local Q4 generation failed: ${
+                    localErr instanceof Error ? localErr.message : 'Runtime error'
+                  }`;
+              citedEntryIds = hybridMatches.map((m) => m.entry.id);
+              pendingTelemetry = {
+                checkpointId: currentCkpt.id,
+                confidence: neuralPred.confidence,
+                lossEstimate: neuralPred.lossEstimate,
+                topTokens: neuralPred.topTokens,
+                isolationMode: 'local-llm',
+                cloudCalls: 0,
+                isUntrained: currentCkpt.metrics.stepCount === 0,
+                tokensPerSec: null,
+                localModelId: spec.id,
+              };
+            } finally {
+              setStreamingLocalReply(null);
+            }
+          }
+        } finally {
+          setStreamingLocalReply(null);
+          setStudentIsolationLock(false);
+        }
       } else if (
         (modeOverride === 'cloud' || (!preferBuiltInFirst && modeOverride !== 'scratch')) &&
         hasCloudConfigured &&
@@ -3250,6 +3432,11 @@ export default function App() {
         }}
         modelName={activeCheckpoint.profileName || modelCard.modelName}
         checkpointId={activeCheckpoint.id}
+        localModelShortLabel={
+          localLlmState.loadedModelId
+            ? getLocalLlmSpec(localLlmState.loadedModelId).shortLabel
+            : null
+        }
         isOnline={isOnline}
         pendingOfflineCount={offlineQueueCount}
         inspectorOpen={inspectorOpen}
@@ -3429,6 +3616,7 @@ export default function App() {
                     accessToken={session.access_token}
                     connection={connection}
                     onSaveBrainConfig={handleSaveBrainConfig}
+                    onOpenLocalModels={openLocalModelsTab}
                     onSignOut={handleSignOut}
                   />
                 </Suspense>
@@ -3529,6 +3717,11 @@ export default function App() {
                 navigateToArea('github');
               }}
               onOpenSettings={() => navigateToArea('settings')}
+              localLlmState={localLlmState}
+              hardwareTelemetry={hardwareTelemetry}
+              streamingLocalReply={streamingLocalReply}
+              onStopLocalGeneration={stopLocalLlmGeneration}
+              onOpenLocalModels={openLocalModelsTab}
               showOnboarding={!onboardingDismissed}
               onOpenKnowledge={() => navigateToArea('knowledge')}
               onDismissOnboarding={() => {
@@ -3613,6 +3806,9 @@ export default function App() {
                       onCreateFolder={handleCreateFolder}
                       onSaveEntry={handleSaveEntry}
                       onSaveCapturedEntries={handleSaveCapturedEntries}
+                      onBeforeHeavyTask={async (taskLabel) => {
+                        await autoUnloadBeforeHeavyTask(taskLabel);
+                      }}
                       onOpenKnowledge={() => navigateToArea('knowledge')}
                     />
                   )}
@@ -3772,6 +3968,19 @@ export default function App() {
                       }
                       arenaInitialPrompt={arenaInitialPrompt}
                       onConsumeArenaPrompt={() => setArenaInitialPrompt('')}
+                      localLlmState={localLlmState}
+                      hardwareTelemetry={hardwareTelemetry}
+                      onRefreshHardware={async () => {
+                        const hw = await refreshHardwareTelemetry();
+                        setHardwareTelemetry(hw);
+                      }}
+                      onSelectLocalLlm={selectLocalLlmModel}
+                      onLoadLocalLlm={handleLoadLocalLlm}
+                      onUnloadLocalLlm={handleUnloadLocalLlm}
+                      onCancelLocalLlmLoad={cancelLocalLlmLoad}
+                      onClearLocalLlmCache={clearLocalLlmBrowserCache}
+                      onStopLocalLlmGeneration={stopLocalLlmGeneration}
+                      openLocalModelsSignal={openLocalModelsSignal}
                     />
                   )}
 
@@ -3798,6 +4007,12 @@ export default function App() {
         onClose={() => setInspectorOpen(false)}
         routeStatus={routeStatus}
         computeStatus={computeStatus}
+        localLlmState={localLlmState}
+        hardwareTelemetry={hardwareTelemetry}
+        onLoadLocalLlm={handleLoadLocalLlm}
+        onUnloadLocalLlm={handleUnloadLocalLlm}
+        onCancelLocalLlmLoad={cancelLocalLlmLoad}
+        onOpenLocalModels={openLocalModelsTab}
         modelName={activeCheckpoint.profileName || modelCard.modelName}
         activeCheckpoint={activeCheckpoint}
         checkpoints={checkpoints}

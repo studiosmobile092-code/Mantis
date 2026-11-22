@@ -76,6 +76,7 @@ interface SettingsPanelProps {
     autoLearn: boolean,
     preferBuiltIn: boolean,
   ) => Promise<void>;
+  onOpenLocalModels?: () => void;
   onSignOut: () => Promise<void>;
 }
 
@@ -105,6 +106,7 @@ export function SettingsPanel({
   accessToken,
   connection,
   onSaveBrainConfig,
+  onOpenLocalModels,
   onSignOut,
 }: SettingsPanelProps) {
   const [pingStatus, setPingStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
@@ -561,22 +563,68 @@ export function SettingsPanel({
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="brain-model" className="block text-xs font-medium text-ink-muted">
-              Cloud Assist Model Preference
-            </label>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="brain-model" className="block text-xs font-medium text-ink-muted">
+                Teacher &amp; Cloud Assist Model (High-Capacity + Ollama)
+              </label>
+              {onOpenLocalModels && (
+                <button
+                  type="button"
+                  onClick={onOpenLocalModels}
+                  className="font-mono text-[11px] font-medium text-accent-text hover:underline"
+                >
+                  Open Dual-Tier Local Models
+                </button>
+              )}
+            </div>
             <select
               id="brain-model"
-              value={modelDraft}
-              onChange={(e) => setModelDraft(e.target.value)}
+              value={
+                BRAIN_MODEL_OPTIONS.some((m) => m.id === modelDraft)
+                  ? modelDraft
+                  : '__custom__'
+              }
+              onChange={(e) => {
+                if (e.target.value !== '__custom__') {
+                  setModelDraft(e.target.value);
+                }
+              }}
               className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
             >
-              {BRAIN_MODEL_OPTIONS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
+              <optgroup label="Smart Frontier Teachers (Reasoning & Coding)">
+                {BRAIN_MODEL_OPTIONS.filter((m) => m.tier === 'smart-frontier').map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Fast & Balanced Teachers">
+                {BRAIN_MODEL_OPTIONS.filter((m) => m.tier === 'balanced').map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Local Ollama Workstation / Laptop">
+                {BRAIN_MODEL_OPTIONS.filter((m) => m.tier === 'ollama-local').map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
+              {!BRAIN_MODEL_OPTIONS.some((m) => m.id === modelDraft) && (
+                <option value="__custom__">Custom: {modelDraft}</option>
+              )}
             </select>
+            <input
+              type="text"
+              aria-label="Custom Teacher or Ollama model tag"
+              value={modelDraft}
+              onChange={(e) => setModelDraft(e.target.value)}
+              placeholder="e.g. deepseek-ai/DeepSeek-R1 or ollama/qwen2.5-coder:14b"
+              className="min-h-[40px] w-full rounded-md border border-line bg-inset px-3 py-1.5 font-mono text-[11px] text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
+            />
           </div>
 
           <div className="flex flex-col justify-end gap-2">

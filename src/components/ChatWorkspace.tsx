@@ -5,6 +5,7 @@ import {
   Check,
   Compass,
   Copy,
+  Cpu,
   Crosshair,
   FileCode2,
   FolderPlus,
@@ -15,21 +16,25 @@ import {
   Scale,
   Send,
   Sparkles,
+  Square,
   Terminal,
   ThumbsUp,
   Trash2,
   Wrench,
 } from 'lucide-react';
 import {type FormEvent, memo, useEffect, useMemo, useRef, useState} from 'react';
+import {getLocalLlmSpec} from '../lib/localLlmEngine';
 import type {
   AssassinPrepBrief,
   BrainRouteStatus,
   ChatMessage,
   ChatTurnTelemetry,
   GitHubConnection,
+  HardwareTelemetry,
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeGrowthStats,
+  LocalLlmEngineState,
   NeuralCheckpoint,
   RepoFile,
 } from '../types/mantis';
@@ -37,7 +42,7 @@ import {AssassinBriefCard} from './AssassinBriefCard';
 import {ConceptGraphCanvas} from './ConceptGraphCanvas';
 import {OnboardingGuide} from './OnboardingGuide';
 
-export type StudioComposerMode = 'scratch' | 'cloud' | 'distill' | 'assassin';
+export type StudioComposerMode = 'scratch' | 'local-llm' | 'cloud' | 'distill' | 'assassin';
 
 const SLASH_COMMANDS: Array<{cmd: string; template: string; desc: string}> = [
   {cmd: '/search', template: '/search ', desc: 'Search Hybrid BM25 + Int8 Knowledge memory'},
@@ -103,6 +108,16 @@ interface ChatWorkspaceProps {
   onOpenTeach: () => void;
   onOpenSuggestions: () => void;
   onOpenSettings: () => void;
+  localLlmState?: LocalLlmEngineState;
+  hardwareTelemetry?: HardwareTelemetry | null;
+  streamingLocalReply?: {
+    text: string;
+    tokensPerSec: number | null;
+    generatedTokens: number;
+    modelLabel: string;
+  } | null;
+  onStopLocalGeneration?: () => void;
+  onOpenLocalModels?: () => void;
   showOnboarding?: boolean;
   onOpenKnowledge?: () => void;
   onDismissOnboarding?: () => void;
@@ -260,6 +275,11 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   onOpenTeach,
   onOpenSuggestions,
   onOpenSettings,
+  localLlmState,
+  hardwareTelemetry,
+  streamingLocalReply,
+  onStopLocalGeneration,
+  onOpenLocalModels,
   showOnboarding = false,
   onOpenKnowledge,
   onDismissOnboarding,
@@ -298,13 +318,21 @@ export const ChatWorkspace = memo(function ChatWorkspace({
 
   useEffect(() => {
     setComposerMode((prev) =>
-      prev === 'assassin' || prev === 'distill'
+      prev === 'assassin' || prev === 'distill' || prev === 'local-llm'
         ? prev
         : preferBuiltInFirst
           ? 'scratch'
           : 'cloud',
     );
   }, [preferBuiltInFirst]);
+
+  const activeLocalSpec = useMemo(
+    () =>
+      localLlmState
+        ? getLocalLlmSpec(localLlmState.loadedModelId || localLlmState.selectedModelId)
+        : null,
+    [localLlmState],
+  );
 
   useEffect(() => {
     if (composerPrefill) {
@@ -400,11 +428,11 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     }
     const distanceFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom < 180 || messages.length <= 2) {
+    if (distanceFromBottom < 180 || messages.length <= 2 || Boolean(streamingLocalReply)) {
       scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
       setShowJumpLatest(false);
     }
-  }, [messages.length]);
+  }, [messages.length, streamingLocalReply?.text]);
 
   function handleStreamScroll() {
     const el = streamRef.current;
@@ -723,6 +751,30 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                                   <span className="tabular-nums text-ink-muted">
                                     {turnTelemetryByMsgId[msg.id].checkpointId}
                                   </span>
+                                  {turnTelemetryByMsgId[msg.id].isolationMode === 'local-llm' && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="text-ink">
+                                        Local Q4 (
+                                        {turnTelemetryByMsgId[msg.id].localModelId
+                                          ? getLocalLlmSpec(
+                                              turnTelemetryByMsgId[msg.id].localModelId!,
+                                            ).shortLabel
+                                          : 'On-Device'}
+                                        )
+                                      </span>
+                                      {typeof turnTelemetryByMsgId[msg.id].tokensPerSec ===
+                                        'number' && (
+                                        <>
+                                          <span aria-hidden="true">·</span>
+                                          <span className="tabular-nums text-accent-text">
+                                            {turnTelemetryByMsgId[msg.id].tokensPerSec?.toFixed(1)}{' '}
+                                            tok/s
+                                          </span>
+                                        </>
+                                      )}
+                                    </>
+                                  )}
                                   <span aria-hidden="true">·</span>
                                   <span className="tabular-nums text-ink-muted">
                                     Conf {turnTelemetryByMsgId[msg.id].confidence.toFixed(2)}
@@ -1069,6 +1121,46 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                         </article>
                       );
                     })}
+                    {streamingLocalReply && (
+                      <article className="py-4">
+                        <header className="mb-2 flex items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-ink-muted">
+                            <span className="font-semibold text-accent-text">Mantis</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{streamingLocalReply.modelLabel}</span>
+                            <span aria-hidden="true">·</span>
+                            <span className="tabular-nums text-accent-text">
+                              {streamingLocalReply.tokensPerSec !== null
+                                ? `${streamingLocalReply.tokensPerSec.toFixed(1)} tok/s`
+                                : 'Warming kernels…'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="tabular-nums">
+                              {streamingLocalReply.generatedTokens} tok
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span className="text-accent-text">0 Cloud Calls</span>
+                          </div>
+                          {onStopLocalGeneration && (
+                            <button
+                              type="button"
+                              onClick={onStopLocalGeneration}
+                              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-danger-border bg-danger-soft px-2.5 text-xs font-medium text-danger hover:bg-surface"
+                            >
+                              <Square className="h-3 w-3" />
+                              <span>Stop</span>
+                            </button>
+                          )}
+                        </header>
+                        <RichMessageContent
+                          content={
+                            streamingLocalReply.text ||
+                            'Running offline WebGPU / WASM inference with Student Adapter weights…'
+                          }
+                        />
+                      </article>
+                    )}
+
                     <div ref={scrollEndRef} />
                   </div>
                 )}
@@ -1193,6 +1285,13 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                   {(
                     [
                       {id: 'scratch', label: 'Student Isolated'},
+                      {
+                        id: 'local-llm',
+                        label:
+                          localLlmState?.loadedModelId && activeLocalSpec
+                            ? `Local Q4 · ${activeLocalSpec.shortLabel}`
+                            : 'Local Q4',
+                      },
                       {id: 'cloud', label: 'Cloud Assist'},
                       {id: 'distill', label: 'Teacher Distill'},
                       {id: 'assassin', label: 'Parallel Patch'},
@@ -1214,6 +1313,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
                             : 'text-ink-muted hover:bg-elevated hover:text-ink'
                         }`}
                       >
+                        {mode.id === 'local-llm' && <Cpu className="h-3 w-3" />}
                         {mode.id === 'assassin' && <Crosshair className="h-3 w-3" />}
                         {mode.id === 'distill' && <GraduationCap className="h-3 w-3" />}
                         {mode.id === 'cloud' && <Sparkles className="h-3 w-3" />}
@@ -1224,18 +1324,44 @@ export const ChatWorkspace = memo(function ChatWorkspace({
 
                   <span className="hidden font-mono text-[11px] tabular-nums text-ink-subtle sm:inline">
                     · {activeCheckpoint ? activeCheckpoint.id : 'ckpt-000'}
-                    {composerMode === 'scratch' ? ' · 0 Cloud Calls' : ''}
+                    {composerMode === 'scratch' || composerMode === 'local-llm'
+                      ? ' · 0 Cloud Calls'
+                      : ''}
+                    {composerMode === 'local-llm' && localLlmState
+                      ? ` · ${
+                          localLlmState.status === 'ready'
+                            ? `${localLlmState.activeDevice?.toUpperCase() || 'WASM'} Ready`
+                            : localLlmState.status === 'downloading' ||
+                                localLlmState.status === 'loading'
+                              ? `${localLlmState.loadProgressPercent}%`
+                              : hardwareTelemetry?.webGpuSupported
+                                ? 'WebGPU Auto-Load'
+                                : 'WASM Auto-Load'
+                        }`
+                      : ''}
                   </span>
 
-                  {!hasCloudRoute && composerMode !== 'scratch' && (
+                  {composerMode === 'local-llm' && onOpenLocalModels && (
                     <button
                       type="button"
-                      onClick={onOpenSettings}
-                      className="ml-1 min-h-[38px] font-mono text-[11px] text-warn underline underline-offset-2 hover:opacity-90"
+                      onClick={onOpenLocalModels}
+                      className="ml-1 min-h-[38px] font-mono text-[11px] text-accent-text underline underline-offset-2 hover:opacity-90"
                     >
-                      Connect Cloud ({brainModel.split('/').pop()})
+                      Models
                     </button>
                   )}
+
+                  {!hasCloudRoute &&
+                    composerMode !== 'scratch' &&
+                    composerMode !== 'local-llm' && (
+                      <button
+                        type="button"
+                        onClick={onOpenSettings}
+                        className="ml-1 min-h-[38px] font-mono text-[11px] text-warn underline underline-offset-2 hover:opacity-90"
+                      >
+                        Connect Cloud ({brainModel.split('/').pop()})
+                      </button>
+                    )}
                 </div>
 
                 <button
