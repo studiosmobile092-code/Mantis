@@ -16,6 +16,8 @@ import {type FormEvent, useEffect, useState} from 'react';
 import {
   BRAIN_MODEL_OPTIONS,
   DEFAULT_BACKUP_EDGE_URL,
+  LOCAL_Q4_TEACHER_MODEL,
+  isLocalQ4ModelSelected,
   normalizeBrainUrl,
   probeActiveBrainRoute,
 } from '../lib/aiBrain';
@@ -224,6 +226,20 @@ export function SettingsPanel({
         preferBuiltInDraft,
       );
 
+      if (isLocalQ4ModelSelected(modelDraft)) {
+        await probeActiveBrainRoute({
+          brainUrl: cleanPrimary,
+          backupBrainUrl: cleanBackup,
+          accessToken,
+          preferredModel: modelDraft,
+        });
+        setBrainStatus('ok');
+        setBrainMessage(
+          'Active Route: In-Browser Local Q4 · Unlimited (0 API rate limits, runs natively via WebGPU/WASM). Tap Local Q4 Models if weights are not cached yet.',
+        );
+        return;
+      }
+
       if (!cleanPrimary && !cleanBackup) {
         await probeActiveBrainRoute({
           brainUrl: '',
@@ -262,6 +278,33 @@ export function SettingsPanel({
     } catch (err) {
       setBrainStatus('error');
       setBrainMessage(err instanceof Error ? err.message : 'Unable to save or probe Brain routes.');
+    }
+  }
+
+  async function handleActivateUnlimitedLocalQ4() {
+    setModelDraft(LOCAL_Q4_TEACHER_MODEL);
+    setBrainStatus('testing');
+    try {
+      await onSaveBrainConfig(
+        normalizeBrainUrl(urlDraft),
+        normalizeBrainUrl(backupUrlDraft),
+        LOCAL_Q4_TEACHER_MODEL,
+        autoLearnDraft,
+        preferBuiltInDraft,
+      );
+      await probeActiveBrainRoute({
+        brainUrl: normalizeBrainUrl(urlDraft),
+        backupBrainUrl: normalizeBrainUrl(backupUrlDraft),
+        accessToken,
+        preferredModel: LOCAL_Q4_TEACHER_MODEL,
+      });
+      setBrainStatus('ok');
+      setBrainMessage(
+        'Switched to In-Browser Local Q4 · Unlimited! Zero token caps or daily rate limits. Open Dual-Tier Local Models to cache Qwen2.5-0.5B or SmolLM2-360M Q4 once.',
+      );
+    } catch (err) {
+      setBrainStatus('error');
+      setBrainMessage(err instanceof Error ? err.message : 'Could not save Local Q4 mode.');
     }
   }
 
@@ -592,6 +635,13 @@ export function SettingsPanel({
               }}
               className="min-h-[44px] w-full rounded-md border border-line-strong bg-inset px-3 py-2 font-mono text-xs text-ink focus:border-accent focus:outline-none"
             >
+              <optgroup label="Zero Rate Limits (Runs Locally Inside Browser)">
+                {BRAIN_MODEL_OPTIONS.filter((m) => m.tier === 'local-unlimited').map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
               <optgroup label="Smart Frontier Teachers (Reasoning & Coding)">
                 {BRAIN_MODEL_OPTIONS.filter((m) => m.tier === 'smart-frontier').map((m) => (
                   <option key={m.id} value={m.id}>
@@ -622,9 +672,27 @@ export function SettingsPanel({
               aria-label="Custom Teacher or Ollama model tag"
               value={modelDraft}
               onChange={(e) => setModelDraft(e.target.value)}
-              placeholder="e.g. deepseek-ai/DeepSeek-R1 or ollama/qwen2.5-coder:14b"
+              placeholder="e.g. local-q4/auto, deepseek-ai/DeepSeek-R1, or ollama/qwen2.5-coder:14b"
               className="min-h-[40px] w-full rounded-md border border-line bg-inset px-3 py-1.5 font-mono text-[11px] text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none"
             />
+            {modelDraft.toLowerCase().startsWith('ollama/') &&
+              !urlDraft.includes('11434') &&
+              !urlDraft.includes('trycloudflare.com') && (
+                <div className="rounded border border-warn-border bg-warn-soft p-2.5 text-[11px] leading-relaxed text-ink">
+                  <strong>Heads up:</strong> Remote Workers / Edge Functions cannot reach{' '}
+                  <code className="font-mono">localhost:11434</code> without a tunnel, so your Worker
+                  falls back to OpenRouter/Groq. For zero setup &amp; zero limits directly on this
+                  tablet/Chromebook, switch to{' '}
+                  <button
+                    type="button"
+                    onClick={() => void handleActivateUnlimitedLocalQ4()}
+                    className="font-semibold text-accent-text underline"
+                  >
+                    In-Browser Local Q4 · Unlimited
+                  </button>
+                  .
+                </div>
+              )}
           </div>
 
           <div className="flex flex-col justify-end gap-2">
@@ -686,13 +754,38 @@ export function SettingsPanel({
         {brainMessage && (
           <div
             role="status"
-            className={`rounded-md border px-3.5 py-2.5 font-mono text-xs ${
+            className={`space-y-2 rounded-md border px-3.5 py-2.5 font-mono text-xs ${
               brainStatus === 'ok'
                 ? 'border-accent-border bg-accent-soft text-ink'
                 : 'border-danger-border bg-danger-soft text-danger'
             }`}
           >
-            {brainMessage}
+            <div>{brainMessage}</div>
+            {brainStatus === 'error' &&
+              /\b429\b|rate limit|free-models-per-day|quota/i.test(brainMessage) && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2 font-sans text-xs text-ink">
+                  <span>
+                    Hit OpenRouter&apos;s daily free-tier limit? Run unlimited Q4 locally inside your
+                    browser (0 API tokens, 0 setup):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleActivateUnlimitedLocalQ4()}
+                    className="inline-flex min-h-[40px] items-center rounded-md bg-accent px-3 py-1 text-xs font-semibold text-white hover:bg-accent-hover"
+                  >
+                    Switch to In-Browser Local Q4 · Unlimited
+                  </button>
+                  {onOpenLocalModels && (
+                    <button
+                      type="button"
+                      onClick={onOpenLocalModels}
+                      className="inline-flex min-h-[40px] items-center rounded-md border border-line-strong bg-surface px-3 py-1 text-xs font-medium text-ink hover:bg-elevated"
+                    >
+                      Load Q4 Weights Now
+                    </button>
+                  )}
+                </div>
+              )}
           </div>
         )}
 

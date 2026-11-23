@@ -23,8 +23,10 @@ import {
   generateSyntheticFailureDrillsWithTeacher,
   getLocalBrainConfig,
   getRouteStatus,
+  isLocalQ4ModelSelected,
   normalizeBrainUrl,
   probeActiveBrainRoute,
+  registerLocalQ4TeacherFallback,
   setLocalBrainConfig,
   setStudentIsolationLock,
   subscribeRouteStatus,
@@ -72,9 +74,11 @@ import {
   buildAdapterConditionedMessages,
   cancelLocalLlmLoad,
   clearLocalLlmBrowserCache,
+  generateTeacherCompletionWithLocalLlm,
   generateWithLocalLlmStream,
   getLocalLlmSpec,
   getLocalLlmState,
+  isLocalLlmReady,
   loadLocalLlmModel,
   refreshHardwareTelemetry,
   selectLocalLlmModel,
@@ -466,6 +470,17 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    registerLocalQ4TeacherFallback(
+      async (params) => {
+        const res = await generateTeacherCompletionWithLocalLlm(params);
+        return {text: res.text, modelUsed: res.modelUsed};
+      },
+      () => isLocalLlmReady(),
+    );
+    return () => registerLocalQ4TeacherFallback(null);
   }, []);
 
   const setTransientSaveFeedback = useCallback(
@@ -2471,7 +2486,9 @@ export default function App() {
       let pendingTelemetry: ChatTurnTelemetry | undefined;
       const repoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
       const hasCloudConfigured = Boolean(
-        (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token,
+        ((brainUrl.trim() || backupBrainUrl.trim()) && session.access_token) ||
+          isLocalQ4ModelSelected(brainModel) ||
+          isLocalLlmReady(),
       );
 
       let autoMinedCount = 0;
@@ -4433,7 +4450,9 @@ export default function App() {
                       onRollbackMemoryOptimize={handleRollbackMemoryOptimize}
                       onStageCodeOptimize={handleStageCodeOptimize}
                       onCloudAsk={
-                        (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token
+                        ((brainUrl.trim() || backupBrainUrl.trim()) && session.access_token) ||
+                        isLocalQ4ModelSelected(brainModel) ||
+                        isLocalLlmReady()
                           ? async (prompt) => {
                               const res = await askAiBrainChat({
                                 brainUrl,
@@ -4484,6 +4503,8 @@ export default function App() {
                       skills={scratchSkills}
                       trainingSamples={trainingSamples}
                       latestEval={evalRuns[0] || null}
+                      activeCheckpoint={activeCheckpoint}
+                      principles={constitutionalPrinciples}
                     />
                   )}
                 </Suspense>

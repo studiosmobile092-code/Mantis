@@ -309,6 +309,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [savedMsgFolders, setSavedMsgFolders] = useState<Record<string, string>>({});
   const [savingMsgId, setSavingMsgId] = useState<string | null>(null);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
+  const [pendingNewCount, setPendingNewCount] = useState(0);
 
   // Per-turn overflow menu + copy confirmation
   const [openMenuMsgId, setOpenMenuMsgId] = useState<string | null>(null);
@@ -326,8 +327,11 @@ export const ChatWorkspace = memo(function ChatWorkspace({
   const [forceSlashMenu, setForceSlashMenu] = useState(false);
 
   const streamRef = useRef<HTMLDivElement | null>(null);
+  const streamContentRef = useRef<HTMLDivElement | null>(null);
   const scrollEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const prevMessageCountRef = useRef(messages.length);
 
   const hasCloudRoute = routeStatus.activeKind !== 'built-in-only';
 
@@ -435,36 +439,98 @@ export const ChatWorkspace = memo(function ChatWorkspace({
     return base;
   }, [connection]);
 
-  useEffect(() => {
-    const container = streamRef.current;
-    if (!container) {
-      scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
-      return;
+  function scrollStreamToBottom(smooth: boolean) {
+    const el = streamRef.current;
+    if (!el) return;
+    const targetTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (typeof el.scrollTo === 'function') {
+      el.scrollTo({
+        top: targetTop,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    } else {
+      el.scrollTop = targetTop;
     }
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom < 180 || messages.length <= 2 || Boolean(streamingLocalReply)) {
-      scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
-      setShowJumpLatest(false);
-    }
-  }, [messages.length, streamingLocalReply?.text]);
+    setShowJumpLatest(false);
+    setPendingNewCount(0);
+  }
 
-  function handleStreamScroll() {
+  function evaluateScrollState() {
     const el = streamRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setShowJumpLatest(distanceFromBottom > 140);
+    const atBottom = distanceFromBottom <= 96;
+    shouldStickToBottomRef.current = atBottom;
+    setShowJumpLatest(!atBottom && el.scrollHeight > el.clientHeight + 60);
+    if (atBottom) {
+      setPendingNewCount(0);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'stream') return;
+    const prevCount = prevMessageCountRef.current;
+    const addedCount = Math.max(0, messages.length - prevCount);
+    prevMessageCountRef.current = messages.length;
+
+    const rafId = window.requestAnimationFrame(() => {
+      if (
+        shouldStickToBottomRef.current ||
+        messages.length <= 2 ||
+        Boolean(streamingLocalReply)
+      ) {
+        scrollStreamToBottom(addedCount > 0 && !streamingLocalReply);
+      } else {
+        if (addedCount > 0) {
+          setPendingNewCount((c) => c + addedCount);
+        }
+        evaluateScrollState();
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [activeTab, isLoading, messages.length, streamingLocalReply?.text]);
+
+  useEffect(() => {
+    if (activeTab !== 'stream') return;
+    const container = streamRef.current;
+    const contentEl = streamContentRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      if (shouldStickToBottomRef.current || Boolean(streamingLocalReply)) {
+        scrollStreamToBottom(false);
+      } else {
+        evaluateScrollState();
+      }
+    });
+
+    observer.observe(container);
+    if (contentEl) {
+      observer.observe(contentEl);
+    }
+    return () => observer.disconnect();
+  }, [activeTab, streamingLocalReply]);
+
+  function handleStreamScroll() {
+    evaluateScrollState();
   }
 
   function jumpToLatest() {
-    scrollEndRef.current?.scrollIntoView({behavior: 'smooth'});
+    shouldStickToBottomRef.current = true;
+    setPendingNewCount(0);
     setShowJumpLatest(false);
+    window.requestAnimationFrame(() => {
+      scrollStreamToBottom(true);
+    });
   }
 
   async function submitPrompt(modeOverride?: StudioComposerMode) {
     const trimmed = input.trim();
     if (!trimmed || isSending) return;
+    shouldStickToBottomRef.current = true;
+    setPendingNewCount(0);
     setInput('');
+    window.requestAnimationFrame(() => scrollStreamToBottom(false));
     await onSendMessage(trimmed, modeOverride ?? composerMode);
   }
 
@@ -479,6 +545,9 @@ export const ChatWorkspace = memo(function ChatWorkspace({
       return;
     }
     if (isSending) return;
+    shouldStickToBottomRef.current = true;
+    setPendingNewCount(0);
+    window.requestAnimationFrame(() => scrollStreamToBottom(false));
     await onSendMessage(prompt, prompt.startsWith('/execute ') ? 'assassin' : composerMode);
   }
 
@@ -629,7 +698,7 @@ export const ChatWorkspace = memo(function ChatWorkspace({
               onScroll={handleStreamScroll}
               className="h-full overflow-y-auto px-3 py-4 sm:px-6"
             >
-              <div className="mx-auto max-w-[76ch] space-y-4">
+              <div ref={streamContentRef} className="mx-auto max-w-[76ch] space-y-4">
                 {activeAssassinBrief && (
                   <AssassinBriefCard
                     brief={activeAssassinBrief}
@@ -1307,10 +1376,13 @@ export const ChatWorkspace = memo(function ChatWorkspace({
               <button
                 type="button"
                 onClick={jumpToLatest}
-                className="mantis-slide-up absolute right-4 bottom-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-line-strong bg-surface/95 px-3 py-1 text-xs font-medium text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
+                aria-label="Scroll to latest message"
+                className="mantis-slide-up absolute right-4 bottom-3 z-20 inline-flex min-h-[40px] items-center gap-1.5 rounded-md border border-accent-border bg-surface/95 px-3 py-1 text-xs font-medium text-accent-text shadow-lg backdrop-blur-xs hover:bg-elevated"
               >
-                <ArrowDown className="h-3.5 w-3.5" />
-                <span>Latest</span>
+                <ArrowDown className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  {pendingNewCount > 0 ? `Latest (${pendingNewCount} new)` : 'Latest'}
+                </span>
               </button>
             )}
           </div>

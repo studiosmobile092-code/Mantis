@@ -80,7 +80,14 @@ export function AuthGate({onAuthenticated}: AuthGateProps) {
       <div className="mx-auto max-w-xl space-y-6">
         <div className="space-y-2 border-b border-line pb-6">
           <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold tracking-tight text-ink">Mantis</h1>
+            <div className="flex items-center gap-2.5">
+              <img
+                src="./mantis-icon.png"
+                alt="Mantis emblem"
+                className="h-7 w-7 shrink-0 rounded-sm object-cover"
+              />
+              <h1 className="text-2xl font-bold tracking-tight text-ink">Mantis</h1>
+            </div>
             <span className="font-mono text-xs text-ink-muted">Personal Coding AI Studio</span>
           </div>
           <p className="text-sm leading-relaxed text-ink-muted">

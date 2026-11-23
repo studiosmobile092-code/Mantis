@@ -457,13 +457,52 @@ export interface ModelCardConfig {
 }
 
 export interface PortableBrainBundle {
-  schema: 'mantis-brain-bundle/v1';
+  schema: 'mantis-brain-bundle/v2' | 'mantis-brain-bundle/v1';
   exportedAt: string;
+  fingerprint?: string;
   modelCard: ModelCardConfig;
   evalSummary: {
     passRate: number | null;
     totalCases: number;
   };
+  evalScorecard?: {
+    passRate: number | null;
+    blindPassRate: number | null;
+    regressionPassRate: number | null;
+    totalCases: number;
+    checkpointId?: string;
+  };
+  checkpoint?: {
+    id: string;
+    profileName: string;
+    stepCount: number;
+    vocabSize: number;
+    lastLoss: number | null;
+    firstLoss: number | null;
+    avgGradNorm: number;
+    memoryBytes: number;
+    createdAt: string;
+  };
+  neuralCore?: {
+    bpeMerges: BpeMergePair[];
+    vocabSample: string[];
+    targets: Array<{
+      id: string;
+      promptPattern: string;
+      responseText: string;
+      folderName: string;
+      trainedSteps: number;
+      vectorInt8: number[];
+      vectorScale: number;
+    }>;
+  };
+  constitutionalRules?: Array<{
+    id: string;
+    title: string;
+    category: ConstitutionalPrinciple['category'];
+    rule: string;
+    weight: number;
+  }>;
   skills: ScratchSkillRule[];
   knowledge: Array<{
     id: string;
@@ -476,6 +515,21 @@ export interface PortableBrainBundle {
     vectorInt8: number[];
     vectorScale: number;
   }>;
+}
+
+export interface ModelReleaseEntry {
+  id: string;
+  modelName: string;
+  version: string;
+  checkpointId: string;
+  blindPassRate: number | null;
+  stepCount: number;
+  vocabSize: number;
+  knowledgeCount: number;
+  skillsCount: number;
+  fingerprint: string;
+  changelog: string;
+  exportedAt: string;
 }
 
 export interface AssassinPrepBrief {

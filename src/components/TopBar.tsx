@@ -43,9 +43,15 @@ export function TopBar({
           <button
             type="button"
             onClick={() => onSelectMode('train')}
-            className="shrink-0 whitespace-nowrap text-sm font-semibold tracking-tight text-ink transition-colors hover:text-accent-text"
+            className="inline-flex min-h-[40px] shrink-0 items-center gap-2 whitespace-nowrap text-sm font-semibold tracking-tight text-ink transition-colors hover:text-accent-text"
           >
-            Mantis
+            <img
+              src="./mantis-icon.png"
+              alt=""
+              aria-hidden="true"
+              className="h-5 w-5 shrink-0 rounded-sm object-cover"
+            />
+            <span>Mantis</span>
           </button>
           <span aria-hidden="true" className="text-ink-subtle">
             /

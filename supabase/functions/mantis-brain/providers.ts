@@ -117,6 +117,10 @@ async function tryOpenAiCompatible(
           lastErr = `${providerLabel} token lacks permission (403 Forbidden)`;
           break;
         }
+        if (res.status === 429) {
+          lastErr = `${providerLabel} ${model} (429): ${errText.slice(0, 140)}`;
+          break;
+        }
         lastErr = `${providerLabel} ${model} (${res.status}): ${errText.slice(0, 140)}`;
       }
     } catch (err) {
@@ -180,28 +184,36 @@ export async function callProviderCascade(
       );
       if (res) return res;
     } catch (firstErr) {
-      const liveModels = await discoverLiveOpenRouterFreeModels();
-      const extraModels = liveModels
-        .filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id))
-        .slice(0, 2);
-      if (extraModels.length > 0) {
-        try {
-          const retryRes = await tryOpenAiCompatible(
-            'https://openrouter.ai/api/v1/chat/completions',
-            openRouterKey,
-            extraModels,
-            'OpenRouter',
-            messages,
-            maxTokens,
-            temperature,
-            openRouterHeaders,
-          );
-          if (retryRes) return retryRes;
-        } catch (retryErr) {
-          errors.push(retryErr instanceof Error ? retryErr.message : String(retryErr));
-        }
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      const isAccountQuotaLimit = /\b(401|402|403|429)\b|rate limit exceeded|free-models-per-day/i.test(
+        firstMsg,
+      );
+      if (isAccountQuotaLimit) {
+        errors.push(firstMsg);
       } else {
-        errors.push(firstErr instanceof Error ? firstErr.message : String(firstErr));
+        const liveModels = await discoverLiveOpenRouterFreeModels();
+        const extraModels = liveModels
+          .filter((id) => !OPENROUTER_FALLBACK_MODELS.includes(id))
+          .slice(0, 2);
+        if (extraModels.length > 0) {
+          try {
+            const retryRes = await tryOpenAiCompatible(
+              'https://openrouter.ai/api/v1/chat/completions',
+              openRouterKey,
+              extraModels,
+              'OpenRouter',
+              messages,
+              maxTokens,
+              temperature,
+              openRouterHeaders,
+            );
+            if (retryRes) return retryRes;
+          } catch (retryErr) {
+            errors.push(retryErr instanceof Error ? retryErr.message : String(retryErr));
+          }
+        } else {
+          errors.push(firstMsg);
+        }
       }
     }
   }

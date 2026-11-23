@@ -728,3 +728,76 @@ export async function generateWithLocalLlmStream(params: {
     updateState({isGenerating: false});
   }
 }
+
+export function isLocalLlmReady(): boolean {
+  return Boolean(activeRuntime && currentState.status === 'ready');
+}
+
+export function pickSafeUnlimitedLocalModelId(hw?: HardwareTelemetry | null): string {
+  const ramGb = hw?.deviceMemoryGb ?? null;
+  if (ramGb !== null && ramGb <= 4) return 'smollm2-135m-q4';
+  if (ramGb !== null && ramGb < 8) return 'smollm2-360m-q4';
+  return 'qwen2.5-0.5b-q4';
+}
+
+export async function ensureUnlimitedLocalTeacherReady(): Promise<LocalLlmEngineState> {
+  if (activeRuntime && currentState.status === 'ready') {
+    return currentState;
+  }
+  const hw = cachedHardware || (await refreshHardwareTelemetry());
+  const selectedSpec = getLocalLlmSpec(currentState.selectedModelId);
+  const selectedSafety = evaluateModelMemorySafety(selectedSpec, hw, false);
+  const targetModelId = selectedSafety.allowed
+    ? selectedSpec.id
+    : pickSafeUnlimitedLocalModelId(hw);
+
+  const loaded = await loadLocalLlmModel(targetModelId, {allowHighRamOverride: false});
+  if (loaded.status !== 'ready' && targetModelId !== 'smollm2-135m-q4') {
+    // Ultra-safe second chance for tight tablet memory
+    return loadLocalLlmModel('smollm2-135m-q4', {allowHighRamOverride: false});
+  }
+  return loaded;
+}
+
+export async function generateTeacherCompletionWithLocalLlm(params: {
+  messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>;
+  maxNewTokens?: number;
+  temperature?: number;
+  autoLoadIfNeeded?: boolean;
+}): Promise<{
+  text: string;
+  modelUsed: string;
+  device: 'webgpu' | 'wasm';
+  tokensPerSec: number | null;
+  durationMs: number;
+}> {
+  if (!activeRuntime || currentState.status !== 'ready') {
+    if (params.autoLoadIfNeeded === false) {
+      throw new Error('Local Q4 weights not loaded in RAM yet.');
+    }
+    const readyState = await ensureUnlimitedLocalTeacherReady();
+    if (readyState.status !== 'ready' || !activeRuntime) {
+      throw new Error(
+        readyState.error || 'Could not initialize In-Browser Local Q4 model on this device.',
+      );
+    }
+  }
+
+  const res = await generateWithLocalLlmStream({
+    messages: params.messages,
+    maxNewTokens: params.maxNewTokens ?? 320,
+    temperature: params.temperature ?? 0.2,
+  });
+
+  if (!res.text.trim()) {
+    throw new Error('In-Browser Local Q4 model returned an empty completion.');
+  }
+
+  return {
+    text: res.text,
+    modelUsed: `local-q4/${res.modelId}`,
+    device: res.device,
+    tokensPerSec: res.tokensPerSec,
+    durationMs: res.durationMs,
+  };
+}

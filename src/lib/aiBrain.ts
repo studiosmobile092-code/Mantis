@@ -21,13 +21,19 @@ import {
 import {SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase} from './supabase';
 
 export const DEFAULT_BRAIN_MODEL = 'Qwen/Qwen2.5-Coder-32B-Instruct';
+export const LOCAL_Q4_TEACHER_MODEL = 'local-q4/auto';
 export const DEFAULT_BACKUP_EDGE_URL = `${SUPABASE_URL.replace(/\/+$/, '')}/functions/v1/mantis-brain`;
 
 export const BRAIN_MODEL_OPTIONS: Array<{
   id: string;
   label: string;
-  tier: 'smart-frontier' | 'balanced' | 'ollama-local';
+  tier: 'local-unlimited' | 'smart-frontier' | 'balanced' | 'ollama-local';
 }> = [
+  {
+    id: LOCAL_Q4_TEACHER_MODEL,
+    label: 'In-Browser Local Q4 · Unlimited (Zero Rate Limits / No Setup)',
+    tier: 'local-unlimited',
+  },
   {
     id: 'deepseek-ai/DeepSeek-R1',
     label: 'DeepSeek R1 · Frontier Reasoning Teacher',
@@ -110,6 +116,72 @@ let currentRouteStatus: BrainRouteStatus = {
 const routeListeners = new Set<(status: BrainRouteStatus) => void>();
 
 let studentIsolationLocked = false;
+
+export type LocalQ4TeacherHandler = (params: {
+  messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>;
+  maxNewTokens?: number;
+  temperature?: number;
+  autoLoadIfNeeded?: boolean;
+}) => Promise<{text: string; modelUsed: string}>;
+
+let localQ4TeacherHandler: LocalQ4TeacherHandler | null = null;
+let localQ4TeacherReadyProbe: (() => boolean) | null = null;
+let cloudRateLimitCooldownUntil = 0;
+
+export function registerLocalQ4TeacherFallback(
+  handler: LocalQ4TeacherHandler | null,
+  isReadyProbe?: () => boolean,
+): void {
+  localQ4TeacherHandler = handler;
+  localQ4TeacherReadyProbe = isReadyProbe || null;
+}
+
+export function isLocalQ4FallbackAvailable(): boolean {
+  return Boolean(localQ4TeacherHandler);
+}
+
+export function isLocalQ4TeacherReady(): boolean {
+  return Boolean(localQ4TeacherReadyProbe && localQ4TeacherReadyProbe());
+}
+
+export function isLocalQ4ModelSelected(model?: string): boolean {
+  return String(model || '').trim().toLowerCase().startsWith('local-q4');
+}
+
+export function isRateLimitOrQuotaError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return /\b(429|402)\b|rate limit exceeded|free-models-per-day|quota exceeded|too many requests|insufficient credits/i.test(
+    msg,
+  );
+}
+
+export function getCloudRateLimitCooldownRemainingSec(): number {
+  const diff = cloudRateLimitCooldownUntil - Date.now();
+  return diff > 0 ? Math.ceil(diff / 1000) : 0;
+}
+
+export function clearCloudRateLimitCooldown(): void {
+  cloudRateLimitCooldownUntil = 0;
+}
+
+function markCloudRateLimited(reason: string): void {
+  cloudRateLimitCooldownUntil = Date.now() + 90_000;
+  updateRouteStatus({
+    failoverReason: `Rate-limited (${reason.slice(0, 72)}) -> In-Browser Local Q4 Unlimited ready`,
+  });
+}
+
+async function runLocalQ4TeacherCompletion(params: {
+  messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>;
+  maxNewTokens?: number;
+  temperature?: number;
+  autoLoadIfNeeded?: boolean;
+}): Promise<{text: string; modelUsed: string}> {
+  if (!localQ4TeacherHandler) {
+    throw new Error('In-Browser Local Q4 teacher runtime is not initialized.');
+  }
+  return localQ4TeacherHandler(params);
+}
 
 export function setStudentIsolationLock(locked: boolean): void {
   studentIsolationLocked = locked;
@@ -205,7 +277,7 @@ export function setLocalBrainConfig(
 }
 
 export function normalizeExternalUrl(raw: string): string {
-  const trimmed = raw.trim();
+  const trimmed = String(raw || '').trim();
   if (!trimmed) return '';
   if (/^https?:\/\//i.test(trimmed)) {
     return trimmed;
@@ -409,6 +481,20 @@ export async function testBrainConnection(
   preferredModel?: string,
   routeKindHint?: BrainRouteKind,
 ): Promise<EndpointTestResult> {
+  if (isLocalQ4ModelSelected(preferredModel)) {
+    return {
+      ok: true,
+      endpointUrl: 'in-browser://local-q4-unlimited',
+      routeKind: 'built-in-only',
+      hasHfToken: false,
+      hasAnyProvider: true,
+      activeProviders: ['in-browser-q4-unlimited'],
+      defaultModel: LOCAL_Q4_TEACHER_MODEL,
+      inferenceVerified: isLocalQ4TeacherReady(),
+      verifiedModel: LOCAL_Q4_TEACHER_MODEL,
+      latencyMs: 0,
+    };
+  }
   const cleanUrl = normalizeBrainUrl(brainUrl);
   if (!cleanUrl) {
     throw new Error('Enter your Cloudflare Worker, Supabase Edge Function, or Ollama URL.');
@@ -629,13 +715,26 @@ export async function probeActiveBrainRoute(params: {
   const primary = normalizeBrainUrl(params.brainUrl);
   const backup = normalizeBrainUrl(params.backupBrainUrl);
 
+  if (isLocalQ4ModelSelected(params.preferredModel)) {
+    const status: BrainRouteStatus = {
+      activeKind: 'built-in-only',
+      activeEndpoint: 'in-browser://local-q4-unlimited',
+      failoverReason: null,
+      latencyMs: 0,
+      activeProviders: ['in-browser-q4-unlimited'],
+      lastCheckedAt: new Date().toISOString(),
+    };
+    updateRouteStatus(status);
+    return status;
+  }
+
   if (!primary && !backup) {
     const status: BrainRouteStatus = {
       activeKind: 'built-in-only',
       activeEndpoint: '',
       failoverReason: null,
       latencyMs: null,
-      activeProviders: [],
+      activeProviders: isLocalQ4FallbackAvailable() ? ['in-browser-q4-fallback'] : [],
       lastCheckedAt: new Date().toISOString(),
     };
     updateRouteStatus(status);
@@ -777,9 +876,13 @@ async function postBrainEndpointWithFailover<T>(params: {
       const json = (await res.json().catch(() => ({}))) as T & {error?: string; message?: string};
       if (!res.ok) {
         lastError = json.error || json.message || `HTTP ${res.status} from ${endpoint}`;
+        if (res.status === 429 || isRateLimitOrQuotaError(lastError)) {
+          markCloudRateLimited(lastError);
+        }
         continue;
       }
 
+      clearCloudRateLimitCooldown();
       const kind: BrainRouteKind = isSupabaseEdgeUrl(endpoint)
         ? 'backup-supabase'
         : endpoint.includes('11434')
@@ -794,6 +897,9 @@ async function postBrainEndpointWithFailover<T>(params: {
       return {payload: json, endpointUsed: endpoint};
     } catch (err) {
       lastError = normalizeFetchError(err, params.timeoutMs ?? 20000, endpoint).message;
+      if (isRateLimitOrQuotaError(lastError)) {
+        markCloudRateLimited(lastError);
+      }
     }
   }
 
@@ -921,6 +1027,54 @@ export async function askAiBrainChat(params: {
   );
   const repoMatches = retrieveRelevantRepoFiles(params.prompt, params.repoFiles, 4);
 
+  const buildLocalSystemPrompt = () =>
+    [
+      'You are Mantis Assistant running locally inside the browser with ZERO token limits. Ground answers strictly in the Knowledge and Repo context below.',
+      'If the user teaches a reusable preference, fact, or fix, end with: [LEARN: Short Title | Folder | tag1, tag2 | Concise note]',
+      knowledgeMatches.length > 0
+        ? `KNOWLEDGE:\n${knowledgeMatches
+            .slice(0, 4)
+            .map((m) => `- [${m.folderName}] ${m.entry.title}: ${m.entry.content.slice(0, 320)}`)
+            .join('\n')}`
+        : '',
+      repoMatches.length > 0
+        ? `REPO FILES:\n${repoMatches
+            .slice(0, 2)
+            .map((r) => `--- ${r.file.path} ---\n${r.file.content.slice(0, 1200)}`)
+            .join('\n\n')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+  if (
+    isLocalQ4ModelSelected(params.model) ||
+    (!cleanUrl && !normalizeBrainUrl(params.backupBrainUrl || '') && isLocalQ4FallbackAvailable()) ||
+    (getCloudRateLimitCooldownRemainingSec() > 0 && isLocalQ4FallbackAvailable())
+  ) {
+    const localRes = await runLocalQ4TeacherCompletion({
+      messages: [
+        {role: 'system', content: buildLocalSystemPrompt()},
+        ...params.history.slice(-4).map((m) => ({
+          role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: m.content,
+        })),
+        {role: 'user', content: params.prompt},
+      ],
+      maxNewTokens: 320,
+      temperature: 0.2,
+      autoLoadIfNeeded: true,
+    });
+    const {cleanReply, learnedItems} = parseLearnDirectives(localRes.text);
+    return {
+      replyText: cleanReply,
+      modelUsed: `${localRes.modelUsed} (unlimited)`,
+      citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
+      citedRepoPaths: repoMatches.map((r) => r.file.path),
+      learnedItems,
+    };
+  }
+
   if (
     getLocalBrainMode() === 'ollama' ||
     cleanUrl.includes('localhost:11434') ||
@@ -966,46 +1120,74 @@ export async function askAiBrainChat(params: {
     };
   }
 
-  const {payload} = await postBrainEndpointWithFailover<{
-    reply?: string;
-    model?: string;
-    error?: string;
-  }>({
-    brainUrl: params.brainUrl,
-    backupBrainUrl: params.backupBrainUrl,
-    accessToken: params.accessToken,
-    path: '/ai/chat',
-    body: {
-      prompt: params.prompt,
-      model: params.model,
-      knowledgeContext: knowledgeMatches.map((m) => ({
-        title: m.entry.title,
-        folder: m.folderName || (m.entry.folder_id ? folderMap.get(m.entry.folder_id) : 'General'),
-        content: m.entry.content,
-      })),
-      repoContext: repoMatches.map((r) => ({
-        path: r.file.path,
-        content: r.file.content,
-      })),
-      history: params.history.slice(-8).map((m) => ({
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.content,
-      })),
-    },
-  });
+  try {
+    const {payload} = await postBrainEndpointWithFailover<{
+      reply?: string;
+      model?: string;
+      error?: string;
+    }>({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      path: '/ai/chat',
+      body: {
+        prompt: params.prompt,
+        model: params.model,
+        knowledgeContext: knowledgeMatches.map((m) => ({
+          title: m.entry.title,
+          folder: m.folderName || (m.entry.folder_id ? folderMap.get(m.entry.folder_id) : 'General'),
+          content: m.entry.content,
+        })),
+        repoContext: repoMatches.map((r) => ({
+          path: r.file.path,
+          content: r.file.content,
+        })),
+        history: params.history.slice(-8).map((m) => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+        })),
+      },
+    });
 
-  if (!payload.reply) {
-    throw new Error(payload.error || 'AI Brain returned an empty reply.');
+    if (!payload.reply) {
+      throw new Error(payload.error || 'AI Brain returned an empty reply.');
+    }
+
+    const {cleanReply, learnedItems} = parseLearnDirectives(payload.reply);
+    return {
+      replyText: cleanReply,
+      modelUsed: payload.model || params.model,
+      citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
+      citedRepoPaths: repoMatches.map((r) => r.file.path),
+      learnedItems,
+    };
+  } catch (cloudErr) {
+    if (isRateLimitOrQuotaError(cloudErr) && isLocalQ4FallbackAvailable()) {
+      markCloudRateLimited(cloudErr instanceof Error ? cloudErr.message : '429');
+      const localRes = await runLocalQ4TeacherCompletion({
+        messages: [
+          {role: 'system', content: buildLocalSystemPrompt()},
+          ...params.history.slice(-4).map((m) => ({
+            role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+            content: m.content,
+          })),
+          {role: 'user', content: params.prompt},
+        ],
+        maxNewTokens: 320,
+        temperature: 0.2,
+        autoLoadIfNeeded: true,
+      });
+      const {cleanReply, learnedItems} = parseLearnDirectives(localRes.text);
+      return {
+        replyText: cleanReply,
+        modelUsed: `${localRes.modelUsed} (429 failover)`,
+        citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
+        citedRepoPaths: repoMatches.map((r) => r.file.path),
+        learnedItems,
+      };
+    }
+    throw cloudErr;
   }
-
-  const {cleanReply, learnedItems} = parseLearnDirectives(payload.reply);
-  return {
-    replyText: cleanReply,
-    modelUsed: payload.model || params.model,
-    citedEntryIds: knowledgeMatches.map((m) => m.entry.id),
-    citedRepoPaths: repoMatches.map((r) => r.file.path),
-    learnedItems,
-  };
 }
 
 export interface DistilledKnowledgeItem {
@@ -1552,6 +1734,37 @@ async function runLightweightAiJsonPrompt(params: {
   timeoutMs?: number;
 }): Promise<{text: string; modelUsed: string}> {
   const cleanUrl = normalizeBrainUrl(params.brainUrl);
+  const buildLocalJsonMessages = (): Array<{role: 'system' | 'user'; content: string}> => {
+    const ctx = (params.knowledgeContext || [])
+      .slice(0, 3)
+      .map((k) => `- [${k.folder}] ${k.title}: ${k.content}`)
+      .join('\n');
+    return [
+      {
+        role: 'system',
+        content:
+          'You are Mantis Studio structured JSON engine running offline. Return ONLY valid raw JSON with no markdown commentary.',
+      },
+      {
+        role: 'user',
+        content: ctx ? `Context:\n${ctx}\n\n${params.prompt}` : params.prompt,
+      },
+    ];
+  };
+
+  if (
+    isLocalQ4ModelSelected(params.model) ||
+    (!cleanUrl && !normalizeBrainUrl(params.backupBrainUrl || '') && isLocalQ4FallbackAvailable()) ||
+    (getCloudRateLimitCooldownRemainingSec() > 0 && isLocalQ4FallbackAvailable())
+  ) {
+    return runLocalQ4TeacherCompletion({
+      messages: buildLocalJsonMessages(),
+      maxNewTokens: 320,
+      temperature: 0.15,
+      autoLoadIfNeeded: true,
+    });
+  }
+
   if (
     getLocalBrainMode() === 'ollama' ||
     cleanUrl.includes('localhost:11434') ||
@@ -1572,29 +1785,42 @@ async function runLightweightAiJsonPrompt(params: {
     return {text: direct.text, modelUsed: direct.model};
   }
 
-  const {payload} = await postBrainEndpointWithFailover<{
-    reply?: string;
-    model?: string;
-    error?: string;
-  }>({
-    brainUrl: params.brainUrl,
-    backupBrainUrl: params.backupBrainUrl,
-    accessToken: params.accessToken,
-    path: '/ai/chat',
-    body: {
-      prompt: params.prompt,
-      model: params.model,
-      knowledgeContext: params.knowledgeContext || [],
-      repoContext: [],
-      history: [],
-    },
-    timeoutMs: params.timeoutMs ?? 9500,
-  });
+  try {
+    const {payload} = await postBrainEndpointWithFailover<{
+      reply?: string;
+      model?: string;
+      error?: string;
+    }>({
+      brainUrl: params.brainUrl,
+      backupBrainUrl: params.backupBrainUrl,
+      accessToken: params.accessToken,
+      path: '/ai/chat',
+      body: {
+        prompt: params.prompt,
+        model: params.model,
+        knowledgeContext: params.knowledgeContext || [],
+        repoContext: [],
+        history: [],
+      },
+      timeoutMs: params.timeoutMs ?? 9500,
+    });
 
-  if (!payload.reply) {
-    throw new Error(payload.error || 'AI helper returned empty response.');
+    if (!payload.reply) {
+      throw new Error(payload.error || 'AI helper returned empty response.');
+    }
+    return {text: payload.reply, modelUsed: payload.model || params.model};
+  } catch (err) {
+    if (isRateLimitOrQuotaError(err) && isLocalQ4FallbackAvailable()) {
+      markCloudRateLimited(err instanceof Error ? err.message : '429');
+      return runLocalQ4TeacherCompletion({
+        messages: buildLocalJsonMessages(),
+        maxNewTokens: 320,
+        temperature: 0.15,
+        autoLoadIfNeeded: true,
+      });
+    }
+    throw err;
   }
-  return {text: payload.reply, modelUsed: payload.model || params.model};
 }
 
 export interface SpeechEnhancementResult {
@@ -1878,8 +2104,12 @@ export async function distillLessonWithTeacher(params: {
   const candidates = studentIsolationLocked
     ? []
     : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const canUseLocalTeacher =
+    !studentIsolationLocked &&
+    isLocalQ4FallbackAvailable() &&
+    (isLocalQ4ModelSelected(params.model) || isLocalQ4TeacherReady() || candidates.length === 0);
 
-  if (candidates.length === 0) {
+  if (candidates.length === 0 && !canUseLocalTeacher) {
     return {
       answer: `Student-Only Isolation active or no Teacher route configured — saved "${cleanPrompt}" locally.`,
       triggers: [cleanPrompt.toLowerCase()],
@@ -2018,7 +2248,8 @@ export async function runArenaDuelWithBrain(params: {
 }> {
   const hasCloud =
     !studentIsolationLocked &&
-    getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl).length > 0;
+    (getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl).length > 0 ||
+      (isLocalQ4FallbackAvailable() && (isLocalQ4ModelSelected(params.model) || isLocalQ4TeacherReady())));
   if (!hasCloud) {
     return {
       candidateA: {label: 'Scratch Hybrid RAG', text: params.scratchCandidate},
@@ -2120,7 +2351,11 @@ export async function generateCurriculumDrillWithTeacher(params: {
   const candidates = studentIsolationLocked
     ? []
     : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
-  if (candidates.length === 0) {
+  const canUseLocalTeacher =
+    !studentIsolationLocked &&
+    isLocalQ4FallbackAvailable() &&
+    (isLocalQ4ModelSelected(params.model) || isLocalQ4TeacherReady());
+  if (candidates.length === 0 && !canUseLocalTeacher) {
     return deterministicFallback;
   }
 
@@ -2232,8 +2467,13 @@ export async function critiqueStudentReplyWithTeacher(params: {
     params.forceLocalOnly || studentIsolationLocked
       ? []
       : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const canUseLocalTeacher =
+    !params.forceLocalOnly &&
+    !studentIsolationLocked &&
+    isLocalQ4FallbackAvailable() &&
+    (isLocalQ4ModelSelected(params.model) || isLocalQ4TeacherReady());
 
-  if (candidates.length === 0) {
+  if (candidates.length === 0 && !canUseLocalTeacher) {
     return {
       overallScore: 70,
       passedPrinciples: enabled.map((p) => p.title),
@@ -2346,6 +2586,10 @@ export async function generateSyntheticFailureDrillsWithTeacher(params: {
   const candidates = studentIsolationLocked
     ? []
     : getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
+  const canUseLocalTeacher =
+    !studentIsolationLocked &&
+    isLocalQ4FallbackAvailable() &&
+    (isLocalQ4ModelSelected(params.model) || isLocalQ4TeacherReady());
 
   for (const item of params.failedCases.slice(0, 4)) {
     const {evalCase, result} = item;
@@ -2404,7 +2648,7 @@ export async function generateSyntheticFailureDrillsWithTeacher(params: {
       };
     };
 
-    if (candidates.length === 0) {
+    if (candidates.length === 0 && !canUseLocalTeacher) {
       drills.push(buildOfflineDrill());
       continue;
     }
