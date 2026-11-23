@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   ArrowLeft,
   BookOpen,
   Check,
@@ -8,6 +9,7 @@ import {
   FileText,
   Folder,
   FolderPlus,
+  GitMerge,
   PlusCircle,
   Search,
   ShieldCheck,
@@ -17,11 +19,16 @@ import {
 } from 'lucide-react';
 import {type FormEvent, memo, useEffect, useMemo, useRef, useState} from 'react';
 import {getEntryStatus, sanitizeExternalHttpUrl} from '../lib/knowledgeSync';
-import {parseTagsInput} from '../lib/memory';
+import {
+  analyzeMemoryConsolidation,
+  buildMergedClusterContent,
+  parseTagsInput,
+} from '../lib/memory';
 import type {
   KnowledgeEntry,
   KnowledgeFolder,
   KnowledgeStatus,
+  MemoryDuplicateCluster,
   SaveFeedbackInfo,
 } from '../types/mantis';
 
@@ -100,6 +107,11 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [isBulkBusy, setIsBulkBusy] = useState(false);
 
+  // Semantic Memory Consolidation drawer state
+  const [showConsolidator, setShowConsolidator] = useState(false);
+  const [consolidateBusyId, setConsolidateBusyId] = useState<string | null>(null);
+  const [consolidateNotice, setConsolidateNotice] = useState<string | null>(null);
+
   useEffect(() => {
     if (initialFolderId) {
       setSelectedFolderId(initialFolderId);
@@ -163,6 +175,13 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
     return {trusted, reviewed, raw};
   }, [entries]);
 
+  const consolidationReport = useMemo(
+    () => analyzeMemoryConsolidation(entries, folders),
+    [entries, folders],
+  );
+  const consolidationIssuesCount =
+    consolidationReport.duplicateClusters.length + consolidationReport.contradictions.length;
+
   const filteredEntries = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return entries.filter((entry) => {
@@ -204,11 +223,14 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
   }, [filteredEntries, selectedEntryId]);
 
   useEffect(() => {
-    if (filteredEntries.length === 0) return;
+    if (filteredEntries.length === 0) {
+      if (mobilePane === 'reader') setMobilePane('list');
+      return;
+    }
     if (!selectedEntryId || !filteredEntries.some((e) => e.id === selectedEntryId)) {
       setSelectedEntryId(filteredEntries[0].id);
     }
-  }, [filteredEntries, selectedEntryId]);
+  }, [filteredEntries, selectedEntryId, mobilePane]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -375,6 +397,26 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
           <button
             type="button"
             onClick={() => {
+              setShowConsolidator((v) => !v);
+              setConsolidateNotice(null);
+            }}
+            className={`inline-flex min-h-[44px] items-center gap-2 rounded-md border px-3.5 py-2 text-xs font-medium transition-colors ${
+              showConsolidator
+                ? 'border-accent-border bg-accent-soft text-accent-text'
+                : consolidationIssuesCount > 0
+                  ? 'border-warn-border bg-warn-soft text-warn'
+                  : 'border-line-strong bg-surface text-ink hover:bg-elevated'
+            }`}
+          >
+            <GitMerge className="h-4 w-4" />
+            <span>
+              Consolidate{consolidationIssuesCount > 0 ? ` (${consolidationIssuesCount})` : ''}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
               if (bulkMode) {
                 clearBulkSelection();
               } else {
@@ -409,6 +451,222 @@ export const KnowledgeBrowser = memo(function KnowledgeBrowser({
           </button>
         </div>
       </div>
+
+      {showConsolidator && (
+        <section
+          aria-label="Semantic Memory Consolidation"
+          className="mantis-slide-up space-y-4 rounded-lg border border-line-strong bg-surface p-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
+            <div className="space-y-0.5">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-ink">
+                Semantic Memory Consolidation &amp; Conflict Resolver
+              </h2>
+              <p className="font-mono text-[11px] tabular-nums text-ink-muted">
+                {consolidationReport.duplicateClusters.length} near-duplicate cluster(s) ·{' '}
+                {consolidationReport.contradictions.length} conflict(s) ·{' '}
+                {consolidationReport.staleRawEntries.length} Raw · reclaim ~
+                {Math.max(0, Math.round(consolidationReport.totalReclaimableBytes / 1024))} KB
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {consolidationReport.staleRawEntries.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatusFilter('raw');
+                    setShowConsolidator(false);
+                  }}
+                  className="min-h-[40px] rounded border border-line-strong bg-inset px-3 text-xs font-medium text-ink hover:bg-elevated"
+                >
+                  Triage {consolidationReport.staleRawEntries.length} Raw
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowConsolidator(false)}
+                aria-label="Close memory consolidator"
+                className="inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded text-ink-muted hover:bg-elevated hover:text-ink"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {consolidateNotice && (
+            <div className="rounded border border-accent-border bg-accent-soft px-3 py-2 text-xs text-accent-text">
+              {consolidateNotice}
+            </div>
+          )}
+
+          {consolidationReport.duplicateClusters.length === 0 &&
+          consolidationReport.contradictions.length === 0 ? (
+            <div className="rounded border border-line bg-inset p-4 text-xs text-ink-muted">
+              Memory index is clean — no near-duplicate clusters (cosine &ge; 0.86) or opposing rule directives found.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {consolidationReport.duplicateClusters.map((cluster: MemoryDuplicateCluster) => {
+                const isBusy = consolidateBusyId === cluster.id;
+                const redundant = cluster.entries.slice(1);
+                return (
+                  <div
+                    key={cluster.id}
+                    className="space-y-2.5 rounded-md border border-line bg-inset p-3.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="font-semibold text-ink">
+                            Cluster: {cluster.canonicalTitle}
+                          </span>
+                          <span className="font-mono text-[11px] tabular-nums text-accent-text">
+                            {Math.round(cluster.similarity * 100)}% similarity · {cluster.entries.length} entries
+                          </span>
+                        </div>
+                        <div className="font-mono text-[11px] text-ink-muted">
+                          Keeps canonical ({cluster.canonicalStatus}) &amp; merges {redundant.length} copy/copies (~
+                          {Math.max(1, Math.round(cluster.estimatedBytesSaved / 1024))} KB saved)
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setConsolidateBusyId(cluster.id);
+                          try {
+                            const merged = buildMergedClusterContent(cluster);
+                            const ok = await onUpdateEntry(cluster.canonicalEntryId, {
+                              ...merged,
+                              status: 'trusted',
+                            });
+                            if (ok) {
+                              let deleted = 0;
+                              for (const dup of redundant) {
+                                if (await onDeleteEntry(dup.id)) deleted += 1;
+                              }
+                              setConsolidateNotice(
+                                `Merged cluster into "${cluster.canonicalTitle}" (Trusted) and pruned ${deleted} duplicate(s).`,
+                              );
+                            }
+                          } finally {
+                            setConsolidateBusyId(null);
+                          }
+                        }}
+                        className="inline-flex min-h-[40px] items-center gap-1.5 rounded bg-accent px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+                      >
+                        <GitMerge className="h-3.5 w-3.5" />
+                        <span>{isBusy ? 'Merging…' : 'Merge & Mark Trusted'}</span>
+                      </button>
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {cluster.entries.slice(0, 4).map((item, idx) => (
+                        <div
+                          key={item.id}
+                          className="rounded border border-line bg-surface p-2 text-[11px]"
+                        >
+                          <div className="flex items-center justify-between gap-2 font-mono">
+                            <span className="truncate font-semibold text-ink">
+                              {idx === 0 ? '★ Canonical: ' : 'Duplicate: '}
+                              {item.title}
+                            </span>
+                            <span className="shrink-0 uppercase text-ink-subtle">
+                              {getEntryStatus(item)}
+                            </span>
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-ink-muted">{item.content}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {consolidationReport.contradictions.map((c) => {
+                const pairId = `c-${c.existingEntryId}-${c.newEntryId}`;
+                const isBusy = consolidateBusyId === pairId;
+                return (
+                  <div
+                    key={pairId}
+                    className="space-y-2.5 rounded-md border border-warn-border bg-warn-soft p-3.5"
+                  >
+                    <div className="flex items-center gap-2 text-xs font-semibold text-ink">
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-warn" />
+                      <span>Rule Conflict: {c.reason}</span>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="rounded border border-line bg-surface p-2.5 text-[11px]">
+                        <div className="font-mono font-semibold text-ink">
+                          Rule A ({c.existingStatus || 'trusted'} · {c.existingFolder}): {c.existingTitle}
+                        </div>
+                        <p className="mt-1 line-clamp-3 text-ink-muted">{c.existingContent}</p>
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={async () => {
+                              setConsolidateBusyId(pairId);
+                              try {
+                                await onUpdateEntryStatus(c.existingEntryId, 'raw');
+                                setConsolidateNotice(`Demoted "${c.existingTitle}" to Raw.`);
+                              } finally {
+                                setConsolidateBusyId(null);
+                              }
+                            }}
+                            className="min-h-[40px] rounded border border-line-strong bg-inset px-2.5 text-[11px] font-medium text-ink hover:bg-elevated disabled:opacity-50"
+                          >
+                            Demote Rule A to Raw
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="rounded border border-line bg-surface p-2.5 text-[11px]">
+                        <div className="font-mono font-semibold text-ink">
+                          Rule B: {c.newTitle}
+                        </div>
+                        <p className="mt-1 line-clamp-3 text-ink-muted">{c.newContent}</p>
+                        <div className="mt-2 flex gap-2">
+                          {c.newEntryId && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={async () => {
+                                setConsolidateBusyId(pairId);
+                                try {
+                                  await onUpdateEntryStatus(c.newEntryId!, 'raw');
+                                  setConsolidateNotice(`Demoted "${c.newTitle}" to Raw.`);
+                                } finally {
+                                  setConsolidateBusyId(null);
+                                }
+                              }}
+                              className="min-h-[40px] rounded border border-line-strong bg-inset px-2.5 text-[11px] font-medium text-ink hover:bg-elevated disabled:opacity-50"
+                            >
+                              Demote Rule B to Raw
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedEntryId(c.existingEntryId);
+                              setMobilePane('reader');
+                              setShowConsolidator(false);
+                            }}
+                            className="min-h-[40px] rounded border border-accent-border bg-accent-soft px-2.5 text-[11px] font-semibold text-accent-text"
+                          >
+                            Inspect in Reader
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
 
       {showNewFolderForm && (
         <form

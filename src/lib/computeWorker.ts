@@ -511,12 +511,17 @@ export function profileResourcesCore(payload: {
 
   let knowledgeBytes = 0;
   let staleRawCount = 0;
+  let compactableRawBytes = 0;
   const prefixMap = new Map<string, KnowledgeEntry[]>();
+  const entryVectors: Array<{entry: KnowledgeEntry; vec: Float32Array}> = [];
 
   for (const e of entries) {
     knowledgeBytes += (e.title.length + e.content.length + e.tags.join(',').length) * 2;
     if (getEntryStatus(e) === 'raw') {
       staleRawCount += 1;
+      if (e.content.length > 1400) {
+        compactableRawBytes += (e.content.length - 1400) * 2;
+      }
     }
     const sig = e.content.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 72);
     if (sig.length >= 16) {
@@ -524,24 +529,56 @@ export function profileResourcesCore(payload: {
       bucket.push(e);
       prefixMap.set(sig, bucket);
     }
+    if (entryVectors.length < 180) {
+      entryVectors.push({
+        entry: e,
+        vec: encodeDenseVector384(`${e.title} ${e.content.slice(0, 1000)}`),
+      });
+    }
   }
 
+  const countedDuplicateIds = new Set<string>();
   let duplicateClusterCount = 0;
   let duplicateBytes = 0;
   for (const bucket of prefixMap.values()) {
     if (bucket.length > 1) {
       duplicateClusterCount += bucket.length - 1;
       for (let i = 1; i < bucket.length; i += 1) {
+        countedDuplicateIds.add(bucket[i].id);
         duplicateBytes += (bucket[i].title.length + bucket[i].content.length) * 2;
+      }
+    }
+  }
+
+  // Also count semantic near-duplicates (cosine >= 0.88) not already matched by prefix
+  for (let i = 0; i < entryVectors.length; i += 1) {
+    const a = entryVectors[i];
+    if (countedDuplicateIds.has(a.entry.id)) continue;
+    for (let j = i + 1; j < entryVectors.length; j += 1) {
+      const b = entryVectors[j];
+      if (countedDuplicateIds.has(b.entry.id)) continue;
+      let dot = 0;
+      for (let k = 0; k < a.vec.length; k += 1) {
+        dot += a.vec[k] * b.vec[k];
+      }
+      if (dot >= 0.88) {
+        countedDuplicateIds.add(b.entry.id);
+        duplicateClusterCount += 1;
+        duplicateBytes += (b.entry.title.length + b.entry.content.length) * 2;
       }
     }
   }
 
   let repoBytes = 0;
   let largeRepoFiles = 0;
+  let largeRepoExcessBytes = 0;
   for (const f of repoFiles) {
-    repoBytes += f.content.length * 2;
-    if (f.content.length > 45_000) largeRepoFiles += 1;
+    const b = f.content.length * 2;
+    repoBytes += b;
+    if (f.content.length > 45_000) {
+      largeRepoFiles += 1;
+      largeRepoExcessBytes += Math.max(0, (f.content.length - 25_000) * 2);
+    }
   }
 
   const float32EquivalentBytes = vectorCount * EMBEDDING_DIMS * 4;
@@ -553,20 +590,20 @@ export function profileResourcesCore(payload: {
       id: 'waste-duplicates',
       category: 'duplicates',
       severity: duplicateClusterCount >= 5 ? 'high' : 'medium',
-      title: `${duplicateClusterCount} duplicate or near-identical memories found`,
+      title: `${duplicateClusterCount} duplicate or semantic near-duplicate memories found`,
       detail: 'Pruning duplicate notes tightens RAG context windows and trims IndexedDB/Supabase storage.',
       estimatedBytesSaved: duplicateBytes,
       autoFixKind: 'prune-duplicates',
     });
   }
-  if (staleRawCount >= 5) {
+  if (staleRawCount >= 5 || compactableRawBytes > 2048) {
     wasteItems.push({
       id: 'waste-raw',
       category: 'storage',
-      severity: 'low',
-      title: `${staleRawCount} unreviewed Raw captures queued`,
-      detail: 'Reviewing or compacting old Raw captures improves signal-to-noise ratio and reduces memory scans.',
-      estimatedBytesSaved: staleRawCount * 420,
+      severity: compactableRawBytes > 16_000 ? 'medium' : 'low',
+      title: `${staleRawCount} unreviewed Raw captures (${Math.max(1, Math.round(compactableRawBytes / 1024))} KB compactable)`,
+      detail: 'Reviewing or compacting oversized Raw captures improves signal-to-noise ratio and cuts payload scans.',
+      estimatedBytesSaved: compactableRawBytes > 0 ? compactableRawBytes : staleRawCount * 240,
       autoFixKind: 'compact-raw',
     });
   }
@@ -576,7 +613,7 @@ export function profileResourcesCore(payload: {
       category: 'ram',
       severity: 'medium',
       title: `Large conversation history (${Math.round(messagesBytes / 1024)} KB in state)`,
-      detail: 'Archiving old turns or keeping virtualized DOM windows saves RAM on Galaxy Tab A9+.',
+      detail: 'Trimming older chat turns from active memory saves RAM on Galaxy Tab A9+.',
       estimatedBytesSaved: Math.round(messagesBytes * 0.45),
       autoFixKind: 'trim-chat-cache',
     });
@@ -588,7 +625,7 @@ export function profileResourcesCore(payload: {
       severity: 'low',
       title: `${largeRepoFiles} oversized repo files (>45 KB) indexed in RAM`,
       detail: 'Splitting large source modules cuts peak memory and accelerates AST/diff passes.',
-      estimatedBytesSaved: largeRepoFiles * 24_000,
+      estimatedBytesSaved: largeRepoExcessBytes,
       autoFixKind: 'stage-code-opt',
     });
   }

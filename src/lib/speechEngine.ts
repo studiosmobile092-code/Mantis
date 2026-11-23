@@ -401,15 +401,133 @@ export function renameSpeakerInTranscript(
   return transcript.replace(linePrefixRe, `$1${cleanNew}$2`);
 }
 
-function cleanSentencePunctuation(raw: string): string {
-  const trimmed = raw.replace(/\s+/g, ' ').trim();
+export function cleanSentencePunctuation(raw: string): string {
+  let trimmed = raw.replace(/\s+/g, ' ').trim();
   if (!trimmed) return '';
+
+  // Fix common STT lowercase pronoun and dropped-apostrophe contractions
+  trimmed = trimmed
+    .replace(/\bi\b/g, 'I')
+    .replace(/\bim\b/gi, (m) => (m[0] === 'I' ? "I'm" : "I'm"))
+    .replace(/\bdont\b/gi, (m) => (m[0] === 'D' ? "Don't" : "don't"))
+    .replace(/\bcant\b/gi, (m) => (m[0] === 'C' ? "Can't" : "can't"))
+    .replace(/\bwont\b/gi, (m) => (m[0] === 'W' ? "Won't" : "won't"))
+    .replace(/\bdidnt\b/gi, (m) => (m[0] === 'D' ? "Didn't" : "didn't"))
+    .replace(/\bisnt\b/gi, (m) => (m[0] === 'I' ? "Isn't" : "isn't"));
+
   const capitalized = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
   if (/[.!?]$/.test(capitalized)) return capitalized;
   if (/^(who|what|where|when|why|how|is|are|can|could|do|does|did|should|would)\b/i.test(capitalized)) {
     return `${capitalized}?`;
   }
   return `${capitalized}.`;
+}
+
+export const MAX_SPEECH_BUFFER_TURNS = 240;
+export const MAX_SPEECH_BUFFER_BYTES = 160_000;
+
+export function capSpeechBuffers(
+  lines: string[],
+  turns: SpeechTurnSegment[],
+  maxTurns = MAX_SPEECH_BUFFER_TURNS,
+  maxBytes = MAX_SPEECH_BUFFER_BYTES,
+): {lines: string[]; turns: SpeechTurnSegment[]; trimmedCount: number} {
+  let nextLines = [...lines];
+  let nextTurns = [...turns];
+  let trimmedCount = 0;
+
+  while (nextTurns.length > maxTurns) {
+    nextTurns.shift();
+    if (nextLines.length > maxTurns) nextLines.shift();
+    trimmedCount += 1;
+  }
+
+  let totalBytes = nextLines.reduce((sum, l) => sum + l.length * 2, 0);
+  while (totalBytes > maxBytes && nextLines.length > 2) {
+    const removed = nextLines.shift() || '';
+    totalBytes -= removed.length * 2;
+    if (nextTurns.length > 1) nextTurns.shift();
+    trimmedCount += 1;
+  }
+
+  return {lines: nextLines, turns: nextTurns, trimmedCount};
+}
+
+export interface VoiceTrainingSftPair {
+  prompt: string;
+  response: string;
+  speakerLabel?: string;
+}
+
+/**
+ * Voice-to-Training Pipeline:
+ * Converts multi-speaker Q&A dialogues or structured monologue segments
+ * into clean supervised fine-tuning (SFT) prompt/response pairs.
+ */
+export function extractSftPairsFromTranscript(
+  transcript: string,
+  sessionTitle = 'Voice Session',
+): VoiceTrainingSftPair[] {
+  const lines = transcript
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+
+  const parsedTurns = lines.map((line) => {
+    const match = line.match(/^([A-Za-z][A-Za-z0-9 _-]{0,22}):\s+(.+)$/);
+    if (match) {
+      return {speaker: match[1].trim(), text: cleanSentencePunctuation(match[2])};
+    }
+    return {speaker: 'Speaker', text: cleanSentencePunctuation(line)};
+  });
+
+  const pairs: VoiceTrainingSftPair[] = [];
+  const distinctSpeakers = new Set(parsedTurns.map((t) => t.speaker.toLowerCase()));
+
+  if (distinctSpeakers.size >= 2) {
+    for (let i = 0; i < parsedTurns.length - 1; i += 1) {
+      const current = parsedTurns[i];
+      const next = parsedTurns[i + 1];
+      if (
+        current.speaker.toLowerCase() !== next.speaker.toLowerCase() &&
+        current.text.length >= 6 &&
+        next.text.length >= 8
+      ) {
+        pairs.push({
+          prompt: current.text,
+          response: next.text,
+          speakerLabel: `${current.speaker} → ${next.speaker}`,
+        });
+      }
+    }
+  }
+
+  // Fallback for monologue or single-speaker teaching dictation:
+  // convert topic paragraphs / explicit rule statements into instruction -> explanation pairs
+  if (pairs.length === 0) {
+    const chunkSize = parsedTurns.length > 4 ? 2 : parsedTurns.length;
+    for (let i = 0; i < parsedTurns.length; i += chunkSize) {
+      const sliceText = parsedTurns
+        .slice(i, i + chunkSize)
+        .map((t) => t.text)
+        .join(' ')
+        .trim();
+      if (sliceText.length < 18) continue;
+      const firstSentence = sliceText.split(/(?<=[.!?])\s+/)[0] || sliceText.slice(0, 72);
+      const topicPrompt =
+        /\?$/.test(firstSentence)
+          ? firstSentence
+          : `Explain the rule or note captured in "${sessionTitle}": ${firstSentence.slice(0, 88)}`;
+      pairs.push({
+        prompt: topicPrompt,
+        response: sliceText,
+        speakerLabel: parsedTurns[i]?.speaker,
+      });
+    }
+  }
+
+  return pairs.slice(0, 12);
 }
 
 export function formatTranscriptLocally(

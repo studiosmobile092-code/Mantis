@@ -37,6 +37,71 @@ export function looksLikeMantisRepo(files: RepoFile[]): boolean {
   );
 }
 
+export function hasButtonMissingType(source: string): boolean {
+  let idx = 0;
+  while (idx < source.length) {
+    const start = source.indexOf('<button', idx);
+    if (start === -1) return false;
+    const nextChar = source[start + 7] || '';
+    if (!/[\s/>]/.test(nextChar)) {
+      idx = start + 7;
+      continue;
+    }
+
+    // Scan forward across multiline JSX attributes tracking quotes and {} depth
+    let cursor = start + 7;
+    let inQuote: '"' | "'" | '`' | null = null;
+    let braceDepth = 0;
+    let tagEnd = -1;
+
+    while (cursor < source.length) {
+      const ch = source[cursor];
+      if (inQuote) {
+        if (ch === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (ch === inQuote) {
+          inQuote = null;
+        }
+      } else {
+        if (ch === '"' || ch === "'" || ch === '`') {
+          inQuote = ch;
+        } else if (ch === '{') {
+          braceDepth += 1;
+        } else if (ch === '}') {
+          braceDepth = Math.max(0, braceDepth - 1);
+        } else if (ch === '>' && braceDepth === 0) {
+          tagEnd = cursor;
+          break;
+        }
+      }
+      cursor += 1;
+    }
+
+    if (tagEnd === -1) break;
+    const openTagAttrs = source.slice(start + 7, tagEnd);
+    if (!/\btype\s*=/.test(openTagAttrs)) {
+      return true;
+    }
+    idx = tagEnd + 1;
+  }
+  return false;
+}
+
+export function hasUncommentedConsoleLog(source: string): boolean {
+  const lines = source.split('\n');
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+    const codeBeforeLineComment = line.split('//')[0];
+    if (/\bconsole\.log\s*\(/.test(codeBeforeLineComment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function fetchMantisSelfSnapshot(
   owner: string,
   repo: string,
@@ -49,7 +114,7 @@ export async function fetchMantisSelfSnapshot(
   const branch = branchOverride?.trim() || meta.defaultBranch;
 
   onProgress?.(`Listing ${owner}/${repo} source files on "${branch}"...`);
-  const treeFiles = await fetchGitHubTreeFiles(owner, repo, branch, token, 40);
+  const treeFiles = await fetchGitHubTreeFiles(owner, repo, branch, token, 70);
 
   const files: RepoFile[] = [];
   const batchSize = 5;
@@ -174,11 +239,8 @@ export function runMantisSelfAudit(
       });
     }
 
-    // 4. <button> missing explicit type= attribute
-    if (
-      (lower.endsWith('.tsx') || lower.endsWith('.jsx')) &&
-      /<button(?![^>]*\btype=)([^>]*)>/.test(content)
-    ) {
+    // 4. <button> missing explicit type= attribute (multiline-safe JSX scan)
+    if ((lower.endsWith('.tsx') || lower.endsWith('.jsx')) && hasButtonMissingType(content)) {
       findings.push({
         id: `${file.path}::button-type`,
         filePath: file.path,
@@ -258,8 +320,12 @@ export function runMantisSelfAudit(
       });
     }
 
-    // 8. Leftover console.log statements
-    if ((lower.endsWith('.ts') || lower.endsWith('.tsx')) && /^\s*console\.log\(/m.test(content)) {
+    // 8. Leftover console.log statements (non-comment)
+    if (
+      (lower.endsWith('.ts') || lower.endsWith('.tsx')) &&
+      !isDetectorFile &&
+      hasUncommentedConsoleLog(content)
+    ) {
       findings.push({
         id: `${file.path}::console-log`,
         filePath: file.path,

@@ -50,6 +50,8 @@ import {
   enqueueOfflineWrite,
   formatActionableError,
   getDefaultStatusForSource,
+  getEntryStatus,
+  hashEntryTitleContent,
   isDuplicateWithinWindow,
   isLikelyOfflineError,
   isMissingPhase6ColumnError,
@@ -84,7 +86,12 @@ import {
   computeKnowledgeGrowth,
   mineKnowledgeFromText,
 } from './lib/mantisBrain';
-import {STARTER_FOLDERS, computeMemoryReadiness, retrieveRelevantRepoFiles} from './lib/memory';
+import {
+  STARTER_FOLDERS,
+  analyzeMemoryConsolidation,
+  computeMemoryReadiness,
+  retrieveRelevantRepoFiles,
+} from './lib/memory';
 import {loadModelCard} from './lib/modelExporter';
 import {
   buildTrainingExamplesFromWorkspace,
@@ -129,6 +136,8 @@ import {
   loadEvalCases,
   loadEvalRuns,
   loadTrainingSamples,
+  measureRetrievalLatencyMs,
+  measureWorkspaceKnowledgeBytes,
   runStaticCodeSafetyCheck,
 } from './lib/trainingStore';
 import {
@@ -168,6 +177,7 @@ import type {
   ModelCardConfig,
   NeuralCheckpoint,
   NeuralTrainingExample,
+  OptimizationBenchmarkResult,
   RepoFile,
   SaveFeedbackInfo,
   ScratchSkillRule,
@@ -269,6 +279,16 @@ export default function App() {
   const [isMiningFailures, setIsMiningFailures] = useState(false);
   const [latestFlywheelResult, setLatestFlywheelResult] =
     useState<FailureMiningFlywheelResult | null>(null);
+  const [latestOptBenchmark, setLatestOptBenchmark] =
+    useState<OptimizationBenchmarkResult | null>(null);
+  const [isOptimizingBenchmark, setIsOptimizingBenchmark] = useState(false);
+  const [optRollbackSnapshot, setOptRollbackSnapshot] = useState<{
+    id: string;
+    kind: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache';
+    deletedEntries: KnowledgeEntry[];
+    modifiedEntries: KnowledgeEntry[];
+    previousMessages?: ChatMessage[];
+  } | null>(null);
   const [modelCard, setModelCard] = useState<ModelCardConfig>(() => loadModelCard());
   const [activeAssassinBrief, setActiveAssassinBrief] = useState<AssassinPrepBrief | null>(null);
   const [contradictionAlerts, setContradictionAlerts] = useState<ContradictionAlert[]>([]);
@@ -3167,55 +3187,258 @@ export default function App() {
     setActiveAssassinBrief(null);
   }
 
-  async function handleApplyMemoryOptimize(
-    kind: 'prune-duplicates' | 'compact-raw',
+  async function handleAddVoiceTrainingBatch(
+    pairs: Array<{prompt: string; response: string; speakerLabel?: string}>,
+    sourceTitle: string,
   ): Promise<number> {
-    if (!session) return 0;
-    let affected = 0;
+    if (pairs.length === 0) return 0;
+    let nextSamples = trainingSamples;
+    const neuralExtras: NeuralTrainingExample[] = [];
+    for (const pair of pairs.slice(0, 24)) {
+      const cleanPrompt = pair.prompt.trim();
+      const cleanResponse = pair.response.trim();
+      if (!cleanPrompt || !cleanResponse) continue;
+      nextSamples = addTrainingSample({
+        format: 'sft',
+        prompt: cleanPrompt,
+        chosenResponse: cleanResponse,
+        modelChosen: `Voice Capture (${pair.speakerLabel || sourceTitle})`,
+        rationale: `Extracted SFT pair from voice transcript "${sourceTitle}"`,
+        citedEntryIds: [],
+        status: 'approved',
+      });
+      neuralExtras.push({
+        prompt: cleanPrompt,
+        response: cleanResponse,
+        folderName: 'Voice Captures',
+        source: 'manual',
+        weight: 1.2,
+      });
+    }
+    setTrainingSamples(nextSamples);
+    if (neuralExtras.length > 0) {
+      pushLearningEvent(
+        'manual_teach',
+        `Voice-to-Training: ${neuralExtras.length} SFT pairs`,
+        `From "${sourceTitle}" · queued for Neural Core`,
+        'capture-voice',
+      );
+      await handleTrainNeuralBatch(
+        8,
+        neuralExtras,
+        `Voice SFT (${neuralExtras.length} pairs)`,
+      );
+    }
+    return neuralExtras.length;
+  }
 
-    if (kind === 'prune-duplicates') {
-      const seen = new Map<string, KnowledgeEntry>();
-      const toDeleteIds: string[] = [];
-      for (const e of entries) {
-        const key = `${e.title.toLowerCase().trim()}::${e.content.slice(0, 120).toLowerCase().trim()}`;
-        const existing = seen.get(key);
-        if (!existing) {
-          seen.set(key, e);
-        } else if (e.status !== 'trusted') {
-          toDeleteIds.push(e.id);
-        } else if (existing.status !== 'trusted') {
-          toDeleteIds.push(existing.id);
-          seen.set(key, e);
+  async function handleApplyMemoryOptimize(
+    kind: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache',
+  ): Promise<OptimizationBenchmarkResult | null> {
+    if (!session && kind !== 'trim-chat-cache') return null;
+
+    setIsOptimizingBenchmark(true);
+    try {
+      const liveFolders = foldersRef.current;
+      const beforeBytes =
+        kind === 'trim-chat-cache'
+          ? messagesCountBytes
+          : measureWorkspaceKnowledgeBytes(entries);
+      const beforeLatencyMs = await measureRetrievalLatencyMs({
+        entries,
+        folders: liveFolders,
+      });
+      const liveRepoLabel = connection ? `${connection.owner}/${connection.repo}` : null;
+      const beforeEval =
+        evalCases.length > 0
+          ? await executeEvalSuite({
+              mode: 'scratch',
+              cases: evalCases,
+              entries,
+              folders: liveFolders,
+              repoFiles,
+              repoLabel: liveRepoLabel,
+              activeCheckpoint: activeCheckpointRef.current,
+              trainingSamples,
+              scratchSkills,
+            })
+          : null;
+      const beforePassRate = beforeEval ? beforeEval.passRate : null;
+
+      let affected = 0;
+      let nextEntries = [...entries];
+      let nextMessages = messages;
+      const deletedEntries: KnowledgeEntry[] = [];
+      const modifiedEntries: KnowledgeEntry[] = [];
+      let previousMessagesSnapshot: ChatMessage[] | undefined;
+
+      if (kind === 'prune-duplicates') {
+        const consolidation = analyzeMemoryConsolidation(entries, liveFolders, 0.86);
+        const candidates = consolidation.duplicateClusters
+          .flatMap((cluster) => cluster.entries.slice(1))
+          .slice(0, 50);
+        const deletedIds = new Set<string>();
+        for (const candidate of candidates) {
+          const ok = await handleDeleteEntry(candidate.id);
+          if (ok) {
+            affected += 1;
+            deletedIds.add(candidate.id);
+            deletedEntries.push(candidate);
+          }
         }
+        nextEntries = entries.filter((e) => !deletedIds.has(e.id));
+      } else if (kind === 'compact-raw') {
+        const rawLarge = entries
+          .filter((e) => getEntryStatus(e) === 'raw' && e.content.length > 1400)
+          .slice(0, 30);
+        const compactedById = new Map<string, string>();
+        for (const entry of rawLarge) {
+          const compacted = `${entry.content.slice(0, 1200).trim()}…`;
+          const ok = await handleUpdateEntry(entry.id, {
+            title: entry.title,
+            content: compacted,
+            folderId: entry.folder_id,
+            tags: entry.tags,
+            status: entry.status,
+          });
+          if (ok) {
+            affected += 1;
+            modifiedEntries.push(entry);
+            compactedById.set(entry.id, compacted);
+          }
+        }
+        nextEntries = entries.map((e) =>
+          compactedById.has(e.id) ? {...e, content: compactedById.get(e.id)!} : e,
+        );
+      } else if (kind === 'trim-chat-cache') {
+        previousMessagesSnapshot = [...messages];
+        nextMessages = messages.slice(-30);
+        affected = Math.max(0, messages.length - nextMessages.length);
+        setMessages(nextMessages);
       }
-      for (const id of toDeleteIds.slice(0, 50)) {
-        const ok = await handleDeleteEntry(id);
-        if (ok) affected += 1;
+
+      const optId = `optbench-${Date.now()}`;
+      if (affected > 0) {
+        setOptRollbackSnapshot({
+          id: optId,
+          kind,
+          deletedEntries,
+          modifiedEntries,
+          previousMessages: previousMessagesSnapshot,
+        });
       }
-    } else if (kind === 'compact-raw') {
-      const rawLarge = entries.filter((e) => e.status === 'raw' && e.content.length > 1800);
-      for (const entry of rawLarge.slice(0, 30)) {
-        const compacted = `${entry.content.slice(0, 1400).trim()}…`;
-        const ok = await handleUpdateEntry(entry.id, {
+
+      const afterBytes =
+        kind === 'trim-chat-cache'
+          ? nextMessages.reduce((sum, m) => sum + m.content.length * 2, 0)
+          : measureWorkspaceKnowledgeBytes(nextEntries);
+      const afterLatencyMs = await measureRetrievalLatencyMs({
+        entries: nextEntries,
+        folders: liveFolders,
+      });
+      const afterEval =
+        evalCases.length > 0
+          ? await executeEvalSuite({
+              mode: 'scratch',
+              cases: evalCases,
+              entries: nextEntries,
+              folders: liveFolders,
+              repoFiles,
+              repoLabel: liveRepoLabel,
+              activeCheckpoint: activeCheckpointRef.current,
+              trainingSamples,
+              scratchSkills,
+              beforePassRate,
+            })
+          : null;
+      const afterPassRate = afterEval ? afterEval.passRate : null;
+
+      const bytesSaved = Math.max(0, beforeBytes - afterBytes);
+      const retainedEval =
+        beforePassRate === null || afterPassRate === null || afterPassRate >= beforePassRate;
+      const labelMap: Record<typeof kind, string> = {
+        'prune-duplicates': 'Pruned Duplicate Memories',
+        'compact-raw': 'Compacted Stale Raw Captures',
+        'trim-chat-cache': 'Trimmed Active Chat Buffer',
+      };
+
+      const benchmark: OptimizationBenchmarkResult = {
+        id: optId,
+        kind,
+        label: labelMap[kind],
+        appliedAt: new Date().toISOString(),
+        affectedCount: affected,
+        beforeBytes,
+        afterBytes,
+        bytesSaved,
+        beforeLatencyMs,
+        afterLatencyMs,
+        beforePassRate,
+        afterPassRate,
+        retainedEval,
+        rolledBack: false,
+        rollbackAvailable: affected > 0,
+      };
+      setLatestOptBenchmark(benchmark);
+
+      if (affected > 0) {
+        pushLearningEvent(
+          'self_optimized',
+          labelMap[kind],
+          `${affected} items · saved ${Math.max(1, Math.round(bytesSaved / 1024))} KB · eval ${
+            afterPassRate !== null ? `${afterPassRate}%` : 'n/a'
+          }`,
+          'profiler',
+        );
+      }
+      return benchmark;
+    } finally {
+      setIsOptimizingBenchmark(false);
+    }
+  }
+
+  async function handleRollbackMemoryOptimize(): Promise<boolean> {
+    if (!optRollbackSnapshot) return false;
+    const snap = optRollbackSnapshot;
+    if (snap.kind === 'trim-chat-cache' && snap.previousMessages) {
+      setMessages(snap.previousMessages);
+    } else if (snap.kind === 'prune-duplicates' && snap.deletedEntries.length > 0) {
+      for (const entry of snap.deletedEntries) {
+        unmarkHashSaved(hashEntryTitleContent(entry.title, entry.content));
+        await handleSaveEntry({
           title: entry.title,
-          content: compacted,
+          content: entry.content,
+          folderId: entry.folder_id,
+          tags: entry.tags,
+          source: entry.source || 'restore',
+          status: entry.status,
+          sourceUrl: entry.source_url,
+          extractedAt: entry.extracted_at,
+        });
+      }
+    } else if (snap.kind === 'compact-raw' && snap.modifiedEntries.length > 0) {
+      for (const entry of snap.modifiedEntries) {
+        await handleUpdateEntry(entry.id, {
+          title: entry.title,
+          content: entry.content,
           folderId: entry.folder_id,
           tags: entry.tags,
           status: entry.status,
         });
-        if (ok) affected += 1;
       }
     }
-
-    if (affected > 0) {
-      pushLearningEvent(
-        'self_optimized',
-        kind === 'prune-duplicates' ? 'Pruned Duplicate Memories' : 'Compacted Stale Raw Captures',
-        `${affected} entries optimized`,
-        'profiler',
-      );
-    }
-    return affected;
+    setLatestOptBenchmark((prev) =>
+      prev ? {...prev, rolledBack: true, rollbackAvailable: false} : prev,
+    );
+    setOptRollbackSnapshot(null);
+    pushLearningEvent(
+      'self_optimized',
+      'Rolled Back Optimization Snapshot',
+      `Restored state prior to ${snap.kind}`,
+      'profiler',
+    );
+    setTransientSaveFeedback({state: 'saved', message: 'Optimization rolled back ✓'});
+    return true;
   }
 
   async function handleStageCodeOptimize(filePath: string, title: string, goal: string) {
@@ -4063,6 +4286,7 @@ export default function App() {
                       onCreateFolder={handleCreateFolder}
                       onSaveEntry={handleSaveEntry}
                       onSaveCapturedEntries={handleSaveCapturedEntries}
+                      onAddVoiceTrainingBatch={handleAddVoiceTrainingBatch}
                       onBeforeHeavyTask={async (taskLabel) => {
                         await autoUnloadBeforeHeavyTask(taskLabel);
                       }}
@@ -4204,6 +4428,9 @@ export default function App() {
                         );
                       }}
                       onApplyMemoryOptimize={handleApplyMemoryOptimize}
+                      latestOptBenchmark={latestOptBenchmark}
+                      isOptimizingBenchmark={isOptimizingBenchmark}
+                      onRollbackMemoryOptimize={handleRollbackMemoryOptimize}
                       onStageCodeOptimize={handleStageCodeOptimize}
                       onCloudAsk={
                         (brainUrl.trim() || backupBrainUrl.trim()) && session.access_token

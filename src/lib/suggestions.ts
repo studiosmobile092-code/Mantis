@@ -10,6 +10,60 @@ export interface GeneratedSuggestionDraft {
   matchedRuleTitles: string[];
 }
 
+function injectMissingButtonTypes(source: string): {updated: string; count: number} {
+  let out = '';
+  let lastFlushed = 0;
+  let idx = 0;
+  let count = 0;
+
+  while (idx < source.length) {
+    const start = source.indexOf('<button', idx);
+    if (start === -1) break;
+    const nextChar = source[start + 7] || '';
+    if (!/[\s/>]/.test(nextChar)) {
+      idx = start + 7;
+      continue;
+    }
+
+    let cursor = start + 7;
+    let inQuote: '"' | "'" | '`' | null = null;
+    let braceDepth = 0;
+    let tagEnd = -1;
+
+    while (cursor < source.length) {
+      const ch = source[cursor];
+      if (inQuote) {
+        if (ch === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (ch === inQuote) inQuote = null;
+      } else {
+        if (ch === '"' || ch === "'" || ch === '`') inQuote = ch;
+        else if (ch === '{') braceDepth += 1;
+        else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+        else if (ch === '>' && braceDepth === 0) {
+          tagEnd = cursor;
+          break;
+        }
+      }
+      cursor += 1;
+    }
+
+    if (tagEnd === -1) break;
+    const attrs = source.slice(start + 7, tagEnd);
+    if (!/\btype\s*=/.test(attrs)) {
+      out += source.slice(lastFlushed, start + 7) + ' type="button"';
+      lastFlushed = start + 7;
+      count += 1;
+    }
+    idx = tagEnd + 1;
+  }
+
+  out += source.slice(lastFlushed);
+  return {updated: count > 0 ? out : source, count};
+}
+
 function applySafeCodeImprovements(
   filePath: string,
   original: string,
@@ -21,10 +75,12 @@ function applySafeCodeImprovements(
 
   // 1. TSX / HTML button elements missing explicit type="button" or type="submit"
   if (lowerPath.endsWith('.tsx') || lowerPath.endsWith('.jsx')) {
-    const buttonTagRegex = /<button(?![^>]*\btype=)([^>]*)>/g;
-    if (buttonTagRegex.test(updated)) {
-      updated = updated.replace(/<button(?![^>]*\btype=)([^>]*)>/g, '<button type="button"$1>');
-      findings.push('Added explicit type="button" to <button> tags to prevent unintended form submissions.');
+    const btnFix = injectMissingButtonTypes(updated);
+    if (btnFix.count > 0) {
+      updated = btnFix.updated;
+      findings.push(
+        `Added explicit type="button" to ${btnFix.count} <button> tag(s) to prevent unintended form submissions.`,
+      );
     }
 
     // 2. External links missing rel="noopener noreferrer"

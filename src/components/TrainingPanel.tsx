@@ -80,6 +80,7 @@ import type {
   LocalLlmAdapterSpec,
   LocalLlmEngineState,
   NeuralCheckpoint,
+  OptimizationBenchmarkResult,
   RepoFile,
   ResourceProfile,
   ScratchSkillRule,
@@ -123,7 +124,12 @@ interface TrainingPanelProps {
   onChangeEvalCases: (next: EvalCase[]) => void;
   evalRuns: EvalRunSummary[];
   onAddEvalRun: (run: EvalRunSummary) => void;
-  onApplyMemoryOptimize: (kind: 'prune-duplicates' | 'compact-raw') => Promise<number>;
+  onApplyMemoryOptimize: (
+    kind: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache',
+  ) => Promise<OptimizationBenchmarkResult | null>;
+  latestOptBenchmark?: OptimizationBenchmarkResult | null;
+  isOptimizingBenchmark?: boolean;
+  onRollbackMemoryOptimize?: () => Promise<boolean>;
   onStageCodeOptimize: (filePath: string, title: string, goal: string) => Promise<void>;
   onCloudAsk?: (prompt: string) => Promise<{replyText: string; citedEntryIds: string[]}>;
   arenaInitialPrompt?: string;
@@ -194,6 +200,9 @@ export function TrainingPanel({
   evalRuns,
   onAddEvalRun,
   onApplyMemoryOptimize,
+  latestOptBenchmark,
+  isOptimizingBenchmark = false,
+  onRollbackMemoryOptimize,
   onStageCodeOptimize,
   onCloudAsk,
   arenaInitialPrompt,
@@ -636,7 +645,7 @@ export function TrainingPanel({
               icon: ShieldCheck,
             },
             {id: 'evals', label: `Blind Eval & Mining (${evalCases.length})`, icon: Gauge},
-            {id: 'profiler', label: 'RAM & Self-Opt', icon: Wrench},
+            {id: 'profiler', label: 'Bench & Self-Opt', icon: Wrench},
           ] as const
         ).map((tab) => {
           const Icon = tab.icon;
@@ -2427,6 +2436,80 @@ export function TrainingPanel({
             </div>
           )}
 
+          {latestOptBenchmark && (
+            <div
+              className={`rounded-lg border p-3.5 text-xs ${
+                latestOptBenchmark.rolledBack
+                  ? 'border-line bg-surface text-ink-muted'
+                  : latestOptBenchmark.retainedEval
+                    ? 'border-accent-border bg-accent-soft/60 text-ink'
+                    : 'border-warn-border bg-warn-soft text-ink'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="font-mono text-[11px] font-semibold uppercase text-accent-text">
+                    {latestOptBenchmark.rolledBack
+                      ? 'Snapshot Rolled Back'
+                      : latestOptBenchmark.retainedEval
+                        ? 'Benchmark Gate Passed'
+                        : 'Eval Regression Flagged'}
+                  </span>
+                  <div className="mt-0.5 text-sm font-medium text-ink">
+                    {latestOptBenchmark.kind} · {latestOptBenchmark.affectedCount} items updated
+                  </div>
+                </div>
+                {latestOptBenchmark.rollbackAvailable &&
+                  !latestOptBenchmark.rolledBack &&
+                  onRollbackMemoryOptimize && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await onRollbackMemoryOptimize();
+                        if (ok) {
+                          setOptMessage(
+                            `Rolled back "${latestOptBenchmark.kind}" cleanly and restored snapshot.`,
+                          );
+                          await refreshProfile();
+                        }
+                      }}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded border border-warn-border bg-surface px-3 text-xs font-semibold text-warn hover:bg-elevated"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      <span>Rollback Memory Snapshot</span>
+                    </button>
+                  )}
+              </div>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <div className="rounded border border-line bg-surface px-3 py-2">
+                  <div className="text-[10px] uppercase text-ink-muted">Memory Delta</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold tabular-nums text-ink">
+                    {formatKb(latestOptBenchmark.beforeBytes)} → {formatKb(latestOptBenchmark.afterBytes)}
+                  </div>
+                  <div className="font-mono text-[10px] tabular-nums text-accent-text">
+                    Saved {formatKb(latestOptBenchmark.bytesSaved)}
+                  </div>
+                </div>
+                <div className="rounded border border-line bg-surface px-3 py-2">
+                  <div className="text-[10px] uppercase text-ink-muted">Retrieval Latency</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold tabular-nums text-ink">
+                    {latestOptBenchmark.beforeLatencyMs} ms → {latestOptBenchmark.afterLatencyMs} ms
+                  </div>
+                </div>
+                <div className="rounded border border-line bg-surface px-3 py-2">
+                  <div className="text-[10px] uppercase text-ink-muted">Blind Eval Gate</div>
+                  <div className="mt-0.5 font-mono text-xs font-semibold tabular-nums text-ink">
+                    {latestOptBenchmark.beforePassRate !== null &&
+                    latestOptBenchmark.afterPassRate !== null
+                      ? `${latestOptBenchmark.beforePassRate}% → ${latestOptBenchmark.afterPassRate}%`
+                      : 'No eval cases yet'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {profile && (
             <>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -2490,20 +2573,32 @@ export function TrainingPanel({
                       {prop.canApplyDirectly ? (
                         <button
                           type="button"
+                          disabled={isOptimizingBenchmark}
                           onClick={async () => {
-                            const kind = prop.id.includes('dup')
-                              ? 'prune-duplicates'
-                              : 'compact-raw';
-                            const affected = await onApplyMemoryOptimize(kind);
-                            setOptMessage(
-                              `Optimized memory cleanly (${affected} entries updated).`,
-                            );
+                            const kind: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache' =
+                              prop.autoFixKind === 'prune-duplicates' ||
+                              prop.autoFixKind === 'compact-raw' ||
+                              prop.autoFixKind === 'trim-chat-cache'
+                                ? prop.autoFixKind
+                                : prop.id.includes('dup')
+                                  ? 'prune-duplicates'
+                                  : 'compact-raw';
+                            const bench = await onApplyMemoryOptimize(kind);
+                            if (bench) {
+                              setOptMessage(
+                                `${kind}: ${bench.affectedCount} updated · saved ${formatKb(bench.bytesSaved)} · ${bench.beforeLatencyMs}ms → ${bench.afterLatencyMs}ms.${
+                                  !bench.retainedEval
+                                    ? ' Warning: Blind Eval dropped — click Rollback if unintended.'
+                                    : ''
+                                }`,
+                              );
+                            }
                             await refreshProfile();
                           }}
-                          className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover"
+                          className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                         >
                           <Check className="h-3.5 w-3.5" />
-                          <span>Run Optimization</span>
+                          <span>{isOptimizingBenchmark ? 'Benchmarking…' : 'Benchmark & Apply'}</span>
                         </button>
                       ) : (
                         <button

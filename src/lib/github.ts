@@ -241,7 +241,7 @@ export async function fetchGitHubFileContent(
     }
   }
 
-  const encodedPath = path
+  const encodedPath = safePath
     .split('/')
     .map((seg) => encodeURIComponent(seg))
     .join('/');
@@ -255,7 +255,7 @@ export async function fetchGitHubFileContent(
     },
   );
   if (!apiRes.ok) {
-    throw new Error(`Failed to fetch ${path} (${apiRes.status})`);
+    throw new Error(`Failed to fetch ${safePath} (${apiRes.status})`);
   }
   return await apiRes.text();
 }
@@ -269,9 +269,24 @@ function toBase64Utf8(text: string): string {
   return window.btoa(binary);
 }
 
+function fromBase64Utf8(b64: string): string {
+  const clean = b64.replace(/\s+/g, '');
+  const binary = window.atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+export function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
 /**
- * Guarded Phase 3 write action:
- * Never commits directly to the base branch. Creates a separate mantis/* branch and opens a Pull Request.
+ * Guarded Phase 5 write action:
+ * Never commits directly to the base branch. Verifies upstream base snapshot hasn't
+ * drifted silently, resets/creates a separate mantis/* branch, and opens a Pull Request.
  */
 export async function createPullRequestForApprovedSuggestion(params: {
   owner: string;
@@ -281,6 +296,8 @@ export async function createPullRequestForApprovedSuggestion(params: {
   title: string;
   rationale: string;
   proposedContent: string;
+  expectedOriginalContent?: string;
+  allowStaleOverwrite?: boolean;
   suggestionId: string;
   token: string;
 }): Promise<string> {
@@ -289,6 +306,10 @@ export async function createPullRequestForApprovedSuggestion(params: {
   }
   const safePath = sanitizeRepoPath(params.filePath);
   const safeSuggestionId = params.suggestionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 12) || 'edit';
+
+  if (!params.proposedContent.trim()) {
+    throw new Error('Proposed file content is empty — refusing to overwrite repository file.');
+  }
 
   const token = params.token.trim();
   if (!token) {
@@ -314,8 +335,33 @@ export async function createPullRequestForApprovedSuggestion(params: {
     throw new Error('Missing base branch commit SHA.');
   }
 
-  // 2. Create a guarded feature branch
-  const branchName = `mantis/suggestion-${safeSuggestionId}`;
+  const encodedPath = safePath
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/');
+
+  // 1b. Stale-SHA / upstream divergence detection before branching
+  if (params.expectedOriginalContent !== undefined && params.expectedOriginalContent.length > 0 && !params.allowStaleOverwrite) {
+    const baseFileRes = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(params.baseBranch)}`,
+      {headers},
+    );
+    if (baseFileRes.ok) {
+      const baseFileJson = (await baseFileRes.json()) as {content?: string; encoding?: string};
+      if (baseFileJson.content && baseFileJson.encoding === 'base64') {
+        const liveContent = normalizeLineEndings(fromBase64Utf8(baseFileJson.content));
+        const expected = normalizeLineEndings(params.expectedOriginalContent);
+        if (liveContent !== expected) {
+          throw new Error(
+            `Stale base snapshot: "${safePath}" changed on "${params.baseBranch}" after this diff was staged. Re-sync the repo or click Force PR if you intend to overwrite.`,
+          );
+        }
+      }
+    }
+  }
+
+  // 2. Create or reset guarded feature branch to latest baseSha
+  let branchName = `mantis/suggestion-${safeSuggestionId}`;
   const createBranchRes = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/refs`,
     {
@@ -327,15 +373,39 @@ export async function createPullRequestForApprovedSuggestion(params: {
       }),
     },
   );
-  if (!createBranchRes.ok && createBranchRes.status !== 422) {
+
+  if (createBranchRes.status === 422) {
+    // Existing branch ref — try fast/force update to latest baseSha; fallback to unique timestamp branch
+    const resetRes = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/refs/heads/${encodeURIComponent(branchName)}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({sha: baseSha, force: true}),
+      },
+    );
+    if (!resetRes.ok) {
+      branchName = `mantis/suggestion-${safeSuggestionId}-${Date.now().toString(36).slice(-4)}`;
+      const freshRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/git/refs`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            ref: `refs/heads/${branchName}`,
+            sha: baseSha,
+          }),
+        },
+      );
+      if (!freshRes.ok) {
+        throw new Error(`Failed to prepare branch ${branchName} (${freshRes.status}).`);
+      }
+    }
+  } else if (!createBranchRes.ok) {
     throw new Error(`Failed to create branch ${branchName} (${createBranchRes.status}).`);
   }
 
   // 3. Check if file already exists on that branch to include its blob SHA
-  const encodedPath = safePath
-    .split('/')
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
   let existingFileSha: string | undefined;
   const existingRes = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(branchName)}`,
@@ -346,7 +416,7 @@ export async function createPullRequestForApprovedSuggestion(params: {
     existingFileSha = existingData.sha;
   }
 
-  // 4. Commit updated file strictly to the new branch
+  // 4. Commit updated file strictly to the feature branch
   const putRes = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${encodedPath}`,
     {
@@ -374,7 +444,7 @@ export async function createPullRequestForApprovedSuggestion(params: {
         title: `[Mantis] ${params.title}`,
         head: branchName,
         base: params.baseBranch,
-        body: `Approved inside Mantis Phase 3.\n\n**Rationale:**\n${params.rationale}`,
+        body: `Approved inside Mantis.\n\n**Rationale:**\n${params.rationale}`,
       }),
     },
   );

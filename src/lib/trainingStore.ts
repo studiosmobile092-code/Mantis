@@ -705,9 +705,35 @@ export function evaluateCheckpointPromotion(
   };
 }
 
+export function measureWorkspaceKnowledgeBytes(entries: KnowledgeEntry[]): number {
+  let bytes = 0;
+  for (const e of entries) {
+    bytes += (e.title.length + e.content.length + e.tags.join(',').length) * 2;
+  }
+  return bytes;
+}
+
+export async function measureRetrievalLatencyMs(params: {
+  entries: KnowledgeEntry[];
+  folders: KnowledgeFolder[];
+}): Promise<number> {
+  const probes = ['architecture rules', 'supabase postgres rls', 'mantis coding workflow'];
+  const start = performance.now();
+  for (const q of probes) {
+    await runHybridRetrievalAsync({
+      query: q,
+      entries: params.entries,
+      folders: params.folders,
+      limit: 4,
+    });
+  }
+  const avg = (performance.now() - start) / probes.length;
+  return Math.round(avg * 100) / 100;
+}
+
 /**
- * Generates concrete, safe self-optimization proposals from RAM/Storage profiling & repo inspection.
- * Every code proposal carries a mandatory verification gate before staging.
+ * Generates concrete, safe self-optimization proposals from measured RAM/Storage profiling & repo inspection.
+ * Every proposal tracks its exact autoFixKind and real measured byte impact.
  */
 export function buildSelfOptimizationProposals(
   profile: ResourceProfile,
@@ -720,9 +746,10 @@ export function buildSelfOptimizationProposals(
       proposals.push({
         id: 'opt-dup',
         kind: 'memory-prune',
-        title: `Prune ${profile.duplicateClusterCount} Duplicate Knowledge Entries`,
+        autoFixKind: 'prune-duplicates',
+        title: `Prune ${profile.duplicateClusterCount} Duplicate / Near-Duplicate Entries`,
         rationale:
-          'Removes duplicate/redundant notes while preserving the highest-confidence copy, shrinking RAG vector footprint and Supabase payload.',
+          'Removes duplicate/redundant notes while preserving the highest-confidence canonical copy, shrinking RAG vector footprint and Supabase payload.',
         estimatedBytesSaved: waste.estimatedBytesSaved,
         targetPath: 'Supabase: knowledge_entries',
         verifiedSafe: true,
@@ -732,11 +759,25 @@ export function buildSelfOptimizationProposals(
       proposals.push({
         id: 'opt-raw',
         kind: 'memory-prune',
+        autoFixKind: 'compact-raw',
         title: `Compact ${profile.staleRawCount} Stale Raw Captures`,
         rationale:
-          'Truncates noisy boilerplate captures or promotes verified snippets so Scratch retrieval stays sharp and fast.',
+          'Truncates noisy boilerplate captures cleanly so Scratch retrieval stays sharp and fast.',
         estimatedBytesSaved: waste.estimatedBytesSaved,
         targetPath: 'Supabase: knowledge_entries (status=raw)',
+        verifiedSafe: true,
+        canApplyDirectly: true,
+      });
+    } else if (waste.autoFixKind === 'trim-chat-cache') {
+      proposals.push({
+        id: 'opt-chat-cache',
+        kind: 'memory-prune',
+        autoFixKind: 'trim-chat-cache',
+        title: 'Trim Older Chat Turn Buffer in Active RAM',
+        rationale:
+          'Archives older conversation history in UI state to keep active JS heap lean on 8 GB tablets.',
+        estimatedBytesSaved: waste.estimatedBytesSaved,
+        targetPath: 'Workspace State: chat_messages',
         verifiedSafe: true,
         canApplyDirectly: true,
       });
@@ -746,18 +787,25 @@ export function buildSelfOptimizationProposals(
   for (const file of repoFiles) {
     if (!file.path.endsWith('.ts') && !file.path.endsWith('.tsx')) continue;
     const lines = file.content.split('\n');
-    if (lines.length > 520 || /console\.log\s*\(/.test(file.content)) {
-      const hasConsole = /console\.log\s*\(/.test(file.content);
+    const consoleLines = lines.filter((l) => {
+      const t = l.trim();
+      return t && !t.startsWith('//') && /\bconsole\.log\s*\(/.test(t);
+    });
+    const hasConsole = consoleLines.length > 0;
+    if (lines.length > 520 || hasConsole) {
+      const consoleBytes = consoleLines.reduce((sum, l) => sum + l.length * 2, 0);
+      const splitExcessBytes = Math.max(0, (file.content.length - 18_000) * 2);
       proposals.push({
         id: `opt-code-${file.path}`,
         kind: 'code-opt',
+        autoFixKind: 'stage-code-opt',
         title: hasConsole
-          ? `Strip debug logging & trim runtime overhead in ${file.path}`
+          ? `Strip ${consoleLines.length} debug console.log call(s) in ${file.path}`
           : `Split ${file.path} (${lines.length} lines) into lazy-loaded modules`,
         rationale: hasConsole
           ? 'Eliminates synchronous console serialization overhead and memory retention of logged objects in production.'
           : 'Splitting oversized UI/logic modules via React.lazy cuts initial JS heap footprint on 8 GB Galaxy Tab A9+.',
-        estimatedBytesSaved: hasConsole ? 1800 : Math.round(file.content.length * 0.35),
+        estimatedBytesSaved: hasConsole ? Math.max(consoleBytes, 128) : splitExcessBytes,
         targetPath: file.path,
         verifiedSafe: true,
         canApplyDirectly: false,

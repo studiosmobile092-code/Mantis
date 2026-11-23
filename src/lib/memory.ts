@@ -1,14 +1,18 @@
 import type {
   ChatMessage,
   CodeSuggestion,
+  ContradictionAlert,
   KnowledgeEntry,
   KnowledgeFolder,
+  MemoryDuplicateCluster,
   MemoryReadinessMetrics,
   RepoFile,
   RepoMatch,
   RetrievalMatch,
+  SemanticConsolidationReport,
 } from '../types/mantis';
 import {getEntryStatus} from './knowledgeSync';
+import {encodeDenseVector384} from './vectorStore';
 
 export const STARTER_FOLDERS: Array<{name: string; description: string}> = [
   {
@@ -582,4 +586,208 @@ export function parseTagsInput(raw: string): string[] {
         .filter((t) => t.length > 0),
     ),
   );
+}
+
+function dotFloat32(a: Float32Array, b: Float32Array): number {
+  let dot = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    dot += a[i] * b[i];
+  }
+  return dot;
+}
+
+const RULE_NEG_RE = /\b(never|avoid|do not|don't|forbid|disable|deprecated|ban|stop using|must not|prohibit)\b/i;
+const RULE_NEG_PHRASE_RE =
+  /\b(never|avoid|do not|don't|forbid|disable|deprecated|ban|stop|must not|prohibit)\s+[a-z0-9_.-]*\b/gi;
+const RULE_POS_RE = /\b(always|must|required|require|prefer|use|enable|recommend|best practice|should)\b/i;
+
+function classifyRulePolarity(text: string): {hasPos: boolean; hasNeg: boolean} {
+  const lower = text.toLowerCase();
+  const hasNeg = RULE_NEG_RE.test(lower);
+  const strippedNegations = lower.replace(RULE_NEG_PHRASE_RE, ' ');
+  const hasPos = RULE_POS_RE.test(strippedNegations);
+  return {hasPos, hasNeg};
+}
+
+function statusRankWeight(entry: KnowledgeEntry): number {
+  const s = getEntryStatus(entry);
+  if (s === 'trusted') return 3;
+  if (s === 'reviewed') return 2;
+  return 1;
+}
+
+/**
+ * Semantic Memory Consolidation Scanner:
+ * 1. Clusters near-duplicate entries using 384-d cosine similarity (>= 0.86) or normalized prefix match.
+ * 2. Detects opposing rule pairs across Trusted/Reviewed entries for side-by-side resolution.
+ * 3. Lists stale Raw captures queued for review or compaction.
+ */
+export function analyzeMemoryConsolidation(
+  entries: KnowledgeEntry[],
+  folders: KnowledgeFolder[],
+  similarityThreshold = 0.86,
+): SemanticConsolidationReport {
+  const folderMap = new Map<string, string>(folders.map((f) => [f.id, f.name]));
+  const vectors = new Map<string, Float32Array>();
+  const prefixes = new Map<string, string>();
+  const staleRawEntries: KnowledgeEntry[] = [];
+
+  for (const e of entries) {
+    if (getEntryStatus(e) === 'raw') {
+      staleRawEntries.push(e);
+    }
+    vectors.set(e.id, encodeDenseVector384(`${e.title} ${e.content.slice(0, 1200)}`));
+    prefixes.set(
+      e.id,
+      e.content.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 72),
+    );
+  }
+
+  // 1. Cluster exact-prefix and semantic near-duplicates (>= 0.86 cosine)
+  const visited = new Set<string>();
+  const duplicateClusters: MemoryDuplicateCluster[] = [];
+
+  const capped = entries.slice(0, 220);
+  for (let i = 0; i < capped.length; i += 1) {
+    const base = capped[i];
+    if (visited.has(base.id)) continue;
+    const baseVec = vectors.get(base.id);
+    const basePrefix = prefixes.get(base.id) || '';
+    if (!baseVec) continue;
+
+    const clusterMembers: KnowledgeEntry[] = [base];
+    let minSim = 1;
+
+    for (let j = i + 1; j < capped.length; j += 1) {
+      const cand = capped[j];
+      if (visited.has(cand.id)) continue;
+      const candPrefix = prefixes.get(cand.id) || '';
+      const prefixExact = basePrefix.length >= 20 && basePrefix === candPrefix;
+      const candVec = vectors.get(cand.id);
+      const sim = candVec ? dotFloat32(baseVec, candVec) : 0;
+
+      if (prefixExact || sim >= similarityThreshold) {
+        clusterMembers.push(cand);
+        minSim = Math.min(minSim, prefixExact ? 0.99 : sim);
+      }
+    }
+
+    if (clusterMembers.length > 1) {
+      for (const m of clusterMembers) visited.add(m.id);
+      clusterMembers.sort(
+        (a, b) =>
+          statusRankWeight(b) - statusRankWeight(a) ||
+          (b.confidence_score || 1) - (a.confidence_score || 1) ||
+          b.content.length - a.content.length,
+      );
+      const canonical = clusterMembers[0];
+      const redundant = clusterMembers.slice(1);
+      const savedBytes = redundant.reduce(
+        (sum, r) => sum + (r.title.length + r.content.length + r.tags.join(',').length) * 2,
+        0,
+      );
+      duplicateClusters.push({
+        id: `dup-${canonical.id}`,
+        canonicalEntryId: canonical.id,
+        canonicalTitle: canonical.title,
+        canonicalStatus: getEntryStatus(canonical),
+        similarity: Math.round(minSim * 100) / 100,
+        estimatedBytesSaved: savedBytes,
+        entries: clusterMembers,
+      });
+    }
+  }
+
+  // 2. Side-by-side conflicting rules detector across reviewed/trusted notes
+  const contradictions: ContradictionAlert[] = [];
+  const seenPairs = new Set<string>();
+  const activeRules = entries.filter((e) => getEntryStatus(e) !== 'raw').slice(0, 140);
+
+  for (let i = 0; i < activeRules.length; i += 1) {
+    const a = activeRules[i];
+    const aText = `${a.title} ${a.content.slice(0, 450)}`;
+    const aPol = classifyRulePolarity(aText);
+    if (!aPol.hasPos && !aPol.hasNeg) continue;
+    const aTokens = tokenizeQuery(`${a.title} ${a.tags.join(' ')}`).filter((t) => t.length >= 3);
+    if (aTokens.length === 0) continue;
+
+    for (let j = i + 1; j < activeRules.length; j += 1) {
+      const b = activeRules[j];
+      const pairKey = a.id < b.id ? `${a.id}::${b.id}` : `${b.id}::${a.id}`;
+      if (seenPairs.has(pairKey)) continue;
+
+      const bText = `${b.title} ${b.content.slice(0, 450)}`;
+      const bPol = classifyRulePolarity(bText);
+      const opposite =
+        (aPol.hasPos && !aPol.hasNeg && bPol.hasNeg && !bPol.hasPos) ||
+        (aPol.hasNeg && !aPol.hasPos && bPol.hasPos && !bPol.hasNeg);
+      if (!opposite) continue;
+
+      const bTokens = new Set(
+        tokenizeQuery(`${b.title} ${b.tags.join(' ')}`).filter((t) => t.length >= 3),
+      );
+      const shared = aTokens.filter((t) => bTokens.has(t));
+      if (shared.length < 2) continue;
+
+      seenPairs.add(pairKey);
+      contradictions.push({
+        newEntryId: b.id,
+        newTitle: b.title,
+        newContent: b.content.slice(0, 260),
+        existingEntryId: a.id,
+        existingTitle: a.title,
+        existingContent: a.content.slice(0, 260),
+        existingFolder: (a.folder_id && folderMap.get(a.folder_id)) || 'Uncategorized',
+        existingStatus: getEntryStatus(a),
+        reason: `Opposite directives on shared topic: ${shared.slice(0, 3).join(', ')}`,
+      });
+    }
+  }
+
+  const rawBytes = staleRawEntries.reduce(
+    (sum, r) => sum + Math.max(0, r.content.length - 1200) * 2,
+    0,
+  );
+  const dupBytes = duplicateClusters.reduce((sum, c) => sum + c.estimatedBytesSaved, 0);
+
+  return {
+    measuredAt: new Date().toISOString(),
+    duplicateClusters,
+    contradictions: contradictions.slice(0, 12),
+    staleRawEntries,
+    totalReclaimableBytes: dupBytes + rawBytes,
+  };
+}
+
+export function buildMergedClusterContent(cluster: MemoryDuplicateCluster): {
+  title: string;
+  content: string;
+  tags: string[];
+  folderId: string | null;
+} {
+  const canonical = cluster.entries[0];
+  const mergedTags = Array.from(
+    new Set(cluster.entries.flatMap((e) => e.tags)),
+  );
+  const extras: string[] = [];
+  const normBase = canonical.content.trim().toLowerCase();
+  for (let i = 1; i < cluster.entries.length; i += 1) {
+    const other = cluster.entries[i];
+    const cleanOther = other.content.trim();
+    if (cleanOther && !normBase.includes(cleanOther.slice(0, 80).toLowerCase())) {
+      extras.push(`• (${other.title}): ${cleanOther}`);
+    }
+  }
+  const mergedContent =
+    extras.length > 0
+      ? `${canonical.content.trim()}\n\nMerged unique points:\n${extras.join('\n')}`
+      : canonical.content;
+
+  return {
+    title: canonical.title,
+    content: mergedContent,
+    tags: mergedTags,
+    folderId: canonical.folder_id,
+  };
 }

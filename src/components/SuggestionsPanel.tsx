@@ -13,11 +13,12 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react';
-import {type FormEvent, useMemo, useState} from 'react';
+import {type FormEvent, useEffect, useMemo, useState} from 'react';
 import {createUnifiedPatch} from '../lib/diff';
 import {
   createPullRequestForApprovedSuggestion,
   getSessionGitHubToken,
+  normalizeLineEndings,
   setSessionGitHubToken,
 } from '../lib/github';
 import {sanitizeExternalHttpUrl} from '../lib/knowledgeSync';
@@ -78,7 +79,20 @@ export function SuggestionsPanel({
   const [feedbackDrafts, setFeedbackDrafts] = useState<Record<string, string>>({});
   const [prBusyId, setPrBusyId] = useState<string | null>(null);
   const [prToken, setPrToken] = useState(() => getSessionGitHubToken());
+  const [stalePrConflictId, setStalePrConflictId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (repoFiles.length === 0) return;
+    if (!selectedFilePath || !repoFiles.some((f) => f.path === selectedFilePath)) {
+      setSelectedFilePath(repoFiles[0].path);
+    }
+  }, [repoFiles, selectedFilePath]);
+
+  const repoFileMap = useMemo(
+    () => new Map<string, RepoFile>(repoFiles.map((f) => [f.path, f])),
+    [repoFiles],
+  );
 
   const filteredSuggestions = useMemo(() => {
     if (statusFilter === 'all') return suggestions;
@@ -123,14 +137,17 @@ export function SuggestionsPanel({
         await onGenerateNewFile(newFilePath, goal);
       }
       setGoal('');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Unable to generate code suggestion.');
     } finally {
       setIsGenerating(false);
     }
   }
 
-  async function handleOpenPr(suggestion: CodeSuggestion) {
+  async function handleOpenPr(suggestion: CodeSuggestion, allowStaleOverwrite = false) {
     if (suggestion.status !== 'approved' || !connection) return;
     setActionError(null);
+    setStalePrConflictId(null);
     setPrBusyId(suggestion.id);
     try {
       const prUrl = await createPullRequestForApprovedSuggestion({
@@ -141,6 +158,8 @@ export function SuggestionsPanel({
         title: suggestion.title,
         rationale: suggestion.rationale,
         proposedContent: suggestion.proposed_content,
+        expectedOriginalContent: suggestion.original_content,
+        allowStaleOverwrite,
         suggestionId: suggestion.id,
         token: prToken,
       });
@@ -151,7 +170,11 @@ export function SuggestionsPanel({
         prUrl,
       );
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Unable to open Pull Request.');
+      const msg = err instanceof Error ? err.message : 'Unable to open Pull Request.';
+      if (msg.toLowerCase().includes('stale base snapshot')) {
+        setStalePrConflictId(suggestion.id);
+      }
+      setActionError(msg);
     } finally {
       setPrBusyId(null);
     }
@@ -377,6 +400,14 @@ export function SuggestionsPanel({
                   ? 'text-danger'
                   : 'text-warn';
 
+            const liveRepoFile = repoFileMap.get(s.file_path);
+            const isLocalSnapshotStale = Boolean(
+              liveRepoFile &&
+                s.original_content &&
+                normalizeLineEndings(liveRepoFile.content) !==
+                  normalizeLineEndings(s.original_content),
+            );
+
             return (
               <article
                 key={s.id}
@@ -392,6 +423,12 @@ export function SuggestionsPanel({
                         <>
                           <span aria-hidden="true">·</span>
                           <span className="text-accent-text">Self-Improvement</span>
+                        </>
+                      )}
+                      {isLocalSnapshotStale && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-warn">Snapshot diverged from synced repo</span>
                         </>
                       )}
                       <span aria-hidden="true">·</span>
@@ -621,7 +658,7 @@ export function SuggestionsPanel({
                           <button
                             type="button"
                             disabled={prBusyId === s.id || !prToken.trim()}
-                            onClick={() => void handleOpenPr(s)}
+                            onClick={() => void handleOpenPr(s, false)}
                             className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded bg-accent px-4 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
                           >
                             <GitPullRequest className="h-3.5 w-3.5" />
@@ -629,6 +666,16 @@ export function SuggestionsPanel({
                               {prBusyId === s.id ? 'Creating Branch & PR…' : 'Open Pull Request'}
                             </span>
                           </button>
+                          {stalePrConflictId === s.id && (
+                            <button
+                              type="button"
+                              disabled={prBusyId === s.id || !prToken.trim()}
+                              onClick={() => void handleOpenPr(s, true)}
+                              className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded border border-warn-border bg-warn-soft px-3 py-1.5 text-xs font-semibold text-warn hover:opacity-90 disabled:opacity-50"
+                            >
+                              <span>Force PR (Base Changed)</span>
+                            </button>
+                          )}
                         </div>
                       )}
 

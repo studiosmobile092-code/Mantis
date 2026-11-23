@@ -148,6 +148,27 @@ function loadImageElementFromBlob(blob: Blob): Promise<{
   });
 }
 
+const MAX_OCR_IMAGE_BYTES = 18 * 1024 * 1024;
+const OCR_RECOGNIZE_TIMEOUT_MS = 25000;
+
+async function recognizeCanvasWithTimeout(canvas: HTMLCanvasElement) {
+  const worker = await getOcrWorker();
+  let timer: number | null = null;
+  try {
+    return await Promise.race([
+      worker.recognize(canvas),
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => {
+          void terminateOcrWorker();
+          reject(new Error('OCR recognition timed out — try High-Res crop on a smaller area.'));
+        }, OCR_RECOGNIZE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
+}
+
 export async function captureVideoFrameText(
   video: HTMLVideoElement,
   zone: CaptureZone,
@@ -211,8 +232,7 @@ export async function captureVideoFrameText(
     };
   }
 
-  const worker = await getOcrWorker();
-  const result = await worker.recognize(canvas);
+  const result = await recognizeCanvasWithTimeout(canvas);
   const rawText = result.data.text || '';
   return {
     text: cleanOcrText(rawText) || rawText.trim(),
@@ -232,6 +252,13 @@ export async function recognizeImageBlob(
 ): Promise<OcrImageResult> {
   const zone: CaptureZone = options?.zone ?? 'full';
   const mode: OcrResolutionMode = options?.mode ?? 'fast';
+
+  if (fileOrBlob.size > MAX_OCR_IMAGE_BYTES) {
+    const mb = (fileOrBlob.size / (1024 * 1024)).toFixed(1);
+    throw new Error(
+      `Image file is ${mb} MB (max 18 MB for safe 8 GB tablet OCR). Crop or compress it slightly first.`,
+    );
+  }
 
   const {image, cleanup} = await loadImageElementFromBlob(fileOrBlob);
   try {
@@ -265,8 +292,7 @@ export async function recognizeImageBlob(
     ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
     const previewDataUrl = canvas.toDataURL('image/jpeg', mode === 'high_res' ? 0.85 : 0.72);
-    const worker = await getOcrWorker();
-    const result = await worker.recognize(canvas);
+    const result = await recognizeCanvasWithTimeout(canvas);
     const rawText = result.data.text || '';
 
     return {

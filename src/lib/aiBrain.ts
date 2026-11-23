@@ -1173,15 +1173,52 @@ export async function suggestCodeWithAiBrain(params: {
 const READABILITY_NOISE_LINE_RE =
   /^(skip to (main )?content|menu|navigation|search|sign in|sign up|log in|log out|subscribe|subscribe to our newsletter|cookie policy|accept all( cookies)?|reject all|manage cookies|privacy policy|terms of service|terms of use|share on (twitter|x|linkedin|facebook|reddit|email)|table of contents|back to top|was this page helpful\??|edit this page on github|advertisement|sponsored)$/i;
 
+export const MAX_CAPTURE_BLOB_CHARS = 200_000;
+const URL_CACHE_TTL_MS = 10 * 60 * 1000;
+const MAX_URL_CACHE_ENTRIES = 24;
+
+export interface UrlExtractResult {
+  kind: 'youtube' | 'article';
+  url: string;
+  title: string;
+  text: string;
+  extractedAt: string;
+  fromCache?: boolean;
+  truncated?: boolean;
+}
+
+const urlExtractionCache = new Map<string, {storedAt: number; value: UrlExtractResult}>();
+
+export function clearUrlExtractionCache(): void {
+  urlExtractionCache.clear();
+}
+
+export function enforceTextBlobLimit(
+  rawText: string,
+  maxChars = MAX_CAPTURE_BLOB_CHARS,
+): {text: string; truncated: boolean; originalLength: number} {
+  const originalLength = rawText.length;
+  if (originalLength <= maxChars) {
+    return {text: rawText, truncated: false, originalLength};
+  }
+  const clipped = rawText.slice(0, maxChars).trimEnd();
+  return {
+    text: `${clipped}\n\n[Truncated after ${Math.round(maxChars / 1000)} KB to keep 8 GB tablet RAM responsive]`,
+    truncated: true,
+    originalLength,
+  };
+}
+
 /**
  * Strips web chrome, cookie/nav boilerplate, and inline link noise from extracted article text
- * while keeping headings, lists, and fenced code blocks intact.
+ * while keeping headings, lists, and fenced code blocks + indentation intact.
  */
 export function cleanExtractedArticleText(
   raw: string,
   fallbackTitle = '',
-): {title: string; text: string} {
-  const normalized = raw.replace(/\r\n/g, '\n').trim();
+): {title: string; text: string; truncated?: boolean} {
+  const limited = enforceTextBlobLimit(raw.replace(/\r\n/g, '\n').trim(), MAX_CAPTURE_BLOB_CHARS);
+  const normalized = limited.text;
   const titleMatch = normalized.match(/^Title:\s*(.+)$/m);
   const headerTitle = titleMatch ? titleMatch[1].trim() : '';
 
@@ -1193,11 +1230,11 @@ export function cleanExtractedArticleText(
     .replace(/^Warning:.*$/gm, '')
     .trim();
 
-  // Split by fenced code blocks so code snippets are never altered
+  // Split by fenced code blocks so code snippets and indentation are never altered
   const segments = withoutMetaHeaders.split(/(```[\s\S]*?```)/g);
   const cleanedSegments = segments.map((segment, index) => {
     if (index % 2 === 1) {
-      return segment.trim();
+      return segment.replace(/\s+$/, '');
     }
 
     const lines = segment
@@ -1239,13 +1276,27 @@ export function cleanExtractedArticleText(
   return {
     title: resolvedTitle,
     text: body,
+    truncated: limited.truncated,
   };
 }
 
-function htmlToReadableText(html: string, url: string): {title: string; text: string} | null {
+function detectCodeFenceLang(preNode: Element): string {
+  const codeChild = preNode.querySelector('code');
+  const classNames = `${preNode.getAttribute('class') || ''} ${codeChild?.getAttribute('class') || ''}`;
+  const match = classNames.match(/\b(?:language-|lang-)([a-z0-9_+-]+)\b/i);
+  return match?.[1]?.toLowerCase() || '';
+}
+
+export function htmlToReadableText(
+  html: string,
+  url: string,
+): {title: string; text: string; truncated?: boolean} | null {
   try {
     if (typeof DOMParser === 'undefined') return null;
-    const doc = new DOMParser().parseFromString(html, 'text/html');
+    // Cap raw HTML payload before DOM construction to guard against multi-MB page dumps
+    const cappedHtml = html.length > 450_000 ? html.slice(0, 450_000) : html;
+    const wasHtmlTruncated = html.length > 450_000;
+    const doc = new DOMParser().parseFromString(cappedHtml, 'text/html');
     const title = doc.querySelector('title')?.textContent?.trim() || url;
 
     const removeSelectors = [
@@ -1271,19 +1322,32 @@ function htmlToReadableText(html: string, url: string): {title: string; text: st
     const blocks: string[] = [];
     mainEl.querySelectorAll('h1, h2, h3, h4, p, li, pre').forEach((node) => {
       const tag = node.tagName.toLowerCase();
+      if (tag !== 'pre' && node.closest('pre')) {
+        return;
+      }
+
+      if (tag === 'pre') {
+        const rawCode = (node.textContent || '')
+          .replace(/\r\n/g, '\n')
+          .replace(/^\n+|\n+$/g, '');
+        if (!rawCode.trim()) return;
+        const lang = detectCodeFenceLang(node);
+        blocks.push(`\`\`\`${lang}\n${rawCode}\n\`\`\``);
+        return;
+      }
+
       const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
       if (!text || text.length < 3 || READABILITY_NOISE_LINE_RE.test(text)) return;
       if (tag === 'h1') blocks.push(`# ${text}`);
       else if (tag === 'h2') blocks.push(`## ${text}`);
       else if (tag === 'h3' || tag === 'h4') blocks.push(`### ${text}`);
       else if (tag === 'li') blocks.push(`- ${text}`);
-      else if (tag === 'pre') blocks.push(`\`\`\`\n${(node.textContent || '').trim()}\n\`\`\``);
       else blocks.push(text);
     });
 
     const combined = blocks.join('\n\n').trim().slice(0, 35000);
     if (combined.length < 90) return null;
-    return {title, text: combined};
+    return {title, text: combined, truncated: wasHtmlTruncated};
   } catch {
     return null;
   }
@@ -1293,15 +1357,7 @@ function htmlToReadableText(html: string, url: string): {title: string; text: st
  * Browser fallback reader when neither Worker nor Backup Edge Function is available yet:
  * Tries CORS-friendly Markdown reader (r.jina.ai) and direct readable HTML/plain-text fetch.
  */
-async function extractUrlClientFallback(
-  url: string,
-): Promise<{
-  kind: 'youtube' | 'article';
-  url: string;
-  title: string;
-  text: string;
-  extractedAt: string;
-} | null> {
+async function extractUrlClientFallback(url: string): Promise<UrlExtractResult | null> {
   const isYt = /youtube\.com|youtu\.be/i.test(url);
   const extractedAt = new Date().toISOString();
   if (!isSafePublicTargetUrl(url)) {
@@ -1325,6 +1381,7 @@ async function extractUrlClientFallback(
             title: cleaned.title || url,
             text: cleaned.text,
             extractedAt,
+            truncated: cleaned.truncated,
           };
         }
       }
@@ -1348,6 +1405,7 @@ async function extractUrlClientFallback(
               title: parsed.title,
               text: parsed.text,
               extractedAt,
+              truncated: parsed.truncated,
             };
           }
         } else if (body.trim().length >= 90) {
@@ -1359,6 +1417,7 @@ async function extractUrlClientFallback(
               title: cleaned.title || url,
               text: cleaned.text,
               extractedAt,
+              truncated: cleaned.truncated,
             };
           }
         }
@@ -1371,21 +1430,41 @@ async function extractUrlClientFallback(
   return null;
 }
 
+function storeUrlCache(key: string, value: UrlExtractResult): UrlExtractResult {
+  if (urlExtractionCache.has(key)) {
+    urlExtractionCache.delete(key);
+  }
+  urlExtractionCache.set(key, {storedAt: Date.now(), value});
+  while (urlExtractionCache.size > MAX_URL_CACHE_ENTRIES) {
+    const oldestKey = urlExtractionCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    urlExtractionCache.delete(oldestKey);
+  }
+  return value;
+}
+
 export async function extractUrlViaBrain(params: {
   brainUrl: string;
   backupBrainUrl?: string;
   accessToken: string;
   url: string;
-}): Promise<{
-  kind: 'youtube' | 'article';
-  url: string;
-  title: string;
-  text: string;
-  extractedAt: string;
-}> {
+  bypassCache?: boolean;
+}): Promise<UrlExtractResult> {
   if (!isSafePublicTargetUrl(params.url)) {
     throw new Error('Enter a valid public http:// or https:// website or YouTube URL.');
   }
+
+  const cacheKey = params.url.trim();
+  if (!params.bypassCache) {
+    const cached = urlExtractionCache.get(cacheKey);
+    if (cached && Date.now() - cached.storedAt < URL_CACHE_TTL_MS) {
+      // Refresh LRU position
+      urlExtractionCache.delete(cacheKey);
+      urlExtractionCache.set(cacheKey, cached);
+      return {...cached.value, fromCache: true};
+    }
+  }
+
   const candidates = getOrderedCandidateEndpoints(params.brainUrl, params.backupBrainUrl);
   const extractedAt = new Date().toISOString();
 
@@ -1410,27 +1489,30 @@ export async function extractUrlViaBrain(params: {
         const kind = payload.kind || (/youtube\.com|youtu\.be/i.test(params.url) ? 'youtube' : 'article');
         if (kind === 'article') {
           const cleaned = cleanExtractedArticleText(payload.text, payload.title || params.url);
-          return {
+          return storeUrlCache(cacheKey, {
             kind,
             url: payload.url || params.url,
             title: cleaned.title || payload.title || params.url,
             text: cleaned.text || payload.text,
             extractedAt,
-          };
+            truncated: cleaned.truncated,
+          });
         }
-        return {
+        const limited = enforceTextBlobLimit(payload.text.trim(), MAX_CAPTURE_BLOB_CHARS);
+        return storeUrlCache(cacheKey, {
           kind,
           url: payload.url || params.url,
           title: payload.title || params.url,
-          text: payload.text.trim(),
+          text: limited.text,
           extractedAt,
-        };
+          truncated: limited.truncated,
+        });
       }
     } catch (backendErr) {
       // Try browser CORS-safe reader fallback for articles before failing
       const fallback = await extractUrlClientFallback(params.url);
       if (fallback) {
-        return fallback;
+        return storeUrlCache(cacheKey, fallback);
       }
       throw backendErr;
     }
@@ -1438,7 +1520,7 @@ export async function extractUrlViaBrain(params: {
 
   const fallback = await extractUrlClientFallback(params.url);
   if (fallback) {
-    return fallback;
+    return storeUrlCache(cacheKey, fallback);
   }
 
   throw new Error(

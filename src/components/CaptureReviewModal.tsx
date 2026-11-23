@@ -22,6 +22,7 @@ import {
   type OcrResolutionMode,
 } from '../lib/ocrCapture';
 import {
+  extractSftPairsFromTranscript,
   extractSpeakerLabels,
   renameSpeakerInTranscript,
 } from '../lib/speechEngine';
@@ -47,8 +48,10 @@ export interface CaptureReviewDraft {
   ocrConfidence?: number | null;
   ocrZone?: CaptureZone;
   ocrMode?: OcrResolutionMode;
+  ocrDimensions?: string | null;
   sourceFiles?: File[];
   ocrNotice?: string | null;
+  truncatedNotice?: string | null;
   micAiPolished?: boolean;
   micModelUsed?: string;
   micSpeakerCount?: number;
@@ -58,6 +61,7 @@ interface CaptureReviewModalProps {
   draft: CaptureReviewDraft | null;
   folders: KnowledgeFolder[];
   isSaving: boolean;
+  isSavingSft?: boolean;
   isRefiningOcr: boolean;
   isCategorizingFolder?: boolean;
   errorMessage?: string | null;
@@ -65,6 +69,7 @@ interface CaptureReviewModalProps {
   onRefineOcrHighRes?: (zone: CaptureZone) => Promise<void>;
   onAutoCategorizeFolder?: () => Promise<void>;
   onConfirmSave: () => Promise<void>;
+  onSaveAsTrainingSft?: () => Promise<void>;
   onDiscard: () => void;
 }
 
@@ -85,6 +90,7 @@ export function CaptureReviewModal({
   draft,
   folders,
   isSaving,
+  isSavingSft = false,
   isRefiningOcr,
   isCategorizingFolder = false,
   errorMessage,
@@ -92,6 +98,7 @@ export function CaptureReviewModal({
   onRefineOcrHighRes,
   onAutoCategorizeFolder,
   onConfirmSave,
+  onSaveAsTrainingSft,
   onDiscard,
 }: CaptureReviewModalProps) {
   const [speakerRenames, setSpeakerRenames] = useState<Record<string, string>>({});
@@ -99,18 +106,26 @@ export function CaptureReviewModal({
   useEffect(() => {
     if (!draft) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isSaving && !isRefiningOcr) {
+      if (event.key === 'Escape' && !isSaving && !isSavingSft && !isRefiningOcr) {
         event.preventDefault();
         onDiscard();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [draft, isSaving, isRefiningOcr, onDiscard]);
+  }, [draft, isSaving, isSavingSft, isRefiningOcr, onDiscard]);
 
   const speakerLabels = useMemo(
     () => (draft?.kind === 'mic' ? extractSpeakerLabels(draft.content) : []),
     [draft?.kind, draft?.content],
+  );
+
+  const estimatedSftPairsCount = useMemo(
+    () =>
+      draft?.kind === 'mic' && draft.content.trim().length > 16
+        ? extractSftPairsFromTranscript(draft.content, draft.title).length
+        : 0,
+    [draft?.kind, draft?.content, draft?.title],
   );
 
   useEffect(() => {
@@ -203,6 +218,12 @@ export function CaptureReviewModal({
 
         {/* Scrollable Body */}
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          {draft.truncatedNotice && (
+            <div className="rounded-md border border-warn-border bg-warn-soft px-3.5 py-2 text-xs text-warn">
+              {draft.truncatedNotice}
+            </div>
+          )}
+
           {/* Source URL bar for URL extractions */}
           {(() => {
             const safeSourceUrl = sanitizeExternalHttpUrl(draft.sourceUrl);
@@ -339,6 +360,7 @@ export function CaptureReviewModal({
                       </span>
                       <span className="font-mono text-[11px] text-ink-muted">
                         {draft.ocrMode === 'high_res' ? 'High-Res Refined' : 'Fast Low-Res Pass'}
+                        {draft.ocrDimensions ? ` (${draft.ocrDimensions})` : ''}
                       </span>
                     </>
                   )}
@@ -352,7 +374,11 @@ export function CaptureReviewModal({
                       disabled={isRefiningOcr || isSaving}
                       onChange={(e) => {
                         const nextZone = e.target.value as CaptureZone;
-                        onChangeDraft((prev) => ({...prev, ocrZone: nextZone}));
+                        onChangeDraft((prev) => ({
+                          ...prev,
+                          ocrZone: nextZone,
+                          ocrNotice: 'Crop region changed — click Refine High-Res to re-scan the selected region.',
+                        }));
                       }}
                       className="min-h-[42px] rounded-md border border-line-strong bg-surface px-2.5 py-1.5 text-xs text-ink focus:border-accent focus:outline-none"
                     >
@@ -613,10 +639,10 @@ export function CaptureReviewModal({
         </div>
 
         {/* Footer Actions */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-inset px-5 py-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 border-t border-line bg-inset px-5 py-3.5">
           <button
             type="button"
-            disabled={isSaving || isRefiningOcr}
+            disabled={isSaving || isSavingSft || isRefiningOcr}
             onClick={onDiscard}
             className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-line-strong bg-surface px-4 py-2 text-xs font-semibold text-ink hover:bg-elevated disabled:opacity-50"
           >
@@ -624,24 +650,53 @@ export function CaptureReviewModal({
             <span>Discard</span>
           </button>
 
-          <button
-            type="button"
-            disabled={
-              isSaving ||
-              isRefiningOcr ||
-              !draft.title.trim() ||
-              !draft.content.trim()
-            }
-            onClick={() => void onConfirmSave()}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
-          >
-            {isSaving ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <CheckCircle2 className="h-4 w-4" />
+          <div className="flex flex-wrap items-center gap-2">
+            {onSaveAsTrainingSft && estimatedSftPairsCount > 0 && (
+              <button
+                type="button"
+                disabled={
+                  isSaving ||
+                  isSavingSft ||
+                  isRefiningOcr ||
+                  !draft.title.trim() ||
+                  !draft.content.trim()
+                }
+                onClick={() => void onSaveAsTrainingSft()}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-md border border-accent-border bg-accent-soft px-4 py-2 text-xs font-semibold text-accent-text hover:opacity-90 disabled:opacity-50"
+              >
+                {isSavingSft ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                <span>
+                  {isSavingSft
+                    ? 'Generating SFT…'
+                    : `Generate ${estimatedSftPairsCount} SFT Pair${estimatedSftPairsCount === 1 ? '' : 's'}`}
+                </span>
+              </button>
             )}
-            <span>{isSaving ? 'Saving…' : 'Save to Knowledge'}</span>
-          </button>
+
+            <button
+              type="button"
+              disabled={
+                isSaving ||
+                isSavingSft ||
+                isRefiningOcr ||
+                !draft.title.trim() ||
+                !draft.content.trim()
+              }
+              onClick={() => void onConfirmSave()}
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-md bg-accent px-5 py-2 text-xs font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
+            >
+              {isSaving ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4" />
+              )}
+              <span>{isSaving ? 'Saving…' : 'Save to Knowledge'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

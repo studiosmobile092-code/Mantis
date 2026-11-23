@@ -409,6 +409,42 @@ export interface ResourceProfile {
   wasteItems: ResourceWasteItem[];
 }
 
+export interface MemoryDuplicateCluster {
+  id: string;
+  canonicalEntryId: string;
+  canonicalTitle: string;
+  canonicalStatus: KnowledgeStatus;
+  similarity: number;
+  estimatedBytesSaved: number;
+  entries: KnowledgeEntry[];
+}
+
+export interface SemanticConsolidationReport {
+  measuredAt: string;
+  duplicateClusters: MemoryDuplicateCluster[];
+  contradictions: ContradictionAlert[];
+  staleRawEntries: KnowledgeEntry[];
+  totalReclaimableBytes: number;
+}
+
+export interface OptimizationBenchmarkResult {
+  id: string;
+  kind: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache';
+  label: string;
+  appliedAt: string;
+  affectedCount: number;
+  beforeBytes: number;
+  afterBytes: number;
+  bytesSaved: number;
+  beforeLatencyMs: number;
+  afterLatencyMs: number;
+  beforePassRate: number | null;
+  afterPassRate: number | null;
+  retainedEval: boolean;
+  rolledBack?: boolean;
+  rollbackAvailable: boolean;
+}
+
 export interface ModelCardConfig {
   modelName: string;
   version: string;
@@ -466,6 +502,7 @@ export interface AssassinPrepBrief {
 export interface SelfOptimizationProposal {
   id: string;
   kind: 'memory-prune' | 'code-opt';
+  autoFixKind?: 'prune-duplicates' | 'compact-raw' | 'trim-chat-cache' | 'stage-code-opt';
   title: string;
   rationale: string;
   estimatedBytesSaved: number;

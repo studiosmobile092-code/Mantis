@@ -19,8 +19,10 @@ import {
 import {type ClipboardEvent, type FormEvent, useEffect, useMemo, useRef, useState} from 'react';
 import {
   distillWithAiBrain,
+  enforceTextBlobLimit,
   enhanceSpeechTranscriptWithAi,
   extractUrlViaBrain,
+  MAX_CAPTURE_BLOB_CHARS,
   normalizeExternalUrl,
   suggestSemanticFolderWithAi,
   type DistilledKnowledgeItem,
@@ -40,6 +42,8 @@ import {
 } from '../lib/ocrCapture';
 import {
   appendDedupedSpeechTurn,
+  capSpeechBuffers,
+  extractSftPairsFromTranscript,
   formatTranscriptLocally,
   normalizeSpeechCompareKey,
   rerankSpeechAlternatives,
@@ -72,6 +76,10 @@ interface CapturePanelProps {
     items: DistilledKnowledgeItem[],
     sourceType: string,
     meta?: {status?: KnowledgeStatus; sourceUrl?: string | null; extractedAt?: string | null},
+  ) => Promise<number>;
+  onAddVoiceTrainingBatch?: (
+    pairs: Array<{prompt: string; response: string; speakerLabel?: string}>,
+    sourceTitle: string,
   ) => Promise<number>;
   onBeforeHeavyTask?: (taskLabel: string) => Promise<void>;
   onOpenKnowledge: () => void;
@@ -243,6 +251,7 @@ export function CapturePanel({
   onCreateFolder,
   onSaveEntry,
   onSaveCapturedEntries,
+  onAddVoiceTrainingBatch,
   onBeforeHeavyTask,
   onOpenKnowledge,
 }: CapturePanelProps) {
@@ -264,6 +273,7 @@ export function CapturePanel({
   const [reviewDraft, setReviewDraft] = useState<CaptureReviewDraft | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [isSavingReview, setIsSavingReview] = useState(false);
+  const [isSavingSft, setIsSavingSft] = useState(false);
   const [isRefiningOcr, setIsRefiningOcr] = useState(false);
   const [isCategorizingFolder, setIsCategorizingFolder] = useState(false);
 
@@ -556,7 +566,7 @@ export function CapturePanel({
     if (!appended) return;
 
     lastFinalNormalizedRef.current = normKey;
-    const nextTurns: SpeechTurnSegment[] = [
+    const rawTurns: SpeechTurnSegment[] = [
       ...micTurnsRef.current,
       {
         id: `turn_${nowMs}_${micTurnsRef.current.length}`,
@@ -567,13 +577,14 @@ export function CapturePanel({
         timestampMs: nowMs,
       },
     ];
-    micTurnsRef.current = nextTurns;
-    micLinesRef.current = mergedLines;
-    setMicLines(mergedLines);
+    const capped = capSpeechBuffers(mergedLines, rawTurns);
+    micTurnsRef.current = capped.turns;
+    micLinesRef.current = capped.lines;
+    setMicLines(capped.lines);
 
     writeMicRecoveryDraft({
-      lines: mergedLines,
-      turns: nextTurns,
+      lines: capped.lines,
+      turns: capped.turns,
       title: sourceTitle,
       savedAt: new Date().toISOString(),
     });
@@ -792,6 +803,45 @@ export function CapturePanel({
     setStatusMessage('Capture discarded — nothing was saved to Knowledge.');
   }
 
+  async function handleSaveAsTrainingSft() {
+    if (!reviewDraft || !onAddVoiceTrainingBatch) return;
+    const cleanTitle = reviewDraft.title.trim();
+    const cleanContent = reviewDraft.content.trim();
+    if (!cleanTitle || !cleanContent) {
+      setReviewError('Provide both a title and transcript before converting to SFT training.');
+      return;
+    }
+
+    setIsSavingSft(true);
+    setReviewError(null);
+    try {
+      const pairs = extractSftPairsFromTranscript(cleanContent, cleanTitle);
+      if (pairs.length === 0) {
+        setReviewError(
+          'Could not extract Q&A pairs from this transcript. Add more speaker turns or save as Knowledge.',
+        );
+        return;
+      }
+      const added = await onAddVoiceTrainingBatch(pairs, cleanTitle);
+      setStatusMessage(
+        `Voice-to-Training: added ${added} scrubbed SFT Q&A sample${added === 1 ? '' : 's'} from "${cleanTitle}" and stepped neural weights.`,
+      );
+      if (reviewDraft.kind === 'mic') {
+        micLinesRef.current = [];
+        micTurnsRef.current = [];
+        setMicLines([]);
+        writeMicRecoveryDraft(null);
+        setRecoverableMicDraft(null);
+      }
+      setReviewDraft(null);
+      setReviewError(null);
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : 'Failed to convert transcript to SFT.');
+    } finally {
+      setIsSavingSft(false);
+    }
+  }
+
   async function handleRefineOcrHighRes(zone: CaptureZone) {
     if (!reviewDraft?.sourceFiles || reviewDraft.sourceFiles.length === 0) return;
     setIsRefiningOcr(true);
@@ -802,14 +852,16 @@ export function CapturePanel({
       let mergedLines: string[] = [];
       let confTotal = 0;
       let firstPreview: string | null = reviewDraft.previewDataUrl || null;
+      let firstDims: string | null = reviewDraft.ocrDimensions || null;
 
       for (let i = 0; i < reviewDraft.sourceFiles.length; i += 1) {
         const res = await recognizeImageBlob(reviewDraft.sourceFiles[i], {
           zone,
           mode: 'high_res',
         });
-        if (i === 0 && res.previewDataUrl) {
-          firstPreview = res.previewDataUrl;
+        if (i === 0) {
+          if (res.previewDataUrl) firstPreview = res.previewDataUrl;
+          firstDims = `${res.width}x${res.height}`;
         }
         confTotal += res.confidence;
         if (res.text.trim()) {
@@ -830,6 +882,7 @@ export function CapturePanel({
               ocrConfidence: avgConf,
               ocrZone: zone,
               ocrMode: 'high_res',
+              ocrDimensions: firstDims,
               ocrNotice: refinedText
                 ? 'High-resolution OCR refinement complete. Verify text below before saving.'
                 : 'No clear text detected at high resolution — you can still type or edit notes manually below.',
@@ -1042,6 +1095,11 @@ export function CapturePanel({
         saveMode: extracted.text.length > 2600 ? 'distill' : 'single',
         sourceUrl: extracted.url,
         extractedAt: extracted.extractedAt,
+        truncatedNotice: extracted.truncated
+          ? `Oversized page clipped safely at ${Math.round(MAX_CAPTURE_BLOB_CHARS / 1000)} KB to keep tablet RAM fast.`
+          : extracted.fromCache
+            ? 'Loaded instantly from local extraction cache.'
+            : null,
       });
       setExtractStepText(null);
     } catch (err) {
@@ -1054,9 +1112,11 @@ export function CapturePanel({
 
   function handleOpenPastedReview(event: FormEvent) {
     event.preventDefault();
-    const clean = pastedText.trim();
-    if (!clean) return;
+    const rawClean = pastedText.trim();
+    if (!rawClean) return;
     setErrorMessage(null);
+    const bounded = enforceTextBlobLimit(rawClean, MAX_CAPTURE_BLOB_CHARS);
+    const clean = bounded.text;
     const defaultTitle =
       sourceTitle.trim() && sourceTitle.trim() !== 'Ingested Learning Session'
         ? sourceTitle.trim()
@@ -1080,6 +1140,9 @@ export function CapturePanel({
       status: 'reviewed',
       saveMode: clean.length > 2600 ? 'distill' : 'single',
       extractedAt: new Date().toISOString(),
+      truncatedNotice: bounded.truncated
+        ? `Pasted text (${Math.round(bounded.originalLength / 1000)} KB) safely trimmed to ${Math.round(MAX_CAPTURE_BLOB_CHARS / 1000)} KB for 8 GB RAM efficiency.`
+        : null,
     });
   }
 
@@ -1095,6 +1158,7 @@ export function CapturePanel({
       let mergedLines: string[] = [];
       let confTotal = 0;
       let firstPreview: string | null = null;
+      let firstDims: string | null = null;
 
       for (let i = 0; i < list.length; i += 1) {
         const res = await recognizeImageBlob(list[i], {
@@ -1105,6 +1169,7 @@ export function CapturePanel({
         confTotal += res.confidence;
         if (i === 0) {
           firstPreview = res.previewDataUrl;
+          firstDims = `${res.width}x${res.height}`;
         }
         if (res.text.trim()) {
           mergedLines = mergeIncrementalCaption(mergedLines, res.text).mergedLines;
@@ -1147,6 +1212,7 @@ export function CapturePanel({
         ocrConfidence: avgConfidence,
         ocrZone: imageOcrZone,
         ocrMode: 'fast',
+        ocrDimensions: firstDims,
         sourceFiles: list,
         ocrNotice: recognizedText
           ? avgConfidence < 60
@@ -2212,6 +2278,7 @@ export function CapturePanel({
         draft={reviewDraft}
         folders={folders}
         isSaving={isSavingReview}
+        isSavingSft={isSavingSft}
         isRefiningOcr={isRefiningOcr}
         isCategorizingFolder={isCategorizingFolder}
         errorMessage={reviewError}
@@ -2219,6 +2286,7 @@ export function CapturePanel({
         onRefineOcrHighRes={handleRefineOcrHighRes}
         onAutoCategorizeFolder={handleAutoCategorizeReviewFolder}
         onConfirmSave={handleConfirmReviewSave}
+        onSaveAsTrainingSft={onAddVoiceTrainingBatch ? handleSaveAsTrainingSft : undefined}
         onDiscard={handleDiscardReview}
       />
     </div>
